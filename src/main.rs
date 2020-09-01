@@ -53,8 +53,6 @@ struct Options {
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
     let options = Options::from_args();
-    eprintln!("{:?}", options);
-
     let bind_addr = "0.0.0.0:0";
     let target_addr = format!("{}:3054", options.xbee_address);
     let mut socket = UdpSocket::bind(&bind_addr).await?;
@@ -101,8 +99,6 @@ async fn main() -> Result<(), std::io::Error> {
     let mut dio_set_packet = BytesMut::with_capacity(2);
     dio_config_packet.put_u16(dio_config);
     dio_set_packet.put_u16(dio_set);
-    eprintln!("{:?}", dio_config_packet);
-    eprintln!("{:?}", dio_set_packet);
     write_command(&mut socket, &target_addr, &b"OM"[..], &dio_config_packet).await?;
     write_command(&mut socket, &target_addr, &b"IO"[..], &dio_set_packet).await?;
     Ok(())
