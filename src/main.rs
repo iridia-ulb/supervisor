@@ -2,10 +2,10 @@ use tokio::net::UdpSocket;
 use tokio::net::ToSocketAddrs;
 use tokio::time::delay_for;
 
-use bytes::{BytesMut, BufMut};
+use bytes::{Bytes, BytesMut, BufMut};
 //use core::num::Wrapping;
 use core::time::Duration;
-
+use structopt::StructOpt;
 /*
 struct Xbee {
     socket: UdpSocket,
@@ -29,44 +29,80 @@ impl Xbee {
 // Add WebUI https://getmdl.io/templates/index.html (dashboard) 
 // built on top of https://github.com/seanmonstar/warp
 
+const UPCORE_POWER_BIT_INDEX: u8 = 11;
+const PIXHAWK_POWER_BIT_INDEX: u8 = 12;
+const MUX_CONTROL_BIT_INDEX: u8 = 4;
+
+#[derive(Debug, StructOpt)]
+#[structopt(name = "mns-supervisor", about = "A supervisor for the MNS experiments")]
+struct Options {
+    #[structopt(long)]
+    debug: bool,
+
+    #[structopt(long = "power-upcore")]
+    power_upcore: Option<bool>,
+
+    #[structopt(long = "power-pixhawk")]
+    power_pixhawk: Option<bool>,
+
+    #[structopt(long = "xbee-address")]
+    xbee_address: String,
+}
+
+
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
+    let options = Options::from_args();
+    eprintln!("{:?}", options);
+
     let bind_addr = "0.0.0.0:0";
-    let target_addr = "192.168.1.153:3054";
+    let target_addr = format!("{}:3054", options.xbee_address);
     let mut socket = UdpSocket::bind(&bind_addr).await?;
     socket.connect(&target_addr).await?;
     println!("Listening on: {}", socket.local_addr()?);
     
-    let pin_digital_output: u8 = 4; // DIO is a digital output (default output low)
-    let mut pin_digital_output_packet = BytesMut::with_capacity(1);
-    pin_digital_output_packet.put_u8(pin_digital_output);
+    /* disabled pin packet */
+    let pin_disable_output: Bytes = Bytes::from(&[0][..]);
+    /* use pin as digital output packet */
+    let pin_digital_output: Bytes = Bytes::from(&[4][..]);
 
-    let pin_disable_output: u8 = 0; // DIO is disabled
-    let mut pin_disable_output_packet = BytesMut::with_capacity(1);
-    pin_disable_output_packet.put_u8(pin_disable_output);
+    /* disabled pins */
+    /* these pins are the UART pins which need to be disabled for the moment */
+    /* D7 -> CTS, D6 -> RTS, P3 -> DOUT, P4 -> DIN */
+    write_command(&mut socket, &target_addr, &b"D7"[..], &pin_disable_output).await?;
+    write_command(&mut socket, &target_addr, &b"D6"[..], &pin_disable_output).await?;
+    write_command(&mut socket, &target_addr, &b"P3"[..], &pin_disable_output).await?;
+    write_command(&mut socket, &target_addr, &b"P4"[..], &pin_disable_output).await?;
+    /* digital output pins */
+    write_command(&mut socket, &target_addr, &b"D4"[..], &pin_digital_output).await?;
+    write_command(&mut socket, &target_addr, &b"P1"[..], &pin_digital_output).await?;
+    write_command(&mut socket, &target_addr, &b"P2"[..], &pin_digital_output).await?;
 
-    // bitmask: 4th, 11th, 12th bit are outputs (counting from zero)
-    let dio_config: u16 = 0b0000_1000_0000_0000;
+    let mut dio_config: u16 = 0b0000_0000_0000_0000;
+    let mut dio_set: u16 = 0b0000_0000_0000_0000;
+    /* set the mux to control the pixhawk from the up core */
+    dio_config |= 1 << MUX_CONTROL_BIT_INDEX;
+    dio_set |= 1 << MUX_CONTROL_BIT_INDEX;
+    /* set up core power if requested */
+    if let Some(power_upcore) = options.power_upcore {
+        dio_config |= 1 << UPCORE_POWER_BIT_INDEX;
+        if power_upcore {
+            dio_set |= 1 << UPCORE_POWER_BIT_INDEX;
+        }
+    }
+    /* set pixhawk power if requested */
+    if let Some(power_pixhawk) = options.power_pixhawk {
+        dio_config |= 1 << PIXHAWK_POWER_BIT_INDEX;
+        if power_pixhawk {
+            dio_set |= 1 << PIXHAWK_POWER_BIT_INDEX;
+        }
+    }
     let mut dio_config_packet = BytesMut::with_capacity(2);
-    dio_config_packet.put_u16(dio_config);
-
-    //COM_MUX_CTRL OFF
-    //Up Core Enable ON
-    //Pixhawk Enable OFF
-    let dio_set: u16 = 0b0000_1000_0000_0000;
     let mut dio_set_packet = BytesMut::with_capacity(2);
+    dio_config_packet.put_u16(dio_config);
     dio_set_packet.put_u16(dio_set);
-
-    // disable UART pins
-    // D7 -> CTS, D6 -> RTS, P3 -> DOUT, P4 -> DIN
-    write_command(&mut socket, &target_addr, &b"D7"[..], &pin_disable_output_packet).await?;
-    write_command(&mut socket, &target_addr, &b"D6"[..], &pin_disable_output_packet).await?;
-    write_command(&mut socket, &target_addr, &b"P3"[..], &pin_disable_output_packet).await?;
-    write_command(&mut socket, &target_addr, &b"P4"[..], &pin_disable_output_packet).await?;
-
-    //write_command(&mut socket, &target_addr, &b"D4"[..], &pin_config_packet).await?;
-    write_command(&mut socket, &target_addr, &b"P1"[..], &pin_digital_output_packet).await?;
-    //write_command(&mut socket, &target_addr, &b"P2"[..], &pin_config_packet).await?;
+    eprintln!("{:?}", dio_config_packet);
+    eprintln!("{:?}", dio_set_packet);
     write_command(&mut socket, &target_addr, &b"OM"[..], &dio_config_packet).await?;
     write_command(&mut socket, &target_addr, &b"IO"[..], &dio_set_packet).await?;
     Ok(())
