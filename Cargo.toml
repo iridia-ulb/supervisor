@@ -1,5 +1,5 @@
 [package]
-name = "mns-supervisor"
+name = "mns-gui"
 version = "0.1.0"
 authors = ["Michael Allwright <allsey87@gmail.com>"]
 edition = "2018"
@@ -7,7 +7,9 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bytes = "0.5.4"
-structopt = { version = "0.3", default-features = false }
+bytes = { version = "0.5.4" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0" }
 tokio = { version = "0.2", features = ["full"] }
-
+futures = { version = "0.3.5", default-features = false }
+warp = { version = "0.2", features = ["websocket"] }
