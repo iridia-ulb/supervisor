@@ -25,11 +25,10 @@ function message(data) {
 }
 */
 
-var gui_timer = null;
+var uiTimer = null;
 
 ws.onopen = function() {
-   gui_timer = setInterval(function(){ ws.send('connections'); }, 100);
-   console.log(gui_timer)
+   uiTimer = setInterval(function(){ ws.send('connections'); }, 100);
 };
 
 /*
@@ -44,61 +43,94 @@ ws.onopen = function() {
 </div>
 */
 
-ws.onmessage = function(msg) {
-   var content = JSON.parse(msg.data);
-   console.log(content)
-   
-   var title = document.getElementById('ui-title');
-   title.innerHTML = content.title;
-   
-   var container = document.getElementById('ui-container');
-
-   // remove previous children
-   while (container.firstChild) {
-      container.removeChild(container.lastChild);
+ws.onmessage = function(message) {
+   var update = JSON.parse(message.data);
+   /* Get html elements */
+   var uiTitle = document.getElementById('ui-title');
+   var uiContainer = document.getElementById('ui-container');
+   /* Update the title of the current interface */
+   if('title' in update) {
+      uiTitle.innerHTML = update.title;
    }
-   
-   var card = document.createElement('div');
-   card.setAttribute('class', 'mdl-cell mdl-cell--4-col mdl-card mdl-shadow--2dp');
+   /* iterate accross existing uiCards checking for updates,
+      if no update exists, remove the card from the uiContainer */
+   for(var uiCard of uiContainer.children) {
+      if('cards' in update && uiCard.id in update.cards) {
+         updateCard(uiCard, update.cards[uiCard.id]);
+      }
+      else {
+         uiContainer.removeChild(uiCard);
+      }
+   }
+   /* loop over the cards in the update to see if we need to
+      add any new cards */
+   if('cards' in update) {
+      var card;
+      // for X of Y
+      for(card in update.cards) {
+         if(update.cards.hasOwnProperty(card) &&
+            document.getElementById(card) == null) {           
+            var newUiCard = newCard(card,
+                                    update.cards[card].title,
+                                    update.cards[card].span,
+                                    update.cards[card].content,
+                                    update.cards[card].actions)
+            uiContainer.appendChild(newUiCard)
+         }
+      }
+   }
+};
 
+function updateCard(uiCard, update) {
+   var title =
+      uiCard.getElementsByClassName('mdl-card__title-text')[0];
+   if(title.innerHTML != update.title) {
+      title.innerHTML = update.title;
+   }
+   var content =
+      uiCard.getElementsByClassName('mdl-card__supporting-text')[0];
+   if(content.innerHTML != update.content) {
+      content.innerHTML = update.content;
+   }
+   // TODO actions
+}
+
+function newCard(id, title, span, content, actions) {
+   var card = document.createElement('div');
+   card.setAttribute('id', id);
+   card.setAttribute('class', 'mdl-cell mdl-cell--4-col mdl-card mdl-shadow--2dp');
+   
    cardTitle = document.createElement('div');
    cardTitle.setAttribute('class', 'mdl-card__title');  
    cardTitleText = document.createElement('h2');
    cardTitleText.setAttribute('class', 'mdl-card__title-text');
-   cardTitleText.innerHTML = content.cards[0].title;
+   cardTitleText.innerHTML = title;
    cardTitle.appendChild(cardTitleText);
    
    card.appendChild(cardTitle);
    
-   cardText = document.createElement('div');
-   cardText.setAttribute('class', 'mdl-card__supporting-text');
-   cardText.innerHTML = content.cards[0].text;
+   cardContent = document.createElement('div');
+   cardContent.setAttribute('class', 'mdl-card__supporting-text');
+   cardContent.innerHTML = content;
 
-   card.appendChild(cardText);
+   card.appendChild(cardContent);
    
    cardActions = document.createElement('div');
    cardActions.setAttribute('class', 'mdl-card__actions mdl-card--border');
    
-   // for each
-   cardAction = document.createElement('a');
-   cardAction.setAttribute('class', 'mdl-button mdl-button--colored mdl-js-button mdl-js-ripple-effect');
-   cardAction.innerHTML = content.cards[0].actions[0];
-   
-   cardActions.appendChild(cardAction);
+   for(var action of actions) {
+      cardAction = document.createElement('a');
+      cardAction.setAttribute('class', 'mdl-button mdl-button--colored mdl-js-button mdl-js-ripple-effect');
+      cardAction.innerHTML = action;
+      cardActions.appendChild(cardAction);
+   }
+
    card.appendChild(cardActions);
    
-   container.appendChild(card);
-
-};
-
-/*
-function addCard(card) {
-
+   return card;
 }
-*/
 
 ws.onclose = function() {
-   console.log(gui_timer)
-   clearInterval(gui_timer);
+   clearInterval(uiTimer);
 };
 

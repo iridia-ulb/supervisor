@@ -28,14 +28,14 @@ type XbeeDevices = Arc<RwLock<HashMap<[u8; 4], XbeeDevice>>>;
 struct GuiCard {
     span: u8,
     title: String,
-    text: String,
+    content: String,
     actions: Vec<String>
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 struct GuiContent {
     title: String,
-    cards: Vec<GuiCard>
+    cards: HashMap<String, GuiCard>
 }
 
 #[tokio::main]
@@ -211,20 +211,21 @@ async fn connected(ws: WebSocket, xbee_devices: XbeeDevices) {
             
             let mut content = GuiContent {
                 title: String::from("Connections"),
-                cards: Vec::new(),
+                cards: HashMap::new(),
             };
 
             for (ip, device) in xbee_devices.read().await.iter() {
                 let card = GuiCard {
                     span: 4,
                     title: format!("Xbee {:?}", ip),
-                    text: format!("{:?}", device),
+                    content: format!("{:?}", device.last_seen),
                     actions: vec![String::from("Connect")],
                 };
-                content.cards.push(card);
+                content.cards.insert(device.id.to_string(), card);
             }
 
             if let Ok(reply) = serde_json::to_string(&content) {
+                eprintln!("{} -> {}", view, reply);
                 if let Err(_) = tx.send(Ok(Message::text(reply))) {
                     // do nothing?
                 }
