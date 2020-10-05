@@ -13,3 +13,4 @@ serde_json = { version = "1.0" }
 tokio = { version = "0.2", features = ["full"] }
 futures = { version = "0.3.5", default-features = false }
 warp = { version = "0.2", features = ["websocket"] }
+uuid = { version = "0.8", features = ["v4"] }

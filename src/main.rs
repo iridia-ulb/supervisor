@@ -7,16 +7,17 @@ use warp::Filter;
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, collections::HashMap};
 
+#[derive(Debug)]
 struct XbeeDevice {
+    id: uuid::Uuid,
     last_seen: SystemTime,
 }
 
-
-impl Default for XbeeDevice {
-    fn default() -> Self { 
-        eprintln!("Creating Xbee");
-        Self {
-            last_seen: SystemTime::UNIX_EPOCH
+impl XbeeDevice {
+    fn new(id: uuid::Uuid) -> Self {
+        XbeeDevice {
+            id: id,
+            last_seen: SystemTime::UNIX_EPOCH,
         }
     }
 }
@@ -46,10 +47,10 @@ async fn main() {
     let xbee_devices_filter = warp::any().map(move || xbee_devices_clone.clone());
 
     let index_route = warp::path::end().and(warp::fs::file(
-        "/home/mallwright/Workspace/mns-gui/index.html",
+        "/home/mallwright/Workspace/mns-supervisor/index.html",
     ));
     let static_route =
-        warp::path("static").and(warp::fs::dir("/home/mallwright/Workspace/mns-gui/static"));
+        warp::path("static").and(warp::fs::dir("/home/mallwright/Workspace/mns-supervisor/static"));
     let socket_route = warp::path("socket")
         .and(warp::ws())
         .and(xbee_devices_filter)
@@ -133,8 +134,10 @@ async fn xbee_discover(
             let mut xbee_devices = xbee_devices.write().await;
             xbee_devices
                 .entry([*a,*b,*c,*d])
-                .or_default()
-                .last_seen = SystemTime::now();
+                .or_insert_with(|| {
+                    XbeeDevice::new(uuid::Uuid::new_v4())
+                }).
+                last_seen = SystemTime::now();
         }
         //eprintln!("recieved {} bytes from {:?}: {:?}", bytes, client, rx_data);
     }
@@ -215,7 +218,7 @@ async fn connected(ws: WebSocket, xbee_devices: XbeeDevices) {
                 let card = GuiCard {
                     span: 4,
                     title: format!("Xbee {:?}", ip),
-                    text: format!("{:?}", device.last_seen),
+                    text: format!("{:?}", device),
                     actions: vec![String::from("Connect")],
                 };
                 content.cards.push(card);
