@@ -28,7 +28,10 @@ function message(data) {
 var uiTimer = null;
 
 ws.onopen = function() {
-   uiTimer = setInterval(function(){ ws.send('connections'); }, 100);
+   uiTimer = setInterval(function() {
+      var msg = JSON.stringify({"Update" : "connections"})
+      ws.send(msg);
+   }, 100);
 };
 
 /*
@@ -92,7 +95,7 @@ function updateCard(uiCard, update) {
    if(content.innerHTML != update.content) {
       content.innerHTML = update.content;
    }
-   // TODO actions
+   // TODO actions?
 }
 
 function newCard(id, title, span, content, actions) {

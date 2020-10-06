@@ -5,12 +5,44 @@ use tokio::{sync::mpsc, sync::RwLock, net, time::delay_for}; //RwLock
 use warp::ws::{Message, WebSocket};
 use warp::Filter;
 use serde::{Deserialize, Serialize};
-use std::{sync::Arc, collections::HashMap};
+use std::{sync::Arc, collections::HashMap, net::Ipv4Addr};
+
+#[derive(Serialize, Deserialize, Debug)]
+enum PiPuckAction {
+    Shutdown,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+enum DroneAction {
+    UpCorePowerOn,
+    UpCoreShutdown,
+    UpCorePowerOff,
+    PixhawkPowerOn,
+    PixhawkPowerOff,
+}
+
+// serde lower case
+#[derive(Serialize, Deserialize, Debug)]
+enum GuiMessage {
+    Update(String),
+    // uuid, action
+    Drone(DroneAction),
+    // uuid, action
+    PiPuck(PiPuckAction),
+}
+
+#[derive(Debug)]
+struct Drone {
+    //uuid: uuid::Uuid,
+    xbee: XbeeDevice,
+    //upcore: UpCoreDevice
+}
 
 #[derive(Debug)]
 struct XbeeDevice {
     id: uuid::Uuid,
     last_seen: SystemTime,
+    // ip address?
 }
 
 impl XbeeDevice {
@@ -22,9 +54,9 @@ impl XbeeDevice {
     }
 }
 
-type XbeeDevices = Arc<RwLock<HashMap<[u8; 4], XbeeDevice>>>;
+type XbeeDevices = Arc<RwLock<HashMap<Ipv4Addr, XbeeDevice>>>;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Debug)]
 struct GuiCard {
     span: u8,
     title: String,
@@ -32,7 +64,7 @@ struct GuiCard {
     actions: Vec<String>
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Debug)]
 struct GuiContent {
     title: String,
     cards: HashMap<String, GuiCard>
@@ -40,6 +72,8 @@ struct GuiContent {
 
 #[tokio::main]
 async fn main() {
+
+    ////////////
     let xbee_devices = XbeeDevices::default();
     let xbee_devices_clone = xbee_devices.clone();
 
@@ -128,16 +162,13 @@ async fn xbee_discover(
     let mut rx_buffer = BytesMut::new();
     rx_buffer.resize(32, 0);
     while let Ok((bytes, client)) = socket_rx.recv_from(&mut rx_buffer).await {
-        let rx_data = &rx_buffer[0 .. bytes];
-        // TODO https://stackoverflow.com/questions/64116761
-        if let [.., a, b, c, d] = rx_data {
+        if let std::net::SocketAddr::V4(socket) = client {
             let mut xbee_devices = xbee_devices.write().await;
             xbee_devices
-                .entry([*a,*b,*c,*d])
+                .entry(socket.ip().clone()) // just use client?
                 .or_insert_with(|| {
                     XbeeDevice::new(uuid::Uuid::new_v4())
-                }).
-                last_seen = SystemTime::now();
+                }).last_seen = SystemTime::now();
         }
         //eprintln!("recieved {} bytes from {:?}: {:?}", bytes, client, rx_data);
     }
@@ -197,40 +228,49 @@ async fn connected(ws: WebSocket, xbee_devices: XbeeDevices) {
     }));
 
     // this loop is basically our gui updating thread
-    while let Some(result) = user_ws_rx.next().await {
-        let msg = match result {
-            Ok(msg) => msg,
-            Err(e) => {
-                eprintln!("websocket error: {}", e);
+    while let Some(data) = user_ws_rx.next().await {
+        let message = match data {
+            Ok(message) => message,
+            Err(error) => {
+                eprintln!("websocket receive error {}", error);
                 break;
             }
         };
 
-        if let Ok(view) = msg.to_str() {
-            eprintln!("selected view = {}", view);
+        if let Ok(message) = message.to_str() {
+            if let Ok(action) = serde_json::from_str::<GuiMessage>(message) {
+                match action {
+                    GuiMessage::Update(view) => {
+                        eprintln!("selected view = {}", view);
             
-            let mut content = GuiContent {
-                title: String::from("Connections"),
-                cards: HashMap::new(),
-            };
-
-            for (ip, device) in xbee_devices.read().await.iter() {
-                let card = GuiCard {
-                    span: 4,
-                    title: format!("Xbee {:?}", ip),
-                    content: format!("{:?}", device.last_seen),
-                    actions: vec![String::from("Connect")],
-                };
-                content.cards.insert(device.id.to_string(), card);
-            }
-
-            if let Ok(reply) = serde_json::to_string(&content) {
-                eprintln!("{} -> {}", view, reply);
-                if let Err(_) = tx.send(Ok(Message::text(reply))) {
-                    // do nothing?
+                        let mut content = GuiContent {
+                            title: String::from("Connections"),
+                            cards: HashMap::new(),
+                        };
+            
+                        for (ip, device) in xbee_devices.read().await.iter() {
+                            let card = GuiCard {
+                                span: 4,
+                                title: format!("Xbee {:?}", ip),
+                                content: format!("{:?}", device.last_seen),
+                                actions: vec![String::from("Connect")],
+                            };
+                            content.cards.insert(device.id.to_string(), card);
+                        }
+            
+                        if let Ok(reply) = serde_json::to_string(&content) {
+                            eprintln!("{} -> {}", view, reply);
+                            if let Err(_) = tx.send(Ok(Message::text(reply))) {
+                                // do nothing?
+                            }
+                        }
+                    },
+                    _ => {
+                        // TODO handle drone and pipuck messages
+                    }
                 }
             }
-        }       
+        }
     }
 
     eprintln!("websocket disconnected!");
