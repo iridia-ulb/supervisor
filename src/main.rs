@@ -1,7 +1,7 @@
 use bytes::{BytesMut, BufMut};
 use std::time::{Duration, SystemTime};
 use futures::{FutureExt, StreamExt};
-use tokio::{sync::mpsc, sync::RwLock, net, time::delay_for}; //RwLock
+use tokio::{sync::mpsc, sync::RwLock, time::delay_for}; //RwLock
 use warp::ws::{Message, WebSocket};
 use warp::Filter;
 use serde::{Deserialize, Serialize};
@@ -33,28 +33,28 @@ enum GuiMessage {
 
 #[derive(Debug)]
 struct Drone {
-    //uuid: uuid::Uuid,
-    xbee: XbeeDevice,
+    uuid: uuid::Uuid,
+    xbee: Xbee,
     //upcore: UpCoreDevice
 }
 
 #[derive(Debug)]
-struct XbeeDevice {
-    id: uuid::Uuid,
+struct Xbee {
+    ip: Ipv4Addr,
     last_seen: SystemTime,
     // ip address?
 }
 
-impl XbeeDevice {
-    fn new(id: uuid::Uuid) -> Self {
-        XbeeDevice {
-            id: id,
-            last_seen: SystemTime::UNIX_EPOCH,
+impl Xbee {
+    fn new(ip: Ipv4Addr) -> Self {
+        Xbee {
+            ip: ip,
+            last_seen: SystemTime::now(),
         }
     }
 }
 
-type XbeeDevices = Arc<RwLock<HashMap<Ipv4Addr, XbeeDevice>>>;
+type Drones = Arc<RwLock<Vec<Drone>>>;
 
 #[derive(Serialize, Debug)]
 struct GuiCard {
@@ -74,11 +74,11 @@ struct GuiContent {
 async fn main() {
 
     ////////////
-    let xbee_devices = XbeeDevices::default();
-    let xbee_devices_clone = xbee_devices.clone();
+    let drones = Drones::default();
+    let drones_clone = drones.clone();
 
     // why does this clone of the hash map need to be wrapped up as warp filter?
-    let xbee_devices_filter = warp::any().map(move || xbee_devices_clone.clone());
+    let drones_filter = warp::any().map(move || drones_clone.clone());
 
     let index_route = warp::path::end().and(warp::fs::file(
         "/home/mallwright/Workspace/mns-supervisor/index.html",
@@ -87,10 +87,10 @@ async fn main() {
         warp::path("static").and(warp::fs::dir("/home/mallwright/Workspace/mns-supervisor/static"));
     let socket_route = warp::path("socket")
         .and(warp::ws())
-        .and(xbee_devices_filter)
-        .map(|ws: warp::ws::Ws, xbee_devices : XbeeDevices| {
+        .and(drones_filter)
+        .map(|ws: warp::ws::Ws, drones : Drones| {
             // This will call our function if the handshake succeeds.
-            ws.on_upgrade(move |socket| connected(socket, xbee_devices))
+            ws.on_upgrade(move |socket| connected(socket, drones))
         });
 
     // does the 'async move' all referenced variables into the lambda?
@@ -101,11 +101,7 @@ async fn main() {
     });
 
     let task_discover = tokio::task::spawn(async move {
-        let bind_addr =
-            std::net::SocketAddr::from(([0, 0, 0, 0], 0));
-        let bcast_addr =
-            std::net::SocketAddr::from(([192, 168, 1, 255], 3054));
-        xbee_discover(bind_addr, bcast_addr, xbee_devices).await
+        xbee_discover(drones).await
     });
 
     let (server_task_res, discover_task_res) = tokio::join!(task_server, task_discover);
@@ -124,23 +120,25 @@ async fn main() {
     }
 }
 
-async fn xbee_discover(
-    bind_addr: std::net::SocketAddr,
-    bcast_addr: std::net::SocketAddr,
-    xbee_devices: XbeeDevices
-) -> Result<(), std::io::Error> {
+// should this be a "member" of the drones class?
+// since we have to search through the drones, it doesn't really feel like it
+async fn xbee_discover(drones: Drones) -> Result<(), std::io::Error> {
+    let bind_addr =
+        std::net::SocketAddr::from(([0, 0, 0, 0], 0));
+    let bcast_addr =
+        std::net::SocketAddr::from(([192, 168, 1, 255], 3054));
     /* create a new socket by binding */
-    let socket = net::UdpSocket::bind(bind_addr).await?;
+    let socket = tokio::net::UdpSocket::bind(bind_addr).await?;
     println!("Listening on: {}", socket.local_addr()?);
     socket.set_broadcast(true)?;
 
     let (mut socket_rx, mut socket_tx) = socket.split();
 
     /* start a tasklet to periodically send broadcasts to Xbee modules */
-    let xbee_devices_clone = xbee_devices.clone();
+    let drones_clone = drones.clone();
 
     let handle = tokio::task::spawn(async move { 
-        let xbee_devices = xbee_devices_clone;
+        let drones = drones_clone;
         loop {
             delay_for(Duration::from_millis(100)).await;
             if let Err(err) = xbee_command(&mut socket_tx, &bcast_addr, &b"MY"[..], &[]).await {
@@ -148,8 +146,8 @@ async fn xbee_discover(
                 return err;
             }
             /* remove xbee devices which have not responded for more than half a second */
-            xbee_devices.write().await.retain(|_, device| {
-                if let Ok(duration) = SystemTime::now().duration_since(device.last_seen) {
+            drones.write().await.retain(|drone| {
+                if let Ok(duration) = SystemTime::now().duration_since(drone.xbee.last_seen) {
                     duration.as_secs_f32() < 0.5
                 }
                 else {
@@ -163,14 +161,22 @@ async fn xbee_discover(
     rx_buffer.resize(32, 0);
     while let Ok((bytes, client)) = socket_rx.recv_from(&mut rx_buffer).await {
         if let std::net::SocketAddr::V4(socket) = client {
-            let mut xbee_devices = xbee_devices.write().await;
-            xbee_devices
-                .entry(socket.ip().clone()) // just use client?
-                .or_insert_with(|| {
-                    XbeeDevice::new(uuid::Uuid::new_v4())
-                }).last_seen = SystemTime::now();
+            let mut drones = drones.write().await;
+            if let Some(drone) = drones
+                .iter_mut()
+                .find(|drone| {
+                    socket.ip() == &drone.xbee.ip
+                }) {
+                /* update the xbee's last seen timestamp */
+                drone.xbee.last_seen = SystemTime::now();
+            }
+            else {
+                drones.push(Drone {
+                    xbee: Xbee::new(socket.ip().clone()),
+                    uuid: uuid::Uuid::new_v4()
+                });
+            }
         }
-        //eprintln!("recieved {} bytes from {:?}: {:?}", bytes, client, rx_data);
     }
    
     match handle.await {
@@ -182,7 +188,7 @@ async fn xbee_discover(
 }
 
 async fn xbee_command(
-    socket: &mut net::udp::SendHalf,
+    socket: &mut tokio::net::udp::SendHalf,
     target: &std::net::SocketAddr,
     command: &[u8],
     arguments: &[u8],
@@ -212,7 +218,7 @@ async fn xbee_command(
     socket.send_to(&packet, target).await
 }
 
-async fn connected(ws: WebSocket, xbee_devices: XbeeDevices) {
+async fn connected(ws: WebSocket, drones: Drones) {
     // Use a counter to assign a new unique ID for this user.
 
     eprintln!("websocket connected!");
@@ -248,14 +254,14 @@ async fn connected(ws: WebSocket, xbee_devices: XbeeDevices) {
                             cards: HashMap::new(),
                         };
             
-                        for (ip, device) in xbee_devices.read().await.iter() {
+                        for drone in drones.read().await.iter() {
                             let card = GuiCard {
                                 span: 4,
-                                title: format!("Xbee {:?}", ip),
-                                content: format!("{:?}", device.last_seen),
+                                title: String::from("Drone"),
+                                content: format!("{:?}", drone),
                                 actions: vec![String::from("Connect")],
                             };
-                            content.cards.insert(device.id.to_string(), card);
+                            content.cards.insert(drone.uuid.to_string(), card);
                         }
             
                         if let Ok(reply) = serde_json::to_string(&content) {
