@@ -14,7 +14,8 @@ thebutton.addEventListener('ValueChange', function() {
 */
 
 theButton.onclick = function() {
-   ws.send('1');
+   //var msg = JSON.stringify({'emergency' : '???'})
+   //ws.send('1');
 }
 
 /*
@@ -29,9 +30,13 @@ var uiTimer = null;
 
 ws.onopen = function() {
    uiTimer = setInterval(function() {
-      var msg = JSON.stringify({"Update" : "connections"})
+      var msg = JSON.stringify({'update' : 'connections'})
       ws.send(msg);
    }, 100);
+};
+
+ws.onclose = function() {
+   clearInterval(uiTimer);
 };
 
 /*
@@ -125,6 +130,10 @@ function newCard(id, title, span, content, actions) {
       cardAction = document.createElement('a');
       cardAction.setAttribute('class', 'mdl-button mdl-button--colored mdl-js-button mdl-js-ripple-effect');
       cardAction.innerHTML = action;
+      cardAction.onclick = function() {
+         var msg = JSON.stringify({'drone' : [id, "Power on UpCore"]})
+         ws.send(msg);
+      };
       cardActions.appendChild(cardAction);
    }
 
@@ -133,7 +142,5 @@ function newCard(id, title, span, content, actions) {
    return card;
 }
 
-ws.onclose = function() {
-   clearInterval(uiTimer);
-};
+
 
