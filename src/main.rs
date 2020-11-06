@@ -211,6 +211,19 @@ async fn connected(ws: WebSocket, drones: Drones, pipucks: PiPucks) {
                             };
                             content.cards.insert(drone.uuid.to_string(), card);
                         }
+
+                        for pipuck in pipucks.read().await.iter() {
+                            let card = GuiCard {
+                                span: 4,
+                                title: String::from("PiPuck"),
+                                content: format!("{:?}", pipuck),
+                                // the actions depend on the state of the drone
+                                // the action part of the message must contain
+                                // the uuid, action name, and optionally arguments
+                                actions: vec![], //pipuck.actions(),
+                            };
+                            content.cards.insert(pipuck.uuid.to_string(), card);
+                        }
             
                         if let Ok(reply) = serde_json::to_string(&content) {
                             //eprintln!("{} -> {}", view, reply);

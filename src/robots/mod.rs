@@ -67,12 +67,6 @@ pub async fn discover(mut addr_rx: UnboundedReceiver<Ipv4Addr>,
     }
 }
 
-pub enum Association {
-    Unassociated,
-    Associated(Device),
-    InUse,
-}
-
 async fn probe(addr: Ipv4Addr, delay: Option<Duration>) -> (Ipv4Addr, Result<Device>) {
     /* wait delay before probing */
     if let Some(delay) = delay {

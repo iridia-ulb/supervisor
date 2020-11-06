@@ -20,7 +20,7 @@ pub enum Action {
 
 #[derive(Debug)]
 pub struct PiPuck {
-    uuid: uuid::Uuid,
+    pub uuid: uuid::Uuid,
     ssh: ssh::Device,
 }
 
@@ -32,7 +32,7 @@ impl PiPuck {
         }
     }
 
-    fn actions(&self) -> Vec<Action> {
+    pub fn actions(&self) -> Vec<Action> {
         vec![Action::RpiShutdown, Action::RpiReboot]
     }
 }
