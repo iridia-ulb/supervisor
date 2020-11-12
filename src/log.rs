@@ -4,35 +4,31 @@ use std::io::{BufWriter, Write};
 use serde::Serialize;
 
 #[derive(Serialize)]
-enum Message {
+enum Event {
     Optitrack {},
-    RobotTx {
-        to: String,
-        from: String,
-        content: Vec<u8>,
-    },
+    RobotMessage(Bytes),
     Test {
         hello: String,
     },
 }
 
 #[derive(Serialize)]
-struct Log {
+struct Entry {
     timestamp: Duration,
-    message: Message,
+    event: Event,
 }
 
 fn log() -> std::io::Result<()> {
     let start = Instant::now();
 
-    let test = Log {
+    let test = Entry {
         timestamp: start.elapsed(),
-        message: Message::Test{ hello : format!("hello python")}
+        event: Event::Test{ hello : format!("hello python")}
     };
 
-    let test2 = Log {
+    let test2 = Entry {
         timestamp: start.elapsed(),
-        message: Message::Test{ hello : format!("bye python")}
+        event: Event::Test{ hello : format!("bye python")}
     };
 
     let output = File::create("test.pickle").expect("Unable to create file");
