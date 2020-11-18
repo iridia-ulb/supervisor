@@ -47,10 +47,12 @@ impl Device {
         }
     }
 
+    /*
     pub async fn set_hostname(&mut self, hostname: &str) -> Result<bool> {
         // use hostname XYZ and not hostnamectl XYZ since the former is not persistent
         Ok(false)
     }
+    */
     
     // TODO: perhaps change this into a generic exec method
     pub async fn hostname(&mut self) -> Result<String> {
