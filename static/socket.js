@@ -30,7 +30,7 @@ var uiTimer = null;
 
 ws.onopen = function() {
    uiTimer = setInterval(function() {
-      var msg = JSON.stringify({'update' : 'connections'})
+      var msg = JSON.stringify({'update' : currentWebuiView})
       ws.send(msg);
    }, 100);
 };
@@ -38,6 +38,13 @@ ws.onopen = function() {
 ws.onclose = function() {
    clearInterval(uiTimer);
 };
+
+var currentWebuiView = 'connections'
+
+function setView(webuiView) {
+   currentWebuiView = webuiView;
+   document.getElementById('ui-container').innerHTML = '';
+}
 
 /*
 <div class="mdl-cell mdl-cell--4-col mdl-card mdl-shadow--2dp">

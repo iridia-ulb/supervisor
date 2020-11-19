@@ -1,6 +1,7 @@
 use thrussh_keys::key::PublicKey;
 use futures::{future, future::Ready};
 use std::{sync::Arc, net::Ipv4Addr};
+use tokio::sync::Mutex;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -8,6 +9,8 @@ pub enum Error {
     ConnectionFailure,
     #[error("Could not login to server")]
     LoginFailure,
+    #[error("Could not communicate with server")]
+    IoFailure,
     /*
     #[error("Connection timed out")]
     Timeout,
@@ -18,7 +21,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 pub struct Device {
     pub addr: Ipv4Addr,
-    handle: thrussh::client::Handle
+    handle: thrussh::client::Handle,
+    shell: Mutex<thrussh::client::Channel>
 }
 
 impl std::fmt::Debug for Device {
@@ -34,17 +38,19 @@ impl Device {
         let config : thrussh::client::Config = Default::default();
         let config = Arc::new(config);
         let callbacks = Callbacks {};
-        let mut handle = thrussh::client::connect(config, (addr, 22), callbacks)
-            .await
+        let mut handle = 
+            thrussh::client::connect(config, (addr, 22), callbacks).await
             .map_err(|_| Error::ConnectionFailure)?;
-        if handle.authenticate_password("root", "")
-            .await
-            .map_err(|_| Error::ConnectionFailure)? {
-            Ok(Device { addr, handle })
+        let login_success = handle.authenticate_password("root", "").await
+            .map_err(|_| Error::ConnectionFailure)?;
+        if login_success == false {
+            return Err(Error::LoginFailure);
         }
-        else {
-            Err(Error::LoginFailure)
-        }
+        let mut shell = handle.channel_open_session().await
+            .map_err(|_| Error::IoFailure)?;
+        shell.request_shell(true).await
+            .map_err(|_| Error::IoFailure)?;
+        Ok(Device { addr, handle, shell: Mutex::new(shell) })
     }
 
     /*
@@ -53,25 +59,37 @@ impl Device {
         Ok(false)
     }
     */
-    
-    // TODO: perhaps change this into a generic exec method
-    pub async fn hostname(&mut self) -> Result<String> {
-        let mut channel = self.handle.channel_open_session()
-            .await
-            .map_err(|_| Error::ConnectionFailure)?;
-        channel.exec(true, "hostname")
-            .await
-            .map_err(|_| Error::ConnectionFailure)?;
-        while let Some(message) = channel.wait().await {
-            if let thrussh::ChannelMsg::Data { data } = message {
-                if let Ok(mut hostname) = String::from_utf8(data.to_vec()) {
-                    /* strip away any newlines/spacing */
-                    hostname.retain(|c| !c.is_whitespace());
-                    return Ok(hostname);
+
+    pub async fn exec<A: Into<String>>(&mut self, command: A, want_reply: bool) -> Result<Option<String>> {
+        /* lock the shell */
+        let mut shell = self.shell.lock().await;
+        /* write command */
+        shell.data(format!("{}\n", command.into()).as_bytes()).await
+            .map_err(|_| Error::IoFailure)?;
+        /* get reply */
+        if want_reply {
+            while let Some(message) = shell.wait().await {
+                if let thrussh::ChannelMsg::Data { data } = message {
+                    if let Ok(data) = String::from_utf8(data.to_vec()) {
+                        return Ok(Some(data));
+                    }
                 }
             }
+            return Err(Error::IoFailure);
         }
-        return Err(Error::ConnectionFailure)
+        Ok(None)       
+    }
+
+    pub async fn hostname(&mut self) -> Result<String> {
+        match self.exec("hostname", true).await? {
+            Some(mut hostname) => {
+                hostname.retain(|c| !c.is_whitespace());
+                Ok(hostname)
+            }
+            None => {
+                Err(Error::IoFailure)
+            }
+        }        
     }
 }
 

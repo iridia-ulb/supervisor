@@ -21,7 +21,7 @@ pub enum Action {
 #[derive(Debug)]
 pub struct PiPuck {
     pub uuid: uuid::Uuid,
-    ssh: ssh::Device,
+    pub ssh: ssh::Device,
 }
 
 impl PiPuck {

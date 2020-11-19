@@ -13,6 +13,8 @@ use tokio::{
     sync::{ mpsc },
 };
 
+use regex::Regex;
+
 use super::{
     robots::{
         drone,
@@ -95,10 +97,29 @@ pub async fn run(ws: ws::WebSocket, drones: Robots<drone::Drone>, pipucks: Robot
                     Request::Update(view) => {
                         let reply = match &view[..] {
                             "connections" => {
-                                let cards = render_connections(&drones, &pipucks).await;
-                                let title = String::from("Connections");
-                                Ok(Reply { title, cards})
-                            }
+                                Ok(Reply {
+                                    title: String::from("Connections"),
+                                    cards: connections(&drones, &pipucks).await
+                                })
+                            },
+                            "diagnostics" => {
+                                Ok(Reply {
+                                    title: String::from("Diagnostics"),
+                                    cards: diagnostics(&drones, &pipucks).await
+                                })
+                            },
+                            "experiment" => {
+                                Ok(Reply {
+                                    title: String::from("Experiment"),
+                                    cards: experiment(&drones, &pipucks).await
+                                })
+                            },
+                            "optitrack" => {
+                                Ok(Reply {
+                                    title: String::from("Optitrack"),
+                                    cards: optitrack(&drones, &pipucks).await
+                                })
+                            },
                             _ => Err(Error::BadRequest),
                         };
                         let result = reply
@@ -145,7 +166,60 @@ pub async fn run(ws: ws::WebSocket, drones: Robots<drone::Drone>, pipucks: Robot
     eprintln!("websocket disconnected!");
 }
 
-async fn render_connections(drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::PiPuck>) -> HashMap<String, Card> {
+async fn diagnostics(_drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::PiPuck>) -> HashMap<String, Card> {
+    lazy_static::lazy_static! {
+        static ref REGEX_IIO_DEVICE: Regex = Regex::new(r"iio:device[[:digit:]]+").unwrap();
+    }
+    let commands = ["epuck-groundsensors", "epuck-motors", "epuck-leds", "epuck-rangefinders"].iter()
+        .map(|dev| (dev, format!("grep ^{} /sys/bus/iio/devices/*/name", dev)))
+        .collect::<Vec<_>>();
+    let mut cards = HashMap::new();
+    for pipuck in pipucks.write().await.iter_mut() {
+        let mut responses = Vec::with_capacity(commands.len());
+        for command in commands.iter() {
+            responses.push(match pipuck.ssh.exec(&command.1, true).await {
+                Ok(response) => {
+                    if let Some(response) = response {
+                        if let Some(device) = REGEX_IIO_DEVICE.find(&response) {
+                            let device = &response[device.start() .. device.end()];
+                            format!("{}: {}", command.0, device)
+                        }
+                        else {
+                            format!("{}: Not found", command.0)
+                        }
+                    }
+                    else {
+                        format!("{}: No reply", command.0)
+                    }
+                }
+                Err(err) => {
+                    format!("{}: {}", command.0, err)
+                }
+            });
+        }
+        let card = Card {
+            span: 4,
+            title: String::from("PiPuck"),
+            content: responses.join("<br>"),
+            // the actions depend on the state of the drone
+            // the action part of the message must contain
+            // the uuid, action name, and optionally arguments
+            actions: Vec::new(), //pipuck.actions(),
+        };
+        cards.insert(pipuck.uuid.to_string(), card);
+    }
+    cards
+}
+
+async fn experiment(_drones: &Robots<drone::Drone>, _pipucks: &Robots<pipuck::PiPuck>) -> HashMap<String, Card> {
+    HashMap::new()
+}
+
+async fn optitrack(_drones: &Robots<drone::Drone>, _pipucks: &Robots<pipuck::PiPuck>) -> HashMap<String, Card> {
+    HashMap::new()
+}
+
+async fn connections(drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::PiPuck>) -> HashMap<String, Card> {
     let mut cards = HashMap::new();
     for drone in drones.read().await.iter() {
         let card = Card {
