@@ -4,76 +4,52 @@
 const uri = 'ws://' + location.host + '/socket';
 const ws = new WebSocket(uri);
 
-theButton = document.getElementById('emergency-stop');
-//const text = document.getElementById('text');
+// TODO
+emergency = document.getElementById('emergency-stop');
+emergency.onclick = function() {}
 
-/*
-thebutton.addEventListener('ValueChange', function() {
-   alert('changed!');
-});
-*/
-
-theButton.onclick = function() {
-   //var msg = JSON.stringify({'emergency' : '???'})
-   //ws.send('1');
-}
-
-/*
-function message(data) {
-   const line = document.createElement('p');
-   line.innerText = data;
-   chat.appendChild(line);
-}
-*/
-
+var uiCurrentView = 'connections';
 var uiTimer = null;
+
+function setView(uiView) {
+   uiCurrentView = uiView;
+}
 
 ws.onopen = function() {
    uiTimer = setInterval(function() {
-      var msg = JSON.stringify({'update' : currentWebuiView})
+      var msg = JSON.stringify({'update' : uiCurrentView})
       ws.send(msg);
-   }, 100);
+   }, 250);
 };
 
 ws.onclose = function() {
    clearInterval(uiTimer);
 };
 
-var currentWebuiView = 'connections'
-
-function setView(webuiView) {
-   currentWebuiView = webuiView;
-   document.getElementById('ui-container').innerHTML = '';
-}
-
-/*
-<div class="mdl-cell mdl-cell--4-col mdl-card mdl-shadow--2dp">
-  <div class="mdl-card__title">
-    <h2 class="mdl-card__title-text">Drone #0001</h2>
-  </div>
-  <div class="mdl-card__supporting-text">Text</div>
-  <div class="mdl-card__actions mdl-card--border">
-    <a class="mdl-button mdl-button--colored mdl-js-button mdl-js-ripple-effect">Power On</a>
-  </div>
-</div>
-*/
-
 ws.onmessage = function(message) {
    var update = JSON.parse(message.data);
-   /* Get html elements */
-   var uiTitle = document.getElementById('ui-title');
-   var uiContainer = document.getElementById('ui-container');
    /* Update the title of the current interface */
+   var uiTitle = document.getElementById('ui-title');
    if('title' in update) {
       uiTitle.innerHTML = update.title;
    }
    /* iterate accross existing uiCards checking for updates,
       if no update exists, remove the card from the uiContainer */
+   var uiContainer = document.getElementById('ui-container');
    for(var uiCard of uiContainer.children) {
       if('cards' in update && uiCard.id in update.cards) {
-         updateCard(uiCard, update.cards[uiCard.id]);
+         //updateCard(uiCard, update.cards[uiCard.id]);
+         var uiCardUpdate = newCard(card,
+            update.cards[uiCard.id].title,
+            update.cards[uiCard.id].span,
+            update.cards[uiCard.id].content,
+            update.cards[uiCard.id].actions);
+         if(uiCard.innerHTML != uiCardUpdate.innerHTML) {
+            uiCard.innerHTML = uiCardUpdate.innerHTML;
+         }
       }
       else {
+         /* if a card isn't in the update it should be removed from the GUI */
          uiContainer.removeChild(uiCard);
       }
    }
@@ -96,37 +72,81 @@ ws.onmessage = function(message) {
    }
 };
 
-function updateCard(uiCard, update) {
-   var title =
-      uiCard.getElementsByClassName('mdl-card__title-text')[0];
-   if(title.innerHTML != update.title) {
-      title.innerHTML = update.title;
+// This function returns HTMLDivElement's
+function contentToHTML(content) {
+   if(content.Text != null) {
+      var container = document.createElement('div');
+      container.setAttribute('class', 'mdl-card__supporting-text');
+      container.innerHTML = content.Text;
+      return container;
    }
-   var content =
-      uiCard.getElementsByClassName('mdl-card__supporting-text')[0];
-   if(content.innerHTML != update.content) {
-      content.innerHTML = update.content;
+   else if(content.Table != null) {
+      var container = document.createElement('div');
+      container.setAttribute('class', 'mdl-card__table');
+      var table = document.createElement('table');
+      table.setAttribute('class',
+         'mdl-data-table mdl-js-data-table mdl-data-table--selectable');
+      var tableHeader = document.createElement('thead');
+      var tableHeaderRow = document.createElement('tr');
+      for(var item of content.Table.header) {
+         var tableHeaderRowItem = document.createElement('th');
+         // sorting can be added by setting a class on 'th'
+         tableHeaderRowItem.innerHTML = item;
+         tableHeaderRow.appendChild(tableHeaderRowItem);
+      }
+      tableHeader.appendChild(tableHeaderRow);
+      table.appendChild(tableHeader);
+      var tableBody = document.createElement('tbody');
+      for(var row of content.Table.rows) {
+         var tableRow = document.createElement('tr');
+         for(var element of row) {
+            var tableElement = document.createElement('td');
+            tableElement.innerHTML = element;
+            tableRow.appendChild(tableElement);
+         }
+         tableBody.appendChild(tableRow)
+      }
+      table.appendChild(tableBody);
+      container.appendChild(table);
+      return container;
    }
-   // TODO actions?
+   /* 
+   else if(content.List != null) {
+      var list = document.createElement('ul');
+      list.setAttribute('class', 'mdl-list');
+      for(var item of content.List) {
+         var listItem = document.createElement('li');
+         listItem.setAttribute('class', 'mdl-list__item');
+         var span = document.createElement('span');
+         span.setAttribute('class', 'mdl-list__item-primary-content');
+         span.appendChild(contentToHTML(item));
+         listItem.appendChild(span);
+         list.appendChild(listItem);
+      }
+      return list; // element
+   }
+   */
+   else {
+      alert('Cannot convert content to HTML');
+   }
 }
 
 function newCard(id, title, span, content, actions) {
    var card = document.createElement('div');
    card.setAttribute('id', id);
-   card.setAttribute('class', 'mdl-cell mdl-cell--4-col mdl-card mdl-shadow--2dp');
+   var cardSpan = 'mdl-cell--' + span + '-col';
+   card.setAttribute('class', 'mdl-cell dl-card mdl-shadow--2dp ' + cardSpan);
    
-   cardTitle = document.createElement('div');
+   var cardTitle = document.createElement('div');
    cardTitle.setAttribute('class', 'mdl-card__title');  
-   cardTitleText = document.createElement('h2');
+   var cardTitleText = document.createElement('h2');
    cardTitleText.setAttribute('class', 'mdl-card__title-text');
    cardTitleText.innerHTML = title;
    cardTitle.appendChild(cardTitleText);
    
    card.appendChild(cardTitle);
-   
-   cardContent = document.createElement('div');
-   cardContent.setAttribute('class', 'mdl-card__supporting-text');
-   cardContent.innerHTML = content;
+
+   var cardContent = contentToHTML(content);
 
    card.appendChild(cardContent);
    

@@ -23,6 +23,17 @@ use super::{
     Robots
 };
 
+
+
+#[derive(Serialize, Debug)]
+enum Content {
+    Text(String),
+    Table {
+        header: Vec<String>,
+        rows: Vec<Vec<String>>
+    },
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("Bad request")]
@@ -55,7 +66,7 @@ enum Request {
 struct Card {
     span: u8,
     title: String,
-    content: String,
+    content: Content,
     actions: Vec<drone::Action>
 }
 
@@ -97,12 +108,14 @@ pub async fn run(ws: ws::WebSocket, drones: Robots<drone::Drone>, pipucks: Robot
                     Request::Update(view) => {
                         let reply = match &view[..] {
                             "connections" => {
+                                eprintln!("connections");
                                 Ok(Reply {
                                     title: String::from("Connections"),
                                     cards: connections(&drones, &pipucks).await
                                 })
                             },
                             "diagnostics" => {
+                                eprintln!("diagnostics");
                                 Ok(Reply {
                                     title: String::from("Diagnostics"),
                                     cards: diagnostics(&drones, &pipucks).await
@@ -170,37 +183,55 @@ async fn diagnostics(_drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::Pi
     lazy_static::lazy_static! {
         static ref REGEX_IIO_DEVICE: Regex = Regex::new(r"iio:device[[:digit:]]+").unwrap();
     }
-    let commands = ["epuck-groundsensors", "epuck-motors", "epuck-leds", "epuck-rangefinders"].iter()
-        .map(|dev| (dev, format!("grep ^{} /sys/bus/iio/devices/*/name", dev)))
+    let mut commands = ["epuck-groundsensors", "epuck-motors", "epuck-leds", "epuck-rangefinders"].iter()
+        .map(|dev| (String::from(*dev), format!("grep ^{} /sys/bus/iio/devices/*/name", dev)))
         .collect::<Vec<_>>();
     let mut cards = HashMap::new();
     for pipuck in pipucks.write().await.iter_mut() {
         let mut responses = Vec::with_capacity(commands.len());
-        for command in commands.iter() {
-            responses.push(match pipuck.ssh.exec(&command.1, true).await {
+        for command in commands.drain(..) {
+            let response = match pipuck.ssh.exec(command.1, true).await {
                 Ok(response) => {
                     if let Some(response) = response {
                         if let Some(device) = REGEX_IIO_DEVICE.find(&response) {
                             let device = &response[device.start() .. device.end()];
-                            format!("{}: {}", command.0, device)
+                            //Content::Text(format!("Ok: {}", device))
+                            format!("Ok: {}", device)
                         }
                         else {
-                            format!("{}: Not found", command.0)
+                            //Content::Text(String::from("Not found"))
+                            String::from("Not found")
                         }
                     }
                     else {
-                        format!("{}: No reply", command.0)
+                        //Content::Text(String::from("No reply"))
+                        String::from("No reply")
                     }
                 }
                 Err(err) => {
-                    format!("{}: {}", command.0, err)
+                    //Content::Text(format!("Error: {}", err))
+                    format!("Error: {}", err)
                 }
-            });
+            };
+            responses.push(vec![command.0, response]);
+            //responses.push(Content::Text(format!("{} {}", command.0, response)))
         }
+  
+        let header = ["Device", "Status"].iter().map(|s| {
+            String::from(*s)
+        }).collect::<Vec<_>>();
+
+
         let card = Card {
-            span: 4,
+            span: 6,
             title: String::from("PiPuck"),
-            content: responses.join("<br>"),
+            //content: Content::List(responses),
+            
+            content: Content::Table {
+                header: header,
+                rows: responses
+            },
+            
             // the actions depend on the state of the drone
             // the action part of the message must contain
             // the uuid, action name, and optionally arguments
@@ -212,7 +243,42 @@ async fn diagnostics(_drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::Pi
 }
 
 async fn experiment(_drones: &Robots<drone::Drone>, _pipucks: &Robots<pipuck::PiPuck>) -> HashMap<String, Card> {
-    HashMap::new()
+    let mut cards = HashMap::new();
+       
+    let card = Card {
+        span: 6,
+        title: String::from("Drone Configuration"),
+        content: Content::Text(String::from("Drone")),
+        // the actions depend on the state of the drone
+        // the action part of the message must contain
+        // the uuid, action name, and optionally arguments
+        actions: vec![],
+    };
+    cards.insert(String::from("Drone"), card);
+
+    let card = Card {
+        span: 6,
+        title: String::from("Pi-Puck Configuration"),
+        content: Content::Text(String::from("Drone")),
+        // the actions depend on the state of the drone
+        // the action part of the message must contain
+        // the uuid, action name, and optionally arguments
+        actions: vec![],
+    };
+    cards.insert(String::from("Pi-Puck"), card);
+
+    let card = Card {
+        span: 12,
+        title: String::from("Dashboard"),
+        content: Content::Text(String::from("Drone")),
+        // the actions depend on the state of the drone
+        // the action part of the message must contain
+        // the uuid, action name, and optionally arguments
+        actions: vec![],
+    };
+    cards.insert(String::from("Dashboard"), card);
+
+    cards
 }
 
 async fn optitrack(_drones: &Robots<drone::Drone>, _pipucks: &Robots<pipuck::PiPuck>) -> HashMap<String, Card> {
@@ -225,7 +291,7 @@ async fn connections(drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::PiP
         let card = Card {
             span: 4,
             title: String::from("Drone"),
-            content: format!("{:?}", drone),
+            content: Content::Text(format!("{:?}", drone)),
             // the actions depend on the state of the drone
             // the action part of the message must contain
             // the uuid, action name, and optionally arguments
@@ -237,7 +303,7 @@ async fn connections(drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::PiP
         let card = Card {
             span: 4,
             title: String::from("PiPuck"),
-            content: format!("{:?}", pipuck),
+            content: Content::Text(format!("{:?}", pipuck)),
             // the actions depend on the state of the drone
             // the action part of the message must contain
             // the uuid, action name, and optionally arguments
