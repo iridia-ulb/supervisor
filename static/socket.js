@@ -45,6 +45,7 @@ ws.onmessage = function(message) {
             update.cards[uiCard.id].content,
             update.cards[uiCard.id].actions);
          if(uiCard.innerHTML != uiCardUpdate.innerHTML) {
+            uiCard.setAttribute('class', uiCardUpdate.getAttribute('class'));
             uiCard.innerHTML = uiCardUpdate.innerHTML;
          }
       }

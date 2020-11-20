@@ -108,14 +108,12 @@ pub async fn run(ws: ws::WebSocket, drones: Robots<drone::Drone>, pipucks: Robot
                     Request::Update(view) => {
                         let reply = match &view[..] {
                             "connections" => {
-                                eprintln!("connections");
                                 Ok(Reply {
                                     title: String::from("Connections"),
                                     cards: connections(&drones, &pipucks).await
                                 })
                             },
                             "diagnostics" => {
-                                eprintln!("diagnostics");
                                 Ok(Reply {
                                     title: String::from("Diagnostics"),
                                     cards: diagnostics(&drones, &pipucks).await
@@ -181,50 +179,54 @@ pub async fn run(ws: ws::WebSocket, drones: Robots<drone::Drone>, pipucks: Robot
 
 async fn diagnostics(_drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::PiPuck>) -> HashMap<String, Card> {
     lazy_static::lazy_static! {
+        static ref IIO_CHECKS: Vec<(String, String)> =
+            ["epuck-groundsensors", "epuck-motors", "epuck-leds", "epuck-rangefinders"].iter()
+            .map(|dev| (String::from(*dev), format!("grep ^{} /sys/bus/iio/devices/*/name", dev)))
+            .collect::<Vec<_>>();
         static ref REGEX_IIO_DEVICE: Regex = Regex::new(r"iio:device[[:digit:]]+").unwrap();
+        static ref OK_ICON: String = 
+            String::from("<i class=\"material-icons mdl-list__item-icon\" style=\"color:green;\">check_circle</i>");
+        static ref ERROR_ICON: String = 
+            String::from("<i class=\"material-icons mdl-list__item-icon\" style=\"color:red;\">error</i>");        
     }
-    let mut commands = ["epuck-groundsensors", "epuck-motors", "epuck-leds", "epuck-rangefinders"].iter()
-        .map(|dev| (String::from(*dev), format!("grep ^{} /sys/bus/iio/devices/*/name", dev)))
-        .collect::<Vec<_>>();
     let mut cards = HashMap::new();
+    // TODO this should all be done asyncronously and combined with try_join. At the moment,
+    // we are waiting for each robot to reply X times via SSH before moving on to the next robot
     for pipuck in pipucks.write().await.iter_mut() {
-        let mut responses = Vec::with_capacity(commands.len());
-        for command in commands.drain(..) {
-            let response = match pipuck.ssh.exec(command.1, true).await {
+        let mut responses = Vec::with_capacity(IIO_CHECKS.len());
+        for iio_check in IIO_CHECKS.iter() {
+            let response = match pipuck.ssh.exec(&iio_check.1, true).await {
                 Ok(response) => {
                     if let Some(response) = response {
                         if let Some(device) = REGEX_IIO_DEVICE.find(&response) {
                             let device = &response[device.start() .. device.end()];
-                            //Content::Text(format!("Ok: {}", device))
-                            format!("Ok: {}", device)
+                            vec![OK_ICON.clone(), iio_check.0.clone(), device.to_owned()]
+                            
                         }
                         else {
-                            //Content::Text(String::from("Not found"))
-                            String::from("Not found")
+                            vec![ERROR_ICON.clone(), iio_check.0.clone(), "Not found".to_owned()]
                         }
                     }
                     else {
-                        //Content::Text(String::from("No reply"))
-                        String::from("No reply")
+                        vec![ERROR_ICON.clone(), iio_check.0.clone(), "No reply".to_owned()]
                     }
                 }
                 Err(err) => {
-                    //Content::Text(format!("Error: {}", err))
-                    format!("Error: {}", err)
+                    vec![ERROR_ICON.clone(), iio_check.0.clone(), err.to_string()]
                 }
             };
-            responses.push(vec![command.0, response]);
-            //responses.push(Content::Text(format!("{} {}", command.0, response)))
+            responses.push(response);
         }
   
-        let header = ["Device", "Status"].iter().map(|s| {
+        let header = ["Status", "Device", "Information"].iter().map(|s| {
             String::from(*s)
         }).collect::<Vec<_>>();
 
+        
 
         let card = Card {
-            span: 6,
-            title: String::from("PiPuck"),
+            span: 3,
+            title: format!("Pi-Puck ({})", pipuck.ssh.hostname().await.unwrap_or("-".to_owned())),
             //content: Content::List(responses),
             
             content: Content::Table {
@@ -288,10 +290,15 @@ async fn optitrack(_drones: &Robots<drone::Drone>, _pipucks: &Robots<pipuck::PiP
 async fn connections(drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::PiPuck>) -> HashMap<String, Card> {
     let mut cards = HashMap::new();
     for drone in drones.read().await.iter() {
+        
         let card = Card {
             span: 4,
             title: String::from("Drone"),
-            content: Content::Text(format!("{:?}", drone)),
+            content: Content::Table {
+                header: vec!["Unique Identifier".to_owned(), "Xbee Address".to_owned(), "SSH Address".to_owned()],
+                rows: vec![vec![drone.uuid.to_string(), drone.xbee.addr.to_string(), String::from("-")]]
+            },
+
             // the actions depend on the state of the drone
             // the action part of the message must contain
             // the uuid, action name, and optionally arguments
@@ -302,8 +309,11 @@ async fn connections(drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::PiP
     for pipuck in pipucks.read().await.iter() {
         let card = Card {
             span: 4,
-            title: String::from("PiPuck"),
-            content: Content::Text(format!("{:?}", pipuck)),
+            title: String::from("Pi-Puck"),
+            content: Content::Table {
+                header: vec!["Unique Identifier".to_owned(), "SSH Address".to_owned()],
+                rows: vec![vec![pipuck.uuid.to_string(), pipuck.ssh.addr.to_string()]]
+            },
             // the actions depend on the state of the drone
             // the action part of the message must contain
             // the uuid, action name, and optionally arguments

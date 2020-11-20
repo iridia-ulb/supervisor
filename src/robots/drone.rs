@@ -46,7 +46,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug)]
 pub struct Drone {
     pub uuid: uuid::Uuid,
-    xbee: xbee::Device,
+    pub xbee: xbee::Device,
     state: State,
 }
 
