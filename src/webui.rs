@@ -2,11 +2,6 @@ use warp::ws;
 
 use std::collections::HashMap;
 
-use serde::{
-    Deserialize,
-    Serialize
-};
-
 use futures::{FutureExt, StreamExt};
 
 use tokio::{
@@ -16,6 +11,7 @@ use tokio::{
 use regex::Regex;
 
 use super::{
+    experiment,
     robots::{
         drone,
         pipuck,
@@ -23,7 +19,7 @@ use super::{
     Robots
 };
 
-
+use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Debug)]
 enum Content {
@@ -44,37 +40,52 @@ pub enum Error {
 
     #[error("Could not reply to client")]
     ReplyError,
-}    
+}
 
 pub type Result<T> = std::result::Result<T, Error>;
-
 
 // serde lower case
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "lowercase")]
 enum Request {
+    // view
     Update(String),
-    // uuid, action
-    Drone(uuid::Uuid, drone::Action),
-    // uuid, action
-    PiPuck(uuid::Uuid, pipuck::Action),
+    // action, robot uuid
+    Drone(drone::Action, uuid::Uuid),
+    // action, robot uuid
+    PiPuck(pipuck::Action, uuid::Uuid),
+    // action, vec of robot uuids
+    Experiment(experiment::Action),
+
     //
     Emergency,
 }
 
-#[derive(Serialize, Debug)]
+/// while it is possible to put a trait bound on this struct as follows
+/// ```
+/// struct Card<T: Serialize> {
+/// ...
+/// actions: Vec<T>
+/// }
+/// ```
+/// This makes a Card<action::PiPuck> different from Card<action::Drone>
+/// which results in not being able to put them into the same collection
+/// that's why we use dynamic dispatch here
+#[derive(Serialize)]
 struct Card {
     span: u8,
     title: String,
     content: Content,
-    actions: Vec<drone::Action>
+    actions: Vec<Box<dyn erased_serde::Serialize + Send>>
 }
 
+type Cards = HashMap<String, Card>;
+
 // TODO, Reply will probably need to be wrapped in a enum soon Reply::Update, Reply::XXX
-#[derive(Serialize, Debug)]
+#[derive(Serialize)]
 struct Reply {
     title: String,
-    cards: HashMap<String, Card>
+    cards: Cards,
 }
 
 pub async fn run(ws: ws::WebSocket, drones: Robots<drone::Drone>, pipucks: Robots<pipuck::PiPuck>) {
@@ -144,7 +155,7 @@ pub async fn run(ws: ws::WebSocket, drones: Robots<drone::Drone>, pipucks: Robot
                             eprintln!("TODO: Consider handling {}", err);
                         }
                     },
-                    Request::Drone(uuid, action) => {
+                    Request::Drone(action, uuid) => {
                         if let Some(drone) = 
                             drones.write().await
                                   .iter_mut()
@@ -177,7 +188,7 @@ pub async fn run(ws: ws::WebSocket, drones: Robots<drone::Drone>, pipucks: Robot
     eprintln!("websocket disconnected!");
 }
 
-async fn diagnostics(_drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::PiPuck>) -> HashMap<String, Card> {
+async fn diagnostics(_drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::PiPuck>) -> Cards {
     lazy_static::lazy_static! {
         static ref IIO_CHECKS: Vec<(String, String)> =
             ["epuck-groundsensors", "epuck-motors", "epuck-leds", "epuck-rangefinders"].iter()
@@ -189,7 +200,7 @@ async fn diagnostics(_drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::Pi
         static ref ERROR_ICON: String = 
             String::from("<i class=\"material-icons mdl-list__item-icon\" style=\"color:red;\">error</i>");        
     }
-    let mut cards = HashMap::new();
+    let mut cards = Cards::default();
     // TODO this should all be done asyncronously and combined with try_join. At the moment,
     // we are waiting for each robot to reply X times via SSH before moving on to the next robot
     for pipuck in pipucks.write().await.iter_mut() {
@@ -244,8 +255,8 @@ async fn diagnostics(_drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::Pi
     cards
 }
 
-async fn experiment(_drones: &Robots<drone::Drone>, _pipucks: &Robots<pipuck::PiPuck>) -> HashMap<String, Card> {
-    let mut cards = HashMap::new();
+async fn experiment(_drones: &Robots<drone::Drone>, _pipucks: &Robots<pipuck::PiPuck>) -> Cards {
+    let mut cards = Cards::default();
        
     let card = Card {
         span: 6,
@@ -254,7 +265,7 @@ async fn experiment(_drones: &Robots<drone::Drone>, _pipucks: &Robots<pipuck::Pi
         // the actions depend on the state of the drone
         // the action part of the message must contain
         // the uuid, action name, and optionally arguments
-        actions: vec![],
+        actions: vec![Box::new(6)],
     };
     cards.insert(String::from("Drone"), card);
 
@@ -265,7 +276,7 @@ async fn experiment(_drones: &Robots<drone::Drone>, _pipucks: &Robots<pipuck::Pi
         // the actions depend on the state of the drone
         // the action part of the message must contain
         // the uuid, action name, and optionally arguments
-        actions: vec![],
+        actions: vec![Box::new('a')],
     };
     cards.insert(String::from("Pi-Puck"), card);
 
@@ -276,21 +287,21 @@ async fn experiment(_drones: &Robots<drone::Drone>, _pipucks: &Robots<pipuck::Pi
         // the actions depend on the state of the drone
         // the action part of the message must contain
         // the uuid, action name, and optionally arguments
-        actions: vec![],
+        actions: vec![], // start/stop experiment
     };
     cards.insert(String::from("Dashboard"), card);
 
     cards
 }
 
-async fn optitrack(_drones: &Robots<drone::Drone>, _pipucks: &Robots<pipuck::PiPuck>) -> HashMap<String, Card> {
-    HashMap::new()
+async fn optitrack(_drones: &Robots<drone::Drone>, _pipucks: &Robots<pipuck::PiPuck>) -> Cards {
+    Cards::default()
 }
 
-async fn connections(drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::PiPuck>) -> HashMap<String, Card> {
-    let mut cards = HashMap::new();
+async fn connections(drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::PiPuck>) -> Cards {
+    let mut cards = Cards::default();
     for drone in drones.read().await.iter() {
-        
+
         let card = Card {
             span: 4,
             title: String::from("Drone"),
@@ -299,10 +310,14 @@ async fn connections(drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::PiP
                 rows: vec![vec![drone.uuid.to_string(), drone.xbee.addr.to_string(), String::from("-")]]
             },
 
-            // the actions depend on the state of the drone
-            // the action part of the message must contain
-            // the uuid, action name, and optionally arguments
-            actions: drone.actions(),
+            // we need to convert actions back and forth between the JSON representation and the Rust representation
+            // we could convert these actions to strings and convert them back.
+
+            // the problem with converting them to JSON now, is that this struct itself needs to converted to JSON which gives
+            // a json inside json situation that no one really wants.
+            actions: drone.actions().drain(..)
+                .map(|action| Box::new(action) as Box<dyn erased_serde::Serialize + Send>)
+                .collect(),
         };
         cards.insert(drone.uuid.to_string(), card);
     }
@@ -314,10 +329,9 @@ async fn connections(drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::PiP
                 header: vec!["Unique Identifier".to_owned(), "SSH Address".to_owned()],
                 rows: vec![vec![pipuck.uuid.to_string(), pipuck.ssh.addr.to_string()]]
             },
-            // the actions depend on the state of the drone
-            // the action part of the message must contain
-            // the uuid, action name, and optionally arguments
-            actions: vec![], //pipuck.actions(),
+            actions: pipuck.actions().drain(..)
+                .map(|action| Box::new(action) as Box<dyn erased_serde::Serialize + Send>)
+                .collect(),
         };
         cards.insert(pipuck.uuid.to_string(), card);
     }

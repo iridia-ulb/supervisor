@@ -31,6 +31,8 @@ pub enum Action {
     PixhawkPowerOn,
     #[serde(rename = "Power off Pixhawk")]
     PixhawkPowerOff,
+    #[serde(rename = "Identify")]
+    Identify,
 }
 
 #[derive(thiserror::Error, Debug)]

@@ -16,6 +16,8 @@ pub enum Action {
     RpiShutdown,
     #[serde(rename = "Reboot RPi")]
     RpiReboot,
+    #[serde(rename = "Identify")]
+    Identify,
 }
 
 #[derive(Debug)]
@@ -33,6 +35,6 @@ impl PiPuck {
     }
 
     pub fn actions(&self) -> Vec<Action> {
-        vec![Action::RpiShutdown, Action::RpiReboot]
+        vec![Action::RpiShutdown, Action::RpiReboot, Action::Identify]
     }
 }

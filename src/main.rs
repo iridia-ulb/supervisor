@@ -12,6 +12,7 @@ use warp::Filter;
 
 mod robots;
 mod webui;
+mod experiment;
 
 type Robots<T> = Arc<RwLock<Vec<T>>>;
 
