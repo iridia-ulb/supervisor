@@ -7,29 +7,28 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-serde = { version = "1.0", features = ["derive", "rc"] }
+serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0" }
 serde-pickle = { version = "0.6" }
-erased-serde = { version = "0.3" }
 
 tokio = { version = "0.2", features = ["full"] }
 warp = { version = "0.2", features = ["websocket"] }
 
-env_logger = "0.7"
+
 bytes = { version = "0.5" }
 
-ipnet = "2.3.0"
+uuid = { version = "0.8", features = ["serde", "v4"] }
+ipnet = { version = "2.3" }
 
-regex = "1.4"
-lazy_static = "1.4"
+regex = { version = "1.4" }
+lazy_static = { version = "1.4" }
 
 futures = { version = "0.3.6" }
-
-uuid = { version = "0.8", features = ["serde", "v4"] }
 
 thrussh = {path = "crates/thrussh"}
 thrussh-keys = "0.17"
 
+log = { version = "0.4" }
+env_logger = { version = "0.7" }
 anyhow = "1.0"
 thiserror = { version = "1.0" }
-

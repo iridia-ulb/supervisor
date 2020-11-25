@@ -1,6 +1,7 @@
 use super::{ssh, xbee};
 use serde::{Deserialize, Serialize};
 use uuid;
+use log;
 
 const UPCORE_POWER_BIT_INDEX: u8 = 11;
 const PIXHAWK_POWER_BIT_INDEX: u8 = 12;
@@ -103,6 +104,38 @@ impl Drone {
             State::Ready{..} => {
                 vec![Action::UpCorePowerOff, Action::UpCoreShutdown]
             }
+        }
+    }
+
+    pub fn execute(&self, action: &Action) {
+        /* check to see if the requested action is still valid */
+        if self.actions().contains(&action) {
+            match action {
+                Action::UpCorePowerOn => {
+                    log::error!("drone::Action::UpCorePowerOn is not implemented")
+                },
+                Action::UpCoreShutdown => {
+                    log::error!("drone::Action::UpCoreShutdown is not implemented")
+                },
+                Action::UpCorePowerOff => {
+                    log::error!("drone::Action::UpCorePowerOff is not implemented")
+                },
+                Action::UpCoreReboot => {
+                    log::error!("drone::Action::UpCoreReboot is not implemented")
+                },
+                Action::PixhawkPowerOn => {
+                    log::error!("drone::Action::PixhawkPowerOn is not implemented")
+                },
+                Action::PixhawkPowerOff => {
+                    log::error!("drone::Action::PixhawkPowerOff is not implemented")
+                },
+                Action::Identify => {
+                    log::error!("drone::Action::Identify is not implemented")
+                }
+            }
+        }
+        else {
+            log::warn!("{:?} ignored due to change in drone state", action);
         }
     }
 

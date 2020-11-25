@@ -21,7 +21,10 @@ use super::{
 
 use serde::{Deserialize, Serialize};
 
+use log;
+
 #[derive(Serialize, Debug)]
+#[serde(rename_all = "lowercase")]
 enum Content {
     Text(String),
     Table {
@@ -48,35 +51,25 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "lowercase")]
 enum Request {
-    // view
     Update(String),
-    // action, robot uuid
-    Drone(drone::Action, uuid::Uuid),
-    // action, robot uuid
-    PiPuck(pipuck::Action, uuid::Uuid),
-    // action, vec of robot uuids
-    Experiment(experiment::Action),
-
-    //
+    Action(Action, uuid::Uuid),
     Emergency,
 }
 
-/// while it is possible to put a trait bound on this struct as follows
-/// ```
-/// struct Card<T: Serialize> {
-/// ...
-/// actions: Vec<T>
-/// }
-/// ```
-/// This makes a Card<action::PiPuck> different from Card<action::Drone>
-/// which results in not being able to put them into the same collection
-/// that's why we use dynamic dispatch here
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "lowercase", tag = "robot", content = "command")]
+enum Action {
+    Drone(drone::Action),
+    PiPuck(pipuck::Action),
+    Experiment(experiment::Action),
+}
+
+#[derive(Serialize, Debug)]
 struct Card {
     span: u8,
     title: String,
     content: Content,
-    actions: Vec<Box<dyn erased_serde::Serialize + Send>>
+    actions: Vec<Action>,
 }
 
 type Cards = HashMap<String, Card>;
@@ -91,8 +84,7 @@ struct Reply {
 pub async fn run(ws: ws::WebSocket, drones: Robots<drone::Drone>, pipucks: Robots<pipuck::PiPuck>) {
     // Use a counter to assign a new unique ID for this user.
 
-    eprintln!("websocket connected!");
-
+    log::info!("client connected!");
     // Split the socket into a sender and receive of messages.
     let (user_ws_tx, mut user_ws_rx) = ws.split();
 
@@ -112,7 +104,6 @@ pub async fn run(ws: ws::WebSocket, drones: Robots<drone::Drone>, pipucks: Robot
                 break;
             }
         };
-
         if let Ok(request) = request.to_str() {
             if let Ok(action) = serde_json::from_str::<Request>(request) {
                 match action {
@@ -155,37 +146,42 @@ pub async fn run(ws: ws::WebSocket, drones: Robots<drone::Drone>, pipucks: Robot
                             eprintln!("TODO: Consider handling {}", err);
                         }
                     },
-                    Request::Drone(action, uuid) => {
-                        if let Some(drone) = 
-                            drones.write().await
-                                  .iter_mut()
-                                  .find(|drone| drone.uuid == uuid) {
-                            /* check if the action is still valid given the drones current state */
-                            if drone.actions().contains(&action) {
-                                let result = match action {
-                                    drone::Action::UpCorePowerOn => {
-                                        // TODO, is it possible to not block the collection here?
-                                        // What if just the xbee was locked during the await?
-                                        drone.set_power(Some(true), None).await
-                                    },
-                                    _ => todo!()
-                                };
-                                eprintln!("{:?}", result);
+                    Request::Action(action, uuid) => {
+                        match action {
+                            Action::Drone(action) => {
+                                let mut drones = drones.write().await;
+                                if let Some(drone) = drones.iter_mut().find(|drone| drone.uuid == uuid) {
+                                    drone.execute(&action);
+                                }
+                                else {
+                                    log::warn!("Drone ({}) has disconnected", uuid)
+                                }
+                            },
+                            Action::PiPuck(action) => {
+                                let mut pipucks = pipucks.write().await;
+                                if let Some(pipuck) = pipucks.iter_mut().find(|pipuck| pipuck.uuid == uuid) {
+                                    pipuck.execute(&action);
+                                }
+                                else {
+                                    log::warn!("Pi-Puck ({}) has disconnected", uuid)
+                                }
+                            },
+                            Action::Experiment(_) => {
+
                             }
                         }
                     },
-                    _ => {
-                        // TODO handle drone and pipuck messages
+                    Request::Emergency => {
+                        // Go to emergency mode
                     }
                 }
             }
             else {
-                eprintln!("[warning] could not deserialize message");
+                log::error!("Cannot not deserialize message");
             }
         }
     }
-
-    eprintln!("websocket disconnected!");
+    log::info!("client disconnected!");
 }
 
 async fn diagnostics(_drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::PiPuck>) -> Cards {
@@ -265,7 +261,7 @@ async fn experiment(_drones: &Robots<drone::Drone>, _pipucks: &Robots<pipuck::Pi
         // the actions depend on the state of the drone
         // the action part of the message must contain
         // the uuid, action name, and optionally arguments
-        actions: vec![Box::new(6)],
+        actions: vec![],
     };
     cards.insert(String::from("Drone"), card);
 
@@ -276,7 +272,7 @@ async fn experiment(_drones: &Robots<drone::Drone>, _pipucks: &Robots<pipuck::Pi
         // the actions depend on the state of the drone
         // the action part of the message must contain
         // the uuid, action name, and optionally arguments
-        actions: vec![Box::new('a')],
+        actions: vec![],
     };
     cards.insert(String::from("Pi-Puck"), card);
 
@@ -315,9 +311,7 @@ async fn connections(drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::PiP
 
             // the problem with converting them to JSON now, is that this struct itself needs to converted to JSON which gives
             // a json inside json situation that no one really wants.
-            actions: drone.actions().drain(..)
-                .map(|action| Box::new(action) as Box<dyn erased_serde::Serialize + Send>)
-                .collect(),
+            actions: drone.actions().into_iter().map(Action::Drone).collect(),
         };
         cards.insert(drone.uuid.to_string(), card);
     }
@@ -329,9 +323,7 @@ async fn connections(drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::PiP
                 header: vec!["Unique Identifier".to_owned(), "SSH Address".to_owned()],
                 rows: vec![vec![pipuck.uuid.to_string(), pipuck.ssh.addr.to_string()]]
             },
-            actions: pipuck.actions().drain(..)
-                .map(|action| Box::new(action) as Box<dyn erased_serde::Serialize + Send>)
-                .collect(),
+            actions: pipuck.actions().into_iter().map(Action::PiPuck).collect(),
         };
         cards.insert(pipuck.uuid.to_string(), card);
     }

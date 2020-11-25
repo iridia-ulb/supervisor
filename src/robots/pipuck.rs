@@ -1,6 +1,7 @@
 use super::ssh;
 use serde::{Deserialize, Serialize};
 use uuid;
+use log;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -36,5 +37,25 @@ impl PiPuck {
 
     pub fn actions(&self) -> Vec<Action> {
         vec![Action::RpiShutdown, Action::RpiReboot, Action::Identify]
+    }
+
+    pub fn execute(&self, action: &Action) {
+        /* check to see if the requested action is still valid */
+        if self.actions().contains(&action) {
+            match action {
+                Action::RpiShutdown => {
+                    log::error!("pipuck::Action::RpiShutdown is not implemented")
+                },
+                Action::RpiReboot => {
+                    log::error!("pipuck::Action::RpiReboot is not implemented")
+                },
+                Action::Identify => {
+                    log::error!("pipuck::Action::Identify is not implemented")
+                }
+            }
+        }
+        else {
+            log::warn!("{:?} ignored due to change in Pi-Puck state", action);
+        }
     }
 }

@@ -17,8 +17,10 @@ function setView(uiView) {
 
 ws.onopen = function() {
    uiTimer = setInterval(function() {
-      var msg = JSON.stringify({'update' : uiCurrentView})
-      ws.send(msg);
+      var message = JSON.stringify({
+         'update' : uiCurrentView
+      });
+      ws.send(message);
    }, 250);
 };
 
@@ -38,7 +40,6 @@ ws.onmessage = function(message) {
    var uiContainer = document.getElementById('ui-container');
    for(var uiCard of uiContainer.children) {
       if('cards' in update && uiCard.id in update.cards) {
-         //updateCard(uiCard, update.cards[uiCard.id]);
          var uiCardUpdate = newCard(card,
             update.cards[uiCard.id].title,
             update.cards[uiCard.id].span,
@@ -75,13 +76,13 @@ ws.onmessage = function(message) {
 
 // This function returns HTMLDivElement's
 function contentToHTML(content) {
-   if(content.Text != null) {
+   if(content.text != null) {
       var container = document.createElement('div');
       container.setAttribute('class', 'mdl-card__supporting-text');
-      container.innerHTML = content.Text;
+      container.innerHTML = content.text;
       return container;
    }
-   else if(content.Table != null) {
+   else if(content.table != null) {
       var container = document.createElement('div');
       container.setAttribute('class', 'mdl-card__table');
       var table = document.createElement('table');
@@ -89,7 +90,7 @@ function contentToHTML(content) {
          'mdl-data-table mdl-js-data-table mdl-data-table--selectable');
       var tableHeader = document.createElement('thead');
       var tableHeaderRow = document.createElement('tr');
-      for(var item of content.Table.header) {
+      for(var item of content.table.header) {
          var tableHeaderRowItem = document.createElement('th');
          // sorting can be added by setting a class on 'th'
          tableHeaderRowItem.innerHTML = item;
@@ -98,7 +99,7 @@ function contentToHTML(content) {
       tableHeader.appendChild(tableHeaderRow);
       table.appendChild(tableHeader);
       var tableBody = document.createElement('tbody');
-      for(var row of content.Table.rows) {
+      for(var row of content.table.rows) {
          var tableRow = document.createElement('tr');
          for(var element of row) {
             var tableElement = document.createElement('td');
@@ -112,7 +113,7 @@ function contentToHTML(content) {
       return container;
    }
    /* 
-   else if(content.List != null) {
+   else if(content.list != null) {
       var list = document.createElement('ul');
       list.setAttribute('class', 'mdl-list');
       for(var item of content.List) {
@@ -132,41 +133,48 @@ function contentToHTML(content) {
    }
 }
 
+/* factory for sending commands to the backend */
+function sendActionFactory(robot, id, command) {
+   return function() {
+      var message = JSON.stringify({
+         action: [{
+            robot: robot,
+            command: command
+         }, id]
+      });
+      ws.send(message);
+   }
+}
+
 function newCard(id, title, span, content, actions) {
+   /* create card */
    var card = document.createElement('div');
    card.setAttribute('id', id);
    var cardSpan = 'mdl-cell--' + span + '-col';
-   card.setAttribute('class', 'mdl-cell dl-card mdl-shadow--2dp ' + cardSpan);
-   
+   card.setAttribute('class', 'mdl-cell dl-card mdl-shadow--2dp ' + cardSpan); 
+   /* create title */
    var cardTitle = document.createElement('div');
    cardTitle.setAttribute('class', 'mdl-card__title');  
    var cardTitleText = document.createElement('h2');
    cardTitleText.setAttribute('class', 'mdl-card__title-text');
    cardTitleText.innerHTML = title;
    cardTitle.appendChild(cardTitleText);
-   
    card.appendChild(cardTitle);
-
+   /* create content */
    var cardContent = contentToHTML(content);
-
    card.appendChild(cardContent);
-   
+   /* create actions */
    cardActions = document.createElement('div');
    cardActions.setAttribute('class', 'mdl-card__actions mdl-card--border');
-   
    for(var action of actions) {
       cardAction = document.createElement('a');
       cardAction.setAttribute('class', 'mdl-button mdl-button--colored mdl-js-button mdl-js-ripple-effect');
-      cardAction.innerHTML = action;
-      cardAction.onclick = function() {
-         var msg = JSON.stringify({'drone' : [id, "Power on UpCore"]})
-         ws.send(msg);
-      };
+      console.log(action);
+      cardAction.innerHTML = action.command;
+      cardAction.onclick = sendActionFactory(action.robot, id, action.command);
       cardActions.appendChild(cardAction);
    }
-
    card.appendChild(cardActions);
-   
    return card;
 }
 

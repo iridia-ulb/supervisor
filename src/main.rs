@@ -18,6 +18,12 @@ type Robots<T> = Arc<RwLock<Vec<T>>>;
 
 #[tokio::main]
 async fn main() {
+    /* init the backend logger */
+    // TODO only show messages from the current module mns_supervisor
+    // TODO fix issue with PiPuck actions: why is action always Identify
+    // (it looks like this problem is JS related to how closures bind to variables)
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("mns_supervisor=info")).init();
+
     let (addr_tx, addr_rx) = mpsc::unbounded_channel();
     let (assoc_tx, mut assoc_rx) = mpsc::unbounded_channel();
 
