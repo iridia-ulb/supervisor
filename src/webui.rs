@@ -1,17 +1,22 @@
 use warp::ws;
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    time::Duration
+};
 
 use futures::{FutureExt, StreamExt};
 
 use tokio::{
-    sync::{ mpsc },
+    sync::mpsc,
+    time::timeout,
 };
 
 use regex::Regex;
 
 use super::{
     experiment,
+    optitrack,
     robots::{
         drone,
         pipuck,
@@ -72,7 +77,7 @@ struct Card {
     actions: Vec<Action>,
 }
 
-type Cards = HashMap<String, Card>;
+type Cards = HashMap<uuid::Uuid, Card>;
 
 // TODO, Reply will probably need to be wrapped in a enum soon Reply::Update, Reply::XXX
 #[derive(Serialize)]
@@ -110,28 +115,20 @@ pub async fn run(ws: ws::WebSocket, drones: Robots<drone::Drone>, pipucks: Robot
                     Request::Update(view) => {
                         let reply = match &view[..] {
                             "connections" => {
-                                Ok(Reply {
-                                    title: String::from("Connections"),
-                                    cards: connections(&drones, &pipucks).await
-                                })
+                                let (title, cards) = connections(&drones, &pipucks).await;
+                                Ok(Reply { title, cards })
                             },
                             "diagnostics" => {
-                                Ok(Reply {
-                                    title: String::from("Diagnostics"),
-                                    cards: diagnostics(&drones, &pipucks).await
-                                })
+                                let (title, cards) = diagnostics(&drones, &pipucks).await;
+                                Ok(Reply { title, cards })
                             },
                             "experiment" => {
-                                Ok(Reply {
-                                    title: String::from("Experiment"),
-                                    cards: experiment(&drones, &pipucks).await
-                                })
+                                let (title, cards) = experiment(&drones, &pipucks).await;
+                                Ok(Reply { title, cards })
                             },
                             "optitrack" => {
-                                Ok(Reply {
-                                    title: String::from("Optitrack"),
-                                    cards: optitrack(&drones, &pipucks).await
-                                })
+                                let (title, cards) = optitrack(&drones, &pipucks).await;
+                                Ok(Reply { title, cards })
                             },
                             _ => Err(Error::BadRequest),
                         };
@@ -177,14 +174,14 @@ pub async fn run(ws: ws::WebSocket, drones: Robots<drone::Drone>, pipucks: Robot
                 }
             }
             else {
-                log::error!("Cannot not deserialize message");
+                log::error!("cannot not deserialize message");
             }
         }
     }
     log::info!("client disconnected!");
 }
 
-async fn diagnostics(_drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::PiPuck>) -> Cards {
+async fn diagnostics(_drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::PiPuck>) -> (String, Cards) {
     lazy_static::lazy_static! {
         static ref IIO_CHECKS: Vec<(String, String)> =
             ["epuck-groundsensors", "epuck-motors", "epuck-leds", "epuck-rangefinders"].iter()
@@ -246,12 +243,12 @@ async fn diagnostics(_drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::Pi
             // the uuid, action name, and optionally arguments
             actions: Vec::new(), //pipuck.actions(),
         };
-        cards.insert(pipuck.uuid.to_string(), card);
+        cards.insert(pipuck.uuid.clone(), card);
     }
-    cards
+    ("Diagnostics".to_owned(), cards)
 }
 
-async fn experiment(_drones: &Robots<drone::Drone>, _pipucks: &Robots<pipuck::PiPuck>) -> Cards {
+async fn experiment(_drones: &Robots<drone::Drone>, _pipucks: &Robots<pipuck::PiPuck>) -> (String, Cards) {
     let mut cards = Cards::default();
        
     let card = Card {
@@ -263,7 +260,7 @@ async fn experiment(_drones: &Robots<drone::Drone>, _pipucks: &Robots<pipuck::Pi
         // the uuid, action name, and optionally arguments
         actions: vec![],
     };
-    cards.insert(String::from("Drone"), card);
+    cards.insert(uuid::Uuid::new_v3(&uuid::Uuid::NAMESPACE_OID, "experiment:drones".as_bytes()), card);
 
     let card = Card {
         span: 6,
@@ -274,7 +271,7 @@ async fn experiment(_drones: &Robots<drone::Drone>, _pipucks: &Robots<pipuck::Pi
         // the uuid, action name, and optionally arguments
         actions: vec![],
     };
-    cards.insert(String::from("Pi-Puck"), card);
+    cards.insert(uuid::Uuid::new_v3(&uuid::Uuid::NAMESPACE_OID, "experiment:pipucks".as_bytes()), card);
 
     let card = Card {
         span: 12,
@@ -285,19 +282,53 @@ async fn experiment(_drones: &Robots<drone::Drone>, _pipucks: &Robots<pipuck::Pi
         // the uuid, action name, and optionally arguments
         actions: vec![], // start/stop experiment
     };
-    cards.insert(String::from("Dashboard"), card);
+    cards.insert(uuid::Uuid::new_v3(&uuid::Uuid::NAMESPACE_OID, "experiment:dashboard".as_bytes()), card);
 
-    cards
+    ("Experiment".to_owned(), cards)
 }
 
-async fn optitrack(_drones: &Robots<drone::Drone>, _pipucks: &Robots<pipuck::PiPuck>) -> Cards {
-    Cards::default()
+async fn optitrack(_drones: &Robots<drone::Drone>, _pipucks: &Robots<pipuck::PiPuck>) -> (String, Cards) {
+    let mut cards = Cards::default();
+
+    if let Ok(inner) = timeout(Duration::from_millis(100), optitrack::once()).await {
+        if let Ok(frame_of_data) = inner {
+            for rigid_body in frame_of_data.rigid_bodies {
+                let position = format!("x = {:.3}, y = {:.3}, z = {:.3}",
+                    rigid_body.position.x,
+                    rigid_body.position.y,
+                    rigid_body.position.z);
+                let orientation = format!("w = {:.3}, x = {:.3}, y = {:.3}, z = {:.3}",
+                    rigid_body.orientation.w,
+                    rigid_body.orientation.vector().x,
+                    rigid_body.orientation.vector().y,
+                    rigid_body.orientation.vector().z);
+                let card = Card {
+                    span: 3,
+                    title: format!("Rigid body {}", rigid_body.id),
+                    content: Content::Table {
+                        header: vec!["Position".to_owned(), "Orientation".to_owned()],
+                        rows: vec![vec![position, orientation]]
+                    },
+                    // the actions depend on the state of the drone
+                    // the action part of the message must contain
+                    // the uuid, action name, and optionally arguments
+                    actions: vec![], // start/stop experiment
+                };
+                cards.insert(uuid::Uuid::new_v3(&uuid::Uuid::NAMESPACE_OID, &rigid_body.id.to_be_bytes()), card);
+            }
+        }
+        ("Optitrack".to_owned(), cards)
+    }
+    else {
+        ("Optitrack (offline)".to_owned(), cards)
+    }
+
+    
 }
 
-async fn connections(drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::PiPuck>) -> Cards {
+async fn connections(drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::PiPuck>) -> (String, Cards) {
     let mut cards = Cards::default();
     for drone in drones.read().await.iter() {
-
         let card = Card {
             span: 4,
             title: String::from("Drone"),
@@ -305,15 +336,9 @@ async fn connections(drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::PiP
                 header: vec!["Unique Identifier".to_owned(), "Xbee Address".to_owned(), "SSH Address".to_owned()],
                 rows: vec![vec![drone.uuid.to_string(), drone.xbee.addr.to_string(), String::from("-")]]
             },
-
-            // we need to convert actions back and forth between the JSON representation and the Rust representation
-            // we could convert these actions to strings and convert them back.
-
-            // the problem with converting them to JSON now, is that this struct itself needs to converted to JSON which gives
-            // a json inside json situation that no one really wants.
             actions: drone.actions().into_iter().map(Action::Drone).collect(),
         };
-        cards.insert(drone.uuid.to_string(), card);
+        cards.insert(drone.uuid.clone(), card);
     }
     for pipuck in pipucks.read().await.iter() {
         let card = Card {
@@ -325,7 +350,7 @@ async fn connections(drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::PiP
             },
             actions: pipuck.actions().into_iter().map(Action::PiPuck).collect(),
         };
-        cards.insert(pipuck.uuid.to_string(), card);
+        cards.insert(pipuck.uuid.clone(), card);
     }
-    cards
+    ("Connections".to_owned(), cards)
 }

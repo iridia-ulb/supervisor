@@ -13,6 +13,7 @@ use warp::Filter;
 mod robots;
 mod webui;
 mod experiment;
+mod optitrack;
 
 type Robots<T> = Arc<RwLock<Vec<T>>>;
 
