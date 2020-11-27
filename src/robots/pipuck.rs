@@ -28,6 +28,7 @@ pub struct PiPuck {
 }
 
 impl PiPuck {
+    
     pub fn new(ssh: ssh::Device) -> Self {
         Self {
             uuid: uuid::Uuid::new_v4(), 
@@ -39,15 +40,19 @@ impl PiPuck {
         vec![Action::RpiShutdown, Action::RpiReboot, Action::Identify]
     }
 
-    pub fn execute(&self, action: &Action) {
+    pub async fn execute(&mut self, action: &Action) {
         /* check to see if the requested action is still valid */
         if self.actions().contains(&action) {
             match action {
                 Action::RpiShutdown => {
-                    log::error!("pipuck::Action::RpiShutdown is not implemented")
+                    if let Err(error) = self.ssh.exec("shutdown 0; exit", false).await {
+                        log::error!("{:?} failed with: {}", action, error);
+                    }
                 },
                 Action::RpiReboot => {
-                    log::error!("pipuck::Action::RpiReboot is not implemented")
+                    if let Err(error) = self.ssh.exec("reboot; exit", false).await {
+                        log::error!("{:?} failed with: {}", action, error);
+                    }
                 },
                 Action::Identify => {
                     log::error!("pipuck::Action::Identify is not implemented")

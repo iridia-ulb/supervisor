@@ -15,18 +15,23 @@ use tokio::{
 use regex::Regex;
 
 use super::{
+    Robots,
+    Experiment,
     experiment,
     optitrack,
     robots::{
         drone,
         pipuck,
-    },
-    Robots
+    },   
 };
 
 use serde::{Deserialize, Serialize};
 
 use log;
+
+/// MDL HTML for icons
+const OK_ICON: &str = "<i class=\"material-icons mdl-list__item-icon\" style=\"color:green;\">check_circle</i>";
+const ERROR_ICON: &str = "<i class=\"material-icons mdl-list__item-icon\" style=\"color:red;\">error</i>";
 
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "lowercase")]
@@ -52,17 +57,32 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-// serde lower case
+// TODO remove serialize
 #[derive(Serialize, Deserialize, Debug)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "lowercase", tag = "type")]
 enum Request {
-    Update(String),
-    Action(Action, uuid::Uuid),
-    Emergency,
+    Experiment(experiment::Action),
+    Emergency,  
+    Drone {
+        action: drone::Action,
+        uuid: uuid::Uuid
+    },
+    PiPuck {
+        action: pipuck::Action,
+        uuid: uuid::Uuid
+    },
+    Update {
+        tab: String
+    },
+    Upload { 
+        target: String,
+        filename: String,
+        data: String
+    }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(rename_all = "lowercase", tag = "robot", content = "command")]
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "lowercase", tag = "type", content = "action")]
 enum Action {
     Drone(drone::Action),
     PiPuck(pipuck::Action),
@@ -86,7 +106,10 @@ struct Reply {
     cards: Cards,
 }
 
-pub async fn run(ws: ws::WebSocket, drones: Robots<drone::Drone>, pipucks: Robots<pipuck::PiPuck>) {
+pub async fn run(ws: ws::WebSocket,
+                 drones: Robots<drone::Drone>,
+                 pipucks: Robots<pipuck::PiPuck>,
+                 experiment: Experiment) {
     // Use a counter to assign a new unique ID for this user.
 
     log::info!("client connected!");
@@ -95,8 +118,8 @@ pub async fn run(ws: ws::WebSocket, drones: Robots<drone::Drone>, pipucks: Robot
 
     let (tx, rx) = mpsc::unbounded_channel();
     tokio::task::spawn(rx.forward(user_ws_tx).map(|result| {
-        if let Err(err) = result {
-            eprintln!("websocket send error: {}", err);
+        if let Err(error) = result {
+            log::error!("websocket send failed: {}", error);
         }
     }));
 
@@ -105,31 +128,52 @@ pub async fn run(ws: ws::WebSocket, drones: Robots<drone::Drone>, pipucks: Robot
         let request : ws::Message = match data {
             Ok(request) => request,
             Err(error) => {
-                eprintln!("websocket receive error {}", error);
+                log::error!("websocket receive failed: {}", error);
                 break;
             }
         };
         if let Ok(request) = request.to_str() {
+            /*
+            let t1 = Request::Upload{ target: "irobot".to_owned(), filename: "control.lua".to_owned(), data: "4591345879dsfsd908g".to_owned()};
+            let t2 = Request::PiPuck{ action: pipuck::Action::RpiReboot, uuid: uuid::Uuid::new_v4()};
+            let t3 = Request::Update{ tab: "Connections".to_owned() };
+            eprintln!("t1 = {}", serde_json::to_string(&t1).unwrap());
+            eprintln!("t2 = {}", serde_json::to_string(&t2).unwrap());
+            eprintln!("t3 = {}", serde_json::to_string(&t3).unwrap());
+            eprintln!("{}", request);
+            */
             if let Ok(action) = serde_json::from_str::<Request>(request) {
                 match action {
-                    Request::Update(view) => {
-                        let reply = match &view[..] {
-                            "connections" => {
-                                let (title, cards) = connections(&drones, &pipucks).await;
-                                Ok(Reply { title, cards })
-                            },
-                            "diagnostics" => {
-                                let (title, cards) = diagnostics(&drones, &pipucks).await;
-                                Ok(Reply { title, cards })
-                            },
-                            "experiment" => {
-                                let (title, cards) = experiment(&drones, &pipucks).await;
-                                Ok(Reply { title, cards })
-                            },
-                            "optitrack" => {
-                                let (title, cards) = optitrack(&drones, &pipucks).await;
-                                Ok(Reply { title, cards })
-                            },
+                    Request::Emergency => {
+                        // Go to emergency mode
+                    },
+                    Request::Experiment(action) => {
+                        experiment.write().await.execute(&action);
+                    },
+                    Request::Drone{action, uuid} => {
+                        let mut drones = drones.write().await;
+                        if let Some(drone) = drones.iter_mut().find(|drone| drone.uuid == uuid) {
+                            drone.execute(&action);
+                        }
+                        else {
+                            log::warn!("Could not execute {:?}, drone ({}) has disconnected", action, uuid);
+                        }
+                    },
+                    Request::PiPuck{action, uuid} => {
+                        let mut pipucks = pipucks.write().await;
+                        if let Some(pipuck) = pipucks.iter_mut().find(|pipuck| pipuck.uuid == uuid) {
+                            pipuck.execute(&action).await;
+                        }
+                        else {
+                            log::warn!("Could not execute {:?}, Pi-Puck ({}) has disconnected", action, uuid);
+                        }
+                    },
+                    Request::Update{tab} => {
+                        let reply = match &tab[..] {
+                            "connections" => Ok(connections_tab(&drones, &pipucks).await),
+                            "diagnostics" => Ok(diagnostics_tab(&drones, &pipucks).await),
+                            "experiment" => Ok(experiment_tab(&drones, &pipucks, &experiment).await),
+                            "optitrack" => Ok(optitrack_tab().await),
                             _ => Err(Error::BadRequest),
                         };
                         let result = reply
@@ -139,37 +183,24 @@ pub async fn run(ws: ws::WebSocket, drones: Robots<drone::Drone>, pipucks: Robot
                                 let message = Ok(ws::Message::text(inner));
                                 tx.send(message).map_err(|_| Error::ReplyError)
                             });
-                        if let Err(err) = result {
-                            eprintln!("TODO: Consider handling {}", err);
+                        if let Err(error) = result {
+                            log::error!("Could not reply to WebUI: {}", error);
                         }
-                    },
-                    Request::Action(action, uuid) => {
-                        match action {
-                            Action::Drone(action) => {
-                                let mut drones = drones.write().await;
-                                if let Some(drone) = drones.iter_mut().find(|drone| drone.uuid == uuid) {
-                                    drone.execute(&action);
+                    },       
+                    Request::Upload{target, filename, data} => {
+                        let mut data = data.split(',');
+                        if let Some(_mime) = data.next() {
+                            if let Some(data) = data.next() {
+                                if let Ok(data) = base64::decode(data) {
+                                    let mut pipucks = pipucks.write().await;
+                                    for pipuck in pipucks.iter_mut() {
+                                        if let Err(err) = pipuck.ssh.upload(&data, format!("/tmp/{}", filename), 0o644).await {
+                                            eprintln!("{}", err);
+                                        }
+                                    }
                                 }
-                                else {
-                                    log::warn!("Drone ({}) has disconnected", uuid)
-                                }
-                            },
-                            Action::PiPuck(action) => {
-                                let mut pipucks = pipucks.write().await;
-                                if let Some(pipuck) = pipucks.iter_mut().find(|pipuck| pipuck.uuid == uuid) {
-                                    pipuck.execute(&action);
-                                }
-                                else {
-                                    log::warn!("Pi-Puck ({}) has disconnected", uuid)
-                                }
-                            },
-                            Action::Experiment(_) => {
-
-                            }
+                            }    
                         }
-                    },
-                    Request::Emergency => {
-                        // Go to emergency mode
                     }
                 }
             }
@@ -181,17 +212,13 @@ pub async fn run(ws: ws::WebSocket, drones: Robots<drone::Drone>, pipucks: Robot
     log::info!("client disconnected!");
 }
 
-async fn diagnostics(_drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::PiPuck>) -> (String, Cards) {
+async fn diagnostics_tab(_drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::PiPuck>) -> Reply {
     lazy_static::lazy_static! {
         static ref IIO_CHECKS: Vec<(String, String)> =
             ["epuck-groundsensors", "epuck-motors", "epuck-leds", "epuck-rangefinders"].iter()
             .map(|dev| (String::from(*dev), format!("grep ^{} /sys/bus/iio/devices/*/name", dev)))
             .collect::<Vec<_>>();
         static ref REGEX_IIO_DEVICE: Regex = Regex::new(r"iio:device[[:digit:]]+").unwrap();
-        static ref OK_ICON: String = 
-            String::from("<i class=\"material-icons mdl-list__item-icon\" style=\"color:green;\">check_circle</i>");
-        static ref ERROR_ICON: String = 
-            String::from("<i class=\"material-icons mdl-list__item-icon\" style=\"color:red;\">error</i>");        
     }
     let mut cards = Cards::default();
     // TODO this should all be done asyncronously and combined with try_join. At the moment,
@@ -204,19 +231,19 @@ async fn diagnostics(_drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::Pi
                     if let Some(response) = response {
                         if let Some(device) = REGEX_IIO_DEVICE.find(&response) {
                             let device = &response[device.start() .. device.end()];
-                            vec![OK_ICON.clone(), iio_check.0.clone(), device.to_owned()]
+                            vec![OK_ICON.to_owned(), iio_check.0.clone(), device.to_owned()]
                             
                         }
                         else {
-                            vec![ERROR_ICON.clone(), iio_check.0.clone(), "Not found".to_owned()]
+                            vec![ERROR_ICON.to_owned(), iio_check.0.clone(), "Not found".to_owned()]
                         }
                     }
                     else {
-                        vec![ERROR_ICON.clone(), iio_check.0.clone(), "No reply".to_owned()]
+                        vec![ERROR_ICON.to_owned(), iio_check.0.clone(), "No reply".to_owned()]
                     }
                 }
                 Err(err) => {
-                    vec![ERROR_ICON.clone(), iio_check.0.clone(), err.to_string()]
+                    vec![ERROR_ICON.to_owned(), iio_check.0.clone(), err.to_string()]
                 }
             };
             responses.push(response);
@@ -245,10 +272,10 @@ async fn diagnostics(_drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::Pi
         };
         cards.insert(pipuck.uuid.clone(), card);
     }
-    ("Diagnostics".to_owned(), cards)
+    Reply { title: "Diagnostics".to_owned(), cards }
 }
 
-async fn experiment(_drones: &Robots<drone::Drone>, _pipucks: &Robots<pipuck::PiPuck>) -> (String, Cards) {
+async fn experiment_tab(_: &Robots<drone::Drone>, _: &Robots<pipuck::PiPuck>, experiment: &Experiment) -> Reply {
     let mut cards = Cards::default();
        
     let card = Card {
@@ -258,7 +285,7 @@ async fn experiment(_drones: &Robots<drone::Drone>, _pipucks: &Robots<pipuck::Pi
         // the actions depend on the state of the drone
         // the action part of the message must contain
         // the uuid, action name, and optionally arguments
-        actions: vec![],
+        actions: Vec::new(),
     };
     cards.insert(uuid::Uuid::new_v3(&uuid::Uuid::NAMESPACE_OID, "experiment:drones".as_bytes()), card);
 
@@ -269,7 +296,7 @@ async fn experiment(_drones: &Robots<drone::Drone>, _pipucks: &Robots<pipuck::Pi
         // the actions depend on the state of the drone
         // the action part of the message must contain
         // the uuid, action name, and optionally arguments
-        actions: vec![],
+        actions: Vec::new(),
     };
     cards.insert(uuid::Uuid::new_v3(&uuid::Uuid::NAMESPACE_OID, "experiment:pipucks".as_bytes()), card);
 
@@ -280,14 +307,14 @@ async fn experiment(_drones: &Robots<drone::Drone>, _pipucks: &Robots<pipuck::Pi
         // the actions depend on the state of the drone
         // the action part of the message must contain
         // the uuid, action name, and optionally arguments
-        actions: vec![], // start/stop experiment
+        actions: experiment.read().await.actions().into_iter().map(Action::Experiment).collect(), // start/stop experiment
     };
     cards.insert(uuid::Uuid::new_v3(&uuid::Uuid::NAMESPACE_OID, "experiment:dashboard".as_bytes()), card);
 
-    ("Experiment".to_owned(), cards)
+    Reply { title: "Experiment".to_owned(), cards }
 }
 
-async fn optitrack(_drones: &Robots<drone::Drone>, _pipucks: &Robots<pipuck::PiPuck>) -> (String, Cards) {
+async fn optitrack_tab() -> Reply {
     let mut cards = Cards::default();
 
     if let Ok(inner) = timeout(Duration::from_millis(100), optitrack::once()).await {
@@ -317,16 +344,14 @@ async fn optitrack(_drones: &Robots<drone::Drone>, _pipucks: &Robots<pipuck::PiP
                 cards.insert(uuid::Uuid::new_v3(&uuid::Uuid::NAMESPACE_OID, &rigid_body.id.to_be_bytes()), card);
             }
         }
-        ("Optitrack".to_owned(), cards)
+        Reply { title: "Optitrack".to_owned(), cards }
     }
     else {
-        ("Optitrack (offline)".to_owned(), cards)
+        Reply { title: "Optitrack [OFFLINE]".to_owned(), cards }
     }
-
-    
 }
 
-async fn connections(drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::PiPuck>) -> (String, Cards) {
+async fn connections_tab(drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::PiPuck>) -> Reply {
     let mut cards = Cards::default();
     for drone in drones.read().await.iter() {
         let card = Card {
@@ -352,5 +377,5 @@ async fn connections(drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::PiP
         };
         cards.insert(pipuck.uuid.clone(), card);
     }
-    ("Connections".to_owned(), cards)
+    Reply { title: "Connections".to_owned(), cards }
 }

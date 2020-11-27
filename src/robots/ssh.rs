@@ -1,6 +1,15 @@
 use thrussh_keys::key::PublicKey;
 use futures::{future, future::Ready};
-use std::{sync::Arc, net::Ipv4Addr};
+use std::{
+    sync::Arc,
+    net::Ipv4Addr,
+    io::{
+        Read,
+        Cursor
+    },
+    path::Path
+};
+
 use tokio::sync::Mutex;
 
 #[derive(thiserror::Error, Debug)]
@@ -9,6 +18,8 @@ pub enum Error {
     ConnectionFailure,
     #[error("Could not login to server")]
     LoginFailure,
+    #[error("Could not create channel")]
+    ChannelFailure,
     #[error("Could not communicate with server")]
     IoFailure,
     /*
@@ -33,6 +44,8 @@ impl std::fmt::Debug for Device {
     }
 }
 
+const CONFIRM: &'static [u8] = &[0];
+
 impl Device {
     pub async fn new(addr: Ipv4Addr) -> Result<Self> {
         let config : thrussh::client::Config = Default::default();
@@ -47,7 +60,7 @@ impl Device {
             return Err(Error::LoginFailure);
         }
         let mut shell = handle.channel_open_session().await
-            .map_err(|_| Error::IoFailure)?;
+            .map_err(|_| Error::ChannelFailure)?;
         shell.request_shell(true).await
             .map_err(|_| Error::IoFailure)?;
         Ok(Device { addr, handle, shell: Mutex::new(shell) })
@@ -59,6 +72,50 @@ impl Device {
         Ok(false)
     }
     */
+    
+    pub async fn upload<D, P>(&mut self, data: D, path: P, permissions: usize) -> Result<()>
+        where D: AsRef<[u8]>, P: AsRef<Path> {
+        let path = path.as_ref();
+        let data = data.as_ref();
+        if let Some(directory) = path.parent() {
+            if let Some(file_name) = path.file_name() {
+                let mut channel = self.handle.channel_open_session().await
+                    .map_err(|_| Error::ChannelFailure)?;
+                let command = format!("scp -t {}", directory.to_string_lossy());
+                channel.exec(false, command).await
+                    .map_err(|_| Error::IoFailure)?;
+                let header = format!("C0{:o} {} {}\n",
+                    permissions,
+                    data.len(),
+                    file_name.to_string_lossy());
+                /* chain the data together */
+                let mut wrapped_data = Cursor::new(header)
+                    .chain(Cursor::new(data))
+                    .chain(Cursor::new(CONFIRM));
+                /* create an intermediate buffer for moving the data */
+                let mut buffer = [0; 32];
+                /* transfer the data */
+                while let Ok(count) = wrapped_data.read(&mut buffer) {
+                    if count != 0 {
+                        channel.data(&buffer[0..count]).await
+                            .map_err(|_| Error::IoFailure)?;
+                    }
+                    else {
+                        break;
+                    }
+                }               
+                channel.eof().await
+                    .map_err(|_| Error::ChannelFailure)?;
+            }
+            else {
+                log::error!("Could not extract filename from {}", path.to_string_lossy());
+            }
+        }
+        else {
+            log::error!("Could not extract directory from {}", path.to_string_lossy());
+        }
+        Ok(())
+    }
 
     pub async fn exec<A: Into<String>>(&mut self, command: A, want_reply: bool) -> Result<Option<String>> {
         /* lock the shell */

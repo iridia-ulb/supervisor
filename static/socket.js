@@ -18,7 +18,8 @@ function setView(uiView) {
 ws.onopen = function() {
    uiTimer = setInterval(function() {
       var message = JSON.stringify({
-         'update' : uiCurrentView
+         type: 'update',
+         tab : uiCurrentView
       });
       ws.send(message);
    }, 250);
@@ -134,27 +135,27 @@ function contentToHTML(content) {
 }
 
 /* factory for sending commands to the backend */
-function sendActionFactory(robot, id, command) {
+function sendActionFactory(robot, uuid, command) {
    return function() {
       var message = JSON.stringify({
-         action: [{
-            robot: robot,
-            command: command
-         }, id]
+         type: robot,
+         action: command,
+         uuid: uuid,
       });
       ws.send(message);
    }
 }
 
-function newCard(id, title, span, content, actions) {
+function newCard(id, title, span, content, controls) {
    /* create card */
    var card = document.createElement('div');
    card.setAttribute('id', id);
    var cardSpan = 'mdl-cell--' + span + '-col';
-   card.setAttribute('class', 'mdl-cell dl-card mdl-shadow--2dp ' + cardSpan); 
+   card.setAttribute('class', 'mdl-cell dl-card mdl-shadow--2dp ' + cardSpan);
+
    /* create title */
    var cardTitle = document.createElement('div');
-   cardTitle.setAttribute('class', 'mdl-card__title');  
+   cardTitle.setAttribute('class', 'mdl-card__title');
    var cardTitleText = document.createElement('h2');
    cardTitleText.setAttribute('class', 'mdl-card__title-text');
    cardTitleText.innerHTML = title;
@@ -163,18 +164,48 @@ function newCard(id, title, span, content, actions) {
    /* create content */
    var cardContent = contentToHTML(content);
    card.appendChild(cardContent);
-   /* create actions */
-   cardActions = document.createElement('div');
-   cardActions.setAttribute('class', 'mdl-card__actions mdl-card--border');
-   for(var action of actions) {
-      cardAction = document.createElement('a');
-      cardAction.setAttribute('class', 'mdl-button mdl-button--colored mdl-js-button mdl-js-ripple-effect');
-      console.log(action);
-      cardAction.innerHTML = action.command;
-      cardAction.onclick = sendActionFactory(action.robot, id, action.command);
-      cardActions.appendChild(cardAction);
+   /* create controls */
+   cardControls = document.createElement('div');
+   cardControls.setAttribute('class', 'mdl-card__actions mdl-card--border');
+   for(var control of controls) {
+      cardControl = document.createElement('a');
+      cardControl.setAttribute('class', 'mdl-button mdl-button--colored mdl-js-button mdl-js-ripple-effect');
+      cardControl.innerHTML = control.action;
+      cardControl.onclick = sendActionFactory(control.type, id, control.action);
+      cardControls.appendChild(cardControl);
    }
-   card.appendChild(cardActions);
+   
+   cardControlInput = document.createElement('input');
+   cardControlInput.setAttribute('type', 'file');
+   cardControlInput.setAttribute('multiple', true);
+   cardControlInput.setAttribute('id', 'filexxx');
+   cardControlInput.setAttribute('style', 'display: none');
+   cardControlInput.onchange = function() {
+      uploadInput = document.getElementById('filexxx');
+      for (var i = 0; i < uploadInput.files.length; i++) {
+         const file = uploadInput.files[i];
+         const reader = new FileReader();
+         reader.onload = function(ev) {
+            var message = JSON.stringify({
+               type: 'upload',
+               target: 'thepipuck',
+               filename: file.name,
+               data: ev.target.result,
+            });
+            console.log(message);
+            ws.send(message);
+         };
+         reader.readAsDataURL(file);
+      }
+   };
+   cardControl = document.createElement('label');
+   cardControl.setAttribute('for', 'filexxx');
+   cardControl.setAttribute('class', 'mdl-button mdl-button--colored mdl-js-button mdl-js-ripple-effect');
+   cardControl.innerHTML = 'Set Controller';
+   cardControl.appendChild(cardControlInput);
+   cardControls.appendChild(cardControl);
+
+   card.appendChild(cardControls);
    return card;
 }
 

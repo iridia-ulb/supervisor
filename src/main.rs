@@ -16,6 +16,7 @@ mod experiment;
 mod optitrack;
 
 type Robots<T> = Arc<RwLock<Vec<T>>>;
+type Experiment = Arc<RwLock<experiment::Experiment>>;
 
 #[tokio::main]
 async fn main() {
@@ -44,11 +45,21 @@ async fn main() {
     
     let drones = Robots::default();
     let pipucks = Robots::default();
+    let experiment = Experiment::default();
     let drones_clone = drones.clone();
     let pipuck_clone = pipucks.clone();
+    let experiment_clone = experiment.clone();
     let drones_filter = warp::any().map(move || drones_clone.clone());
     let pipuck_filter = warp::any().map(move || pipuck_clone.clone());
+    let experiment_filter = warp::any().map(move || experiment_clone.clone());
 
+    // review this code, we need to ping these device to detect if any devices go offline
+    // pinging is a bit more complicated than it looks, perhaps just requesting a response
+    // from an xbee command or running a simple ssh command is sufficient?
+
+    // figure out how to upload files via SSH
+    // install python and libIIO by default on the robot so that small python programs can
+    // be pushed to identify a robot?
 
     let task_temp = tokio::task::spawn(async move {
         while let Some(device) = assoc_rx.next().await {
@@ -57,14 +68,15 @@ async fn main() {
                     if let Ok(hostname) = device.hostname().await {
                         match &hostname[..] {
                             "raspberrypi0-wifi" => {
-                                let pipuck = PiPuck::new(device);
+                                let mut pipuck = PiPuck::new(device);
+                                if let Err(error) = pipuck.ssh.upload("hello scp", "/tmp/test", 0o644).await {
+                                    log::error!("UPLOAD FAILED {:?}", error)
+                                }
                                 pipucks.write().await.push(pipuck);
                             },
                             _ => {
-                                eprintln!("[warning] {} accepted the SSH \
-                                          connection with root login, but the \
-                                          hostname ({}) was not recognised",
-                                          hostname, device.addr);
+                                log::warn!("{} accepted SSH connection with root login, but the \
+                                          hostname ({}) was not recognised", hostname, device.addr);
                                 // place back in the pool with 5 second delay
                             }
                         }
@@ -96,9 +108,13 @@ async fn main() {
         .and(warp::ws())
         .and(drones_filter)
         .and(pipuck_filter)
-        .map(|ws: warp::ws::Ws, drones : Robots<Drone>, pipucks : Robots<PiPuck>| {
+        .and(experiment_filter)
+        .map(|ws: warp::ws::Ws, 
+              drones : Robots<Drone>,
+              pipucks : Robots<PiPuck>,
+              experiment : Experiment | {
             // This will call our function if the handshake succeeds.
-            ws.on_upgrade(move |socket| webui::run(socket, drones, pipucks))
+            ws.on_upgrade(move |socket| webui::run(socket, drones, pipucks, experiment))
         });
 
     // does the 'async move' all referenced variables into the lambda?
