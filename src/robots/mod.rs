@@ -1,5 +1,5 @@
-mod ssh;
 mod xbee;
+pub mod ssh;
 pub mod drone;
 pub mod pipuck;
 

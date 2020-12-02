@@ -8,11 +8,9 @@ const PIXHAWK_POWER_BIT_INDEX: u8 = 12;
 const MUX_CONTROL_BIT_INDEX: u8 = 4;
 
 #[derive(Debug)]
-enum State {
+pub enum State {
     Standby,
-    Ready {
-        ssh: ssh::Device
-    },
+    Ready(ssh::Device),
 }
 
 // Note: the power off, shutdown, reboot up core actions
@@ -61,6 +59,13 @@ impl Drone {
             state: State::Standby,
         }
     }
+
+    pub fn ssh(&mut self) -> Option<&mut ssh::Device> {
+        match &mut self.state {
+            State::Standby => None,
+            State::Ready(ssh) => Some(ssh),
+        }
+    } 
 
     pub async fn init(&mut self) -> Result<()> {
         /* pin configuration */

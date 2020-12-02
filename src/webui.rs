@@ -5,7 +5,7 @@ use std::{
     time::Duration
 };
 
-use futures::{FutureExt, StreamExt};
+use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 
 use tokio::{
     sync::mpsc,
@@ -16,9 +16,11 @@ use regex::Regex;
 
 use super::{
     Robots,
+    robots,
     Experiment,
     experiment,
     optitrack,
+    firmware,
     robots::{
         drone,
         pipuck,
@@ -29,9 +31,12 @@ use serde::{Deserialize, Serialize};
 
 use log;
 
+use itertools::Itertools;
+
 /// MDL HTML for icons
 const OK_ICON: &str = "<i class=\"material-icons mdl-list__item-icon\" style=\"color:green;\">check_circle</i>";
 const ERROR_ICON: &str = "<i class=\"material-icons mdl-list__item-icon\" style=\"color:red;\">error</i>";
+
 
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "lowercase")]
@@ -74,10 +79,10 @@ enum Request {
     Update {
         tab: String
     },
-    Upload { 
-        target: String,
-        filename: String,
-        data: String
+    Firmware {
+        action: firmware::Action,
+        file: Option<(String, String)>,
+        uuid: uuid::Uuid
     }
 }
 
@@ -87,6 +92,7 @@ enum Action {
     Drone(drone::Action),
     PiPuck(pipuck::Action),
     Experiment(experiment::Action),
+    Firmware(firmware::Action),
 }
 
 #[derive(Serialize, Debug)]
@@ -104,6 +110,23 @@ type Cards = HashMap<uuid::Uuid, Card>;
 struct Reply {
     title: String,
     cards: Cards,
+}
+
+lazy_static::lazy_static! {
+    /* UUIDs */
+    static ref UUID_CONFIG: uuid::Uuid =
+        uuid::Uuid::new_v3(&uuid::Uuid::NAMESPACE_OID, "experiment".as_bytes());
+    static ref UUID_CONFIG_DRONE: uuid::Uuid =
+        uuid::Uuid::new_v3(&UUID_CONFIG, "drones".as_bytes());
+    static ref UUID_CONFIG_PIPUCK: uuid::Uuid =
+        uuid::Uuid::new_v3(&UUID_CONFIG, "pipucks".as_bytes());
+    
+    /* other */
+    static ref IIO_CHECKS: Vec<(String, String)> =
+            ["epuck-groundsensors", "epuck-motors", "epuck-leds", "epuck-rangefinders"].iter()
+            .map(|dev| (String::from(*dev), format!("grep ^{} /sys/bus/iio/devices/*/name", dev)))
+            .collect::<Vec<_>>();
+    static ref REGEX_IIO_DEVICE: Regex = Regex::new(r"iio:device[[:digit:]]+").unwrap();
 }
 
 pub async fn run(ws: ws::WebSocket,
@@ -140,7 +163,6 @@ pub async fn run(ws: ws::WebSocket,
             eprintln!("t1 = {}", serde_json::to_string(&t1).unwrap());
             eprintln!("t2 = {}", serde_json::to_string(&t2).unwrap());
             eprintln!("t3 = {}", serde_json::to_string(&t3).unwrap());
-            eprintln!("{}", request);
             */
             if let Ok(action) = serde_json::from_str::<Request>(request) {
                 match action {
@@ -184,24 +206,93 @@ pub async fn run(ws: ws::WebSocket,
                                 tx.send(message).map_err(|_| Error::ReplyError)
                             });
                         if let Err(error) = result {
-                            log::error!("Could not reply to WebUI: {}", error);
+                            log::error!("Could not reply to client: {}", error);
                         }
-                    },       
-                    Request::Upload{target, filename, data} => {
-                        let mut data = data.split(',');
-                        if let Some(_mime) = data.next() {
-                            if let Some(data) = data.next() {
-                                if let Ok(data) = base64::decode(data) {
-                                    let mut pipucks = pipucks.write().await;
-                                    for pipuck in pipucks.iter_mut() {
-                                        if let Err(err) = pipuck.ssh.upload(&data, format!("/tmp/{}", filename), 0o644).await {
-                                            eprintln!("{}", err);
+                    },
+                    Request::Firmware{action, uuid, file} => {
+                        match action {
+                            firmware::Action::Upload => {
+                                let file = file.and_then(|(name, content)| {
+                                    match content.split(',').tuples::<(_,_)>().next() {
+                                        Some((_, data)) => {
+                                            match base64::decode(data) {
+                                                Ok(data) => Some((name, data)),
+                                                Err(error) => {
+                                                    log::error!("Could not decode {}: {}", name, error);
+                                                    None
+                                                }
+                                            }
+                                        },
+                                        None => None
+                                    }
+                                });
+                                if let Some((filename, content)) = &file {
+                                    if uuid == *UUID_CONFIG_DRONE {
+                                        let mut drones = drones.write().await;
+                                        let mut tasks = drones
+                                            .iter_mut()
+                                            .filter_map(|drone| drone.ssh())
+                                            .map(|drone| {
+                                                drone.add_ctrl_software(filename, content)
+                                            })
+                                            .collect::<FuturesUnordered<_>>();
+                                        while let Some(result) = tasks.next().await {
+                                            if let Err(error) = result {
+                                                log::error!("Failed to add control software {}: {}", filename, error)
+                                            }
+                                        }
+                                    }
+                                    else if uuid == *UUID_CONFIG_PIPUCK {
+                                        let mut pipucks = pipucks.write().await;
+                                        let mut tasks = pipucks
+                                            .iter_mut()
+                                            .map(|pipuck| pipuck.ssh.add_ctrl_software(filename, content))
+                                            .collect::<FuturesUnordered<_>>();
+                                        while let Some(result) = tasks.next().await {
+                                            if let Err(error) = result {
+                                                log::error!("Failed to add control software {}: {}", filename, error)
+                                            }
+                                        }
+                                    }
+                                    else {
+                                        log::error!("UUID target does not support adding control software");
+                                    }
+                                }
+                            }
+                            firmware::Action::Clear => {
+                                if uuid == *UUID_CONFIG_DRONE {
+                                    let mut drones = drones.write().await;
+                                    let mut tasks = drones
+                                        .iter_mut()
+                                        .filter_map(|drone| drone.ssh())
+                                        .map(|drone| {
+                                            drone.clear_ctrl_software()
+                                        })
+                                        .collect::<FuturesUnordered<_>>();
+                                    while let Some(result) = tasks.next().await {
+                                        if let Err(error) = result {
+                                            log::error!("Failed to clear control software: {}", error);
                                         }
                                     }
                                 }
-                            }    
+                                else if uuid == *UUID_CONFIG_PIPUCK {
+                                    let mut pipucks = pipucks.write().await;
+                                    let mut tasks = pipucks
+                                        .iter_mut()
+                                        .map(|pipuck| pipuck.ssh.clear_ctrl_software())
+                                        .collect::<FuturesUnordered<_>>();
+                                    while let Some(result) = tasks.next().await {
+                                        if let Err(error) = result {
+                                            log::error!("Failed to clear control software: {}", error);
+                                        }
+                                    }
+                                }
+                                else {
+                                    log::error!("UUID target does not support clearing control software");
+                                }
+                            }
                         }
-                    }
+                    },
                 }
             }
             else {
@@ -213,71 +304,54 @@ pub async fn run(ws: ws::WebSocket,
 }
 
 async fn diagnostics_tab(_drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::PiPuck>) -> Reply {
-    lazy_static::lazy_static! {
-        static ref IIO_CHECKS: Vec<(String, String)> =
-            ["epuck-groundsensors", "epuck-motors", "epuck-leds", "epuck-rangefinders"].iter()
-            .map(|dev| (String::from(*dev), format!("grep ^{} /sys/bus/iio/devices/*/name", dev)))
-            .collect::<Vec<_>>();
-        static ref REGEX_IIO_DEVICE: Regex = Regex::new(r"iio:device[[:digit:]]+").unwrap();
-    }
+    let mut pipucks = pipucks.write().await;
+    let mut tasks = pipucks
+        .iter_mut()
+        .map(|pipuck| async move {
+            (pipuck.uuid.clone(), pipuck.ssh.ctrl_software().await)
+        })
+        .collect::<FuturesUnordered<_>>();
+    /* hashmap of cards */
     let mut cards = Cards::default();
-    // TODO this should all be done asyncronously and combined with try_join. At the moment,
-    // we are waiting for each robot to reply X times via SSH before moving on to the next robot
-    for pipuck in pipucks.write().await.iter_mut() {
-        let mut responses = Vec::with_capacity(IIO_CHECKS.len());
-        for iio_check in IIO_CHECKS.iter() {
-            let response = match pipuck.ssh.exec(&iio_check.1, true).await {
-                Ok(response) => {
-                    if let Some(response) = response {
-                        if let Some(device) = REGEX_IIO_DEVICE.find(&response) {
-                            let device = &response[device.start() .. device.end()];
-                            vec![OK_ICON.to_owned(), iio_check.0.clone(), device.to_owned()]
-                            
-                        }
-                        else {
-                            vec![ERROR_ICON.to_owned(), iio_check.0.clone(), "Not found".to_owned()]
-                        }
-                    }
-                    else {
-                        vec![ERROR_ICON.to_owned(), iio_check.0.clone(), "No reply".to_owned()]
-                    }
+    /* create a card for each robot once it replies */
+    while let Some((uuid, result)) = tasks.next().await {
+        let card = match result {
+            Ok(files) => {
+                /* table header */
+                let header = ["File", "Checksum"].iter().map(|s| {
+                    String::from(*s)
+                }).collect::<Vec<_>>();
+                /* card */
+                Card {
+                    span: 3,
+                    title: format!("Pi-Puck"),
+                    content: Content::Table {
+                        header: header,
+                        rows: files
+                            .into_iter()
+                            .map(|(checksum, path)| vec![path, checksum])
+                            .collect()
+                    },
+                    actions: Vec::default(),
                 }
-                Err(err) => {
-                    vec![ERROR_ICON.to_owned(), iio_check.0.clone(), err.to_string()]
-                }
-            };
-            responses.push(response);
-        }
-  
-        let header = ["Status", "Device", "Information"].iter().map(|s| {
-            String::from(*s)
-        }).collect::<Vec<_>>();
-
-        
-
-        let card = Card {
-            span: 3,
-            title: format!("Pi-Puck ({})", pipuck.ssh.hostname().await.unwrap_or("-".to_owned())),
-            //content: Content::List(responses),
-            
-            content: Content::Table {
-                header: header,
-                rows: responses
             },
-            
-            // the actions depend on the state of the drone
-            // the action part of the message must contain
-            // the uuid, action name, and optionally arguments
-            actions: Vec::new(), //pipuck.actions(),
+            Err(error) => {
+                let error = format!("{} {}", ERROR_ICON, error);
+                Card {
+                    span: 3,
+                    title: format!("Pi-Puck"),
+                    content: Content::Text(error),
+                    actions: Vec::default(),
+                }
+            }
         };
-        cards.insert(pipuck.uuid.clone(), card);
+        cards.insert(uuid, card);
     }
     Reply { title: "Diagnostics".to_owned(), cards }
 }
 
 async fn experiment_tab(_: &Robots<drone::Drone>, _: &Robots<pipuck::PiPuck>, experiment: &Experiment) -> Reply {
     let mut cards = Cards::default();
-       
     let card = Card {
         span: 6,
         title: String::from("Drone Configuration"),
@@ -285,10 +359,10 @@ async fn experiment_tab(_: &Robots<drone::Drone>, _: &Robots<pipuck::PiPuck>, ex
         // the actions depend on the state of the drone
         // the action part of the message must contain
         // the uuid, action name, and optionally arguments
-        actions: Vec::new(),
+        actions: vec![firmware::Action::Upload, firmware::Action::Clear]
+            .into_iter().map(Action::Firmware).collect(),
     };
-    cards.insert(uuid::Uuid::new_v3(&uuid::Uuid::NAMESPACE_OID, "experiment:drones".as_bytes()), card);
-
+    cards.insert(*UUID_CONFIG_DRONE, card);
     let card = Card {
         span: 6,
         title: String::from("Pi-Puck Configuration"),
@@ -296,10 +370,10 @@ async fn experiment_tab(_: &Robots<drone::Drone>, _: &Robots<pipuck::PiPuck>, ex
         // the actions depend on the state of the drone
         // the action part of the message must contain
         // the uuid, action name, and optionally arguments
-        actions: Vec::new(),
+        actions: vec![firmware::Action::Upload, firmware::Action::Clear]
+            .into_iter().map(Action::Firmware).collect(),
     };
-    cards.insert(uuid::Uuid::new_v3(&uuid::Uuid::NAMESPACE_OID, "experiment:pipucks".as_bytes()), card);
-
+    cards.insert(*UUID_CONFIG_PIPUCK, card);
     let card = Card {
         span: 12,
         title: String::from("Dashboard"),
@@ -310,7 +384,6 @@ async fn experiment_tab(_: &Robots<drone::Drone>, _: &Robots<pipuck::PiPuck>, ex
         actions: experiment.read().await.actions().into_iter().map(Action::Experiment).collect(), // start/stop experiment
     };
     cards.insert(uuid::Uuid::new_v3(&uuid::Uuid::NAMESPACE_OID, "experiment:dashboard".as_bytes()), card);
-
     Reply { title: "Experiment".to_owned(), cards }
 }
 

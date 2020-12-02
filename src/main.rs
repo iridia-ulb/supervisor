@@ -14,6 +14,7 @@ mod robots;
 mod webui;
 mod experiment;
 mod optitrack;
+mod firmware;
 
 type Robots<T> = Arc<RwLock<Vec<T>>>;
 type Experiment = Arc<RwLock<experiment::Experiment>>;

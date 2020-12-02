@@ -1,5 +1,6 @@
 use thrussh_keys::key::PublicKey;
 use futures::{future, future::Ready};
+use itertools::Itertools;
 use std::{
     sync::Arc,
     net::Ipv4Addr,
@@ -7,7 +8,7 @@ use std::{
         Read,
         Cursor
     },
-    path::Path
+    path::{Path, PathBuf},
 };
 
 use tokio::sync::Mutex;
@@ -33,7 +34,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct Device {
     pub addr: Ipv4Addr,
     handle: thrussh::client::Handle,
-    shell: Mutex<thrussh::client::Channel>
+    shell: Mutex<thrussh::client::Channel>,
+    ctrl_software_path: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for Device {
@@ -63,7 +65,38 @@ impl Device {
             .map_err(|_| Error::ChannelFailure)?;
         shell.request_shell(true).await
             .map_err(|_| Error::IoFailure)?;
-        Ok(Device { addr, handle, shell: Mutex::new(shell) })
+        Ok(Device { addr, handle, shell: Mutex::new(shell), ctrl_software_path: None })
+    }
+
+    pub async fn clear_ctrl_software(&mut self) -> Result<()> {
+        let reply = self.exec("mktemp -d").await?;
+        self.ctrl_software_path = Some(PathBuf::from(reply));
+        Ok(())
+    }
+
+    pub async fn add_ctrl_software<N, C>(&mut self, name: N, contents: C) -> Result<()>
+        where N: AsRef<Path>, C: AsRef<[u8]> {
+        if let Some(ctrl_software_path) = &self.ctrl_software_path {
+            let upload_path = ctrl_software_path.join(name);
+            log::info!("uploading: {:?}", upload_path);
+            self.upload(&contents, &upload_path, 0o644).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn ctrl_software(&mut self) -> Result<Vec<(String, String)>> {
+        if let Some(path) = &self.ctrl_software_path {
+            let query = format!("find {} -type f -exec md5sum '{{}}' \\;", path.to_string_lossy());
+            let response = self.exec(query).await?
+                .split_whitespace()
+                .tuples::<(_, _)>()
+                .map(|(c, p)| (String::from(c), String::from(p)))
+                .collect::<Vec<_>>();
+            Ok(response)
+        }
+        else {
+            Ok(Vec::new())
+        }
     }
 
     /*
@@ -117,36 +150,37 @@ impl Device {
         Ok(())
     }
 
-    pub async fn exec<A: Into<String>>(&mut self, command: A, want_reply: bool) -> Result<Option<String>> {
+    pub async fn exec<A: AsRef<str>>(&mut self, command: A) -> Result<String> {
         /* lock the shell */
         let mut shell = self.shell.lock().await;
+        /* wrap command so that its output is wrapped with SOT and EOT markers */
+        let padded_command =
+            format!("printf \"%b%s%b\" \"\\002\" \"`{}`\" \"\\003\"\n", command.as_ref());
         /* write command */
-        shell.data(format!("{}\n", command.into()).as_bytes()).await
+        shell.data(padded_command.as_bytes()).await
             .map_err(|_| Error::IoFailure)?;
         /* get reply */
-        if want_reply {
-            while let Some(message) = shell.wait().await {
-                if let thrussh::ChannelMsg::Data { data } = message {
-                    if let Ok(data) = String::from_utf8(data.to_vec()) {
-                        return Ok(Some(data));
+        let mut buffer = Vec::new();
+        while let Some(message) = shell.wait().await {
+            if let thrussh::ChannelMsg::Data { data } = message {
+                buffer.extend(data.to_vec());
+                /* search for SOT and EOT in stream */
+                if let Some(start) = buffer.iter().position(|b| b == &2_u8) {
+                    if let Some(end) = buffer.iter().rposition(|b| b == &3_u8) {
+                        if start < end {
+                            return std::str::from_utf8(&buffer[start+1..end])
+                                .map_err(|_| Error::IoFailure)    
+                                .map(String::from);
+                        }
                     }
                 }
             }
-            return Err(Error::IoFailure);
         }
-        Ok(None)       
-    }
+        Err(Error::IoFailure)
+    }   
 
     pub async fn hostname(&mut self) -> Result<String> {
-        match self.exec("hostname", true).await? {
-            Some(mut hostname) => {
-                hostname.retain(|c| !c.is_whitespace());
-                Ok(hostname)
-            }
-            None => {
-                Err(Error::IoFailure)
-            }
-        }        
+        self.exec("hostname").await
     }
 }
 

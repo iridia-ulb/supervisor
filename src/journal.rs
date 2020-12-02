@@ -19,7 +19,7 @@ struct Entry {
 }
 
 // todo spawn a logging task here and return a channel for logging messages
-fn log() -> std::io::Result<()> {
+fn new() -> std::io::Result<()> {
     let start = Instant::now();
 
     let test = Entry {

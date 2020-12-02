@@ -25,6 +25,7 @@ ipnet = { version = "2.3" }
 regex = { version = "1.4" }
 lazy_static = { version = "1.4" }
 base64 = { version = "0.13" }
+itertools = { version = "0.9.0" }
 
 semver = { version = "0.4"}
 log = { version = "0.4" }

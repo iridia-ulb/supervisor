@@ -1,5 +1,6 @@
 use super::ssh;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use uuid;
 use log;
 
@@ -45,12 +46,12 @@ impl PiPuck {
         if self.actions().contains(&action) {
             match action {
                 Action::RpiShutdown => {
-                    if let Err(error) = self.ssh.exec("shutdown 0; exit", false).await {
+                    if let Err(error) = self.ssh.exec("shutdown 0; exit").await {
                         log::error!("{:?} failed with: {}", action, error);
                     }
                 },
                 Action::RpiReboot => {
-                    if let Err(error) = self.ssh.exec("reboot; exit", false).await {
+                    if let Err(error) = self.ssh.exec("reboot; exit").await {
                         log::error!("{:?} failed with: {}", action, error);
                     }
                 },

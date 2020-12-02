@@ -41,7 +41,7 @@ ws.onmessage = function(message) {
    var uiContainer = document.getElementById('ui-container');
    for(var uiCard of uiContainer.children) {
       if('cards' in update && uiCard.id in update.cards) {
-         var uiCardUpdate = newCard(card,
+         var uiCardUpdate = newCard(uiCard.id,
             update.cards[uiCard.id].title,
             update.cards[uiCard.id].span,
             update.cards[uiCard.id].content,
@@ -135,24 +135,23 @@ function contentToHTML(content) {
 }
 
 /* factory for sending commands to the backend */
-function sendActionFactory(robot, uuid, command) {
+function sendActionFactory(type, uuid, action) {
    return function() {
       var message = JSON.stringify({
-         type: robot,
-         action: command,
+         type: type,
+         action: action,
          uuid: uuid,
       });
       ws.send(message);
    }
 }
 
-function newCard(id, title, span, content, controls) {
+function newCard(uuid, title, span, content, controls) {
    /* create card */
    var card = document.createElement('div');
-   card.setAttribute('id', id);
+   card.setAttribute('id', uuid);
    var cardSpan = 'mdl-cell--' + span + '-col';
    card.setAttribute('class', 'mdl-cell dl-card mdl-shadow--2dp ' + cardSpan);
-
    /* create title */
    var cardTitle = document.createElement('div');
    cardTitle.setAttribute('class', 'mdl-card__title');
@@ -168,13 +167,46 @@ function newCard(id, title, span, content, controls) {
    cardControls = document.createElement('div');
    cardControls.setAttribute('class', 'mdl-card__actions mdl-card--border');
    for(var control of controls) {
-      cardControl = document.createElement('a');
-      cardControl.setAttribute('class', 'mdl-button mdl-button--colored mdl-js-button mdl-js-ripple-effect');
-      cardControl.innerHTML = control.action;
-      cardControl.onclick = sendActionFactory(control.type, id, control.action);
+      
+      if(control.type == 'firmware' && control.action == 'Upload') {
+         cardControlInput = document.createElement('input');
+         cardControlInput.setAttribute('type', 'file');
+         cardControlInput.setAttribute('multiple', true);
+         cardControlInput.setAttribute('id', uuid + '_upload');
+         cardControlInput.setAttribute('style', 'display: none');
+         cardControlInput.onchange = function() {
+            uploadInput = document.getElementById(uuid + '_upload');
+            for (var i = 0; i < uploadInput.files.length; i++) {
+               const file = uploadInput.files[i];
+               const reader = new FileReader();
+               reader.onload = function(ev) {
+                  var message = JSON.stringify({
+                     type: 'firmware',
+                     action: 'Upload',
+                     file: [file.name, ev.target.result],
+                     uuid: uuid,
+                  });
+                  ws.send(message);
+               };
+               reader.readAsDataURL(file);
+            }
+         };
+         cardControl = document.createElement('label');
+         cardControl.setAttribute('for', uuid + '_upload');
+         cardControl.setAttribute('class', 'mdl-button mdl-button--colored mdl-js-button mdl-js-ripple-effect');
+         cardControl.innerHTML = control.action;
+         cardControl.appendChild(cardControlInput);
+      }
+      else {
+         cardControl = document.createElement('a');
+         cardControl.setAttribute('class', 'mdl-button mdl-button--colored mdl-js-button mdl-js-ripple-effect');
+         cardControl.innerHTML = control.action;
+         cardControl.onclick = sendActionFactory(control.type, uuid, control.action);
+      }
       cardControls.appendChild(cardControl);
    }
    
+   /*
    cardControlInput = document.createElement('input');
    cardControlInput.setAttribute('type', 'file');
    cardControlInput.setAttribute('multiple', true);
@@ -187,10 +219,10 @@ function newCard(id, title, span, content, controls) {
          const reader = new FileReader();
          reader.onload = function(ev) {
             var message = JSON.stringify({
-               type: 'upload',
-               target: 'thepipuck',
-               filename: file.name,
-               data: ev.target.result,
+               type: 'firmware',
+               action: 'Upload',
+               file: [file.name, ev.target.result]
+               uuid: id,
             });
             console.log(message);
             ws.send(message);
@@ -204,6 +236,7 @@ function newCard(id, title, span, content, controls) {
    cardControl.innerHTML = 'Set Controller';
    cardControl.appendChild(cardControlInput);
    cardControls.appendChild(cardControl);
+   */
 
    card.appendChild(cardControls);
    return card;
