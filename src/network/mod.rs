@@ -43,19 +43,6 @@ enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-/// This code can be reorganised without the channels to monitor the network and to
-/// add/remove robots from the shared collections
-
-/// TODO:
-/// 1. Clean up this code so that it compiles again
-/// 1a. Quick investigation into what a robot enum (static dispatch) would look like
-/// 2. Add the ping functionality to remove robots if they don't reply
-///    a. What if SSH drops from drone, but Xbee is still up? (move back to the standby state?)
-///    b. What if Xbee drops, but SSH is still up? (these are difficult problems to solve)
-/// 3. Investigate the SSH shell drop outs
-
-
-/// The discover task recieves IPv4 addresses and sends back associations
 pub async fn discover(network: Ipv4Net, robots: Robots) {
         let mut queue = network.hosts()
             .map(|addr| probe(addr, None))
