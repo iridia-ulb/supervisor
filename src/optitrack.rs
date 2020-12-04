@@ -55,6 +55,7 @@ pub async fn once() -> io::Result<FrameOfData> {
     Err(io::Error::new(io::ErrorKind::ConnectionReset, "No more data"))
 }
 
+/*
 pub async fn stream() -> io::Result<()> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 1511)).await?;
     socket.join_multicast_v4(Ipv4Addr::new(239,255,42,99), Ipv4Addr::UNSPECIFIED)?;
@@ -64,3 +65,4 @@ pub async fn stream() -> io::Result<()> {
     }
     Ok(())
 }
+*/

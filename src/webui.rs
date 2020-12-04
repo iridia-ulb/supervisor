@@ -16,7 +16,7 @@ use regex::Regex;
 
 use super::{
     Robots,
-    robots,
+    // robots,
     Experiment,
     experiment,
     optitrack,
@@ -34,7 +34,7 @@ use log;
 use itertools::Itertools;
 
 /// MDL HTML for icons
-const OK_ICON: &str = "<i class=\"material-icons mdl-list__item-icon\" style=\"color:green;\">check_circle</i>";
+// const OK_ICON: &str = "<i class=\"material-icons mdl-list__item-icon\" style=\"color:green;\">check_circle</i>";
 const ERROR_ICON: &str = "<i class=\"material-icons mdl-list__item-icon\" style=\"color:red;\">error</i>";
 
 
@@ -60,7 +60,7 @@ pub enum Error {
     ReplyError,
 }
 
-pub type Result<T> = std::result::Result<T, Error>;
+//pub type Result<T> = std::result::Result<T, Error>;
 
 // TODO remove serialize
 #[derive(Serialize, Deserialize, Debug)]

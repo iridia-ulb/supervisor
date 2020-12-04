@@ -46,12 +46,12 @@ impl PiPuck {
         if self.actions().contains(&action) {
             match action {
                 Action::RpiShutdown => {
-                    if let Err(error) = self.ssh.exec("shutdown 0; exit").await {
+                    if let Err(error) = self.ssh.shell.exec("shutdown 0; exit").await {
                         log::error!("{:?} failed with: {}", action, error);
                     }
                 },
                 Action::RpiReboot => {
-                    if let Err(error) = self.ssh.exec("reboot; exit").await {
+                    if let Err(error) = self.ssh.shell.exec("reboot; exit").await {
                         log::error!("{:?} failed with: {}", action, error);
                     }
                 },

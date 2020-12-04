@@ -5,9 +5,7 @@ use robots::{
     pipuck::PiPuck,
 };
 use std::sync::Arc;
-use tokio::{
-    sync::{ mpsc, RwLock },
-};
+use tokio::sync::RwLock;
 use warp::Filter;
 
 mod robots;
@@ -21,85 +19,24 @@ type Experiment = Arc<RwLock<experiment::Experiment>>;
 
 #[tokio::main]
 async fn main() {
-    /* init the backend logger */
-    // TODO only show messages from the current module mns_supervisor
-    // TODO fix issue with PiPuck actions: why is action always Identify
-    // (it looks like this problem is JS related to how closures bind to variables)
+    /* initialize the logger */
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("mns_supervisor=info")).init();
-
-    let (addr_tx, addr_rx) = mpsc::unbounded_channel();
-    let (assoc_tx, mut assoc_rx) = mpsc::unbounded_channel();
-
-    /* pass all addresses from the robot network down the
-       channel and try associated them with robots */
-    let addrs = "192.168.1.0/24"
-        .parse::<Ipv4Net>()
-        .unwrap()
-        .hosts();
-    for addr in addrs {
-        addr_tx.send(addr).unwrap();
-    }
-    
-    /* spawn the task for associating addresses with robots */
-    let task_discover = 
-        tokio::task::spawn(robots::discover(addr_rx, assoc_tx));
-    
+    /* create data structures for tracking the robots and state of the experiment */
     let drones = Robots::default();
     let pipucks = Robots::default();
     let experiment = Experiment::default();
-    let drones_clone = drones.clone();
-    let pipuck_clone = pipucks.clone();
-    let experiment_clone = experiment.clone();
-    let drones_filter = warp::any().map(move || drones_clone.clone());
-    let pipuck_filter = warp::any().map(move || pipuck_clone.clone());
-    let experiment_filter = warp::any().map(move || experiment_clone.clone());
-
-    // review this code, we need to ping these device to detect if any devices go offline
-    // pinging is a bit more complicated than it looks, perhaps just requesting a response
-    // from an xbee command or running a simple ssh command is sufficient?
-
-    // figure out how to upload files via SSH
-    // install python and libIIO by default on the robot so that small python programs can
-    // be pushed to identify a robot?
-
-    let task_temp = tokio::task::spawn(async move {
-        while let Some(device) = assoc_rx.next().await {
-            match device {
-                robots::Device::Ssh(mut device) => {
-                    if let Ok(hostname) = device.hostname().await {
-                        match &hostname[..] {
-                            "raspberrypi0-wifi" => {
-                                let mut pipuck = PiPuck::new(device);
-                                if let Err(error) = pipuck.ssh.upload("hello scp", "/tmp/test", 0o644).await {
-                                    log::error!("UPLOAD FAILED {:?}", error)
-                                }
-                                pipucks.write().await.push(pipuck);
-                            },
-                            _ => {
-                                log::warn!("{} accepted SSH connection with root login, but the \
-                                          hostname ({}) was not recognised", hostname, device.addr);
-                                // place back in the pool with 5 second delay
-                            }
-                        }
-                    }
-                    else {
-                        // getting hostname failed
-                        // place back in the pool with 1 second delay
-                    }
-                },
-                robots::Device::Xbee(device) => {
-                    let mut drone = Drone::new(device);
-                    if let Ok(_) = drone.init().await {
-                        drones.write().await.push(drone);
-                    }
-                    else {
-                        // place address back in pool
-                    }
-                }
-            }
-        }
-    });
     
+    /* create a task for discovering robots connected to our network */
+    let network = "192.168.1.0/24".parse::<Ipv4Net>().unwrap();
+    let discovery_task = robots::discover(network, pipucks.clone(), drones.clone());
+    
+    /* create a task for coordinating with the webui */
+    let experiment_clone = experiment.clone();
+    let drones_filter = warp::any().map(move || drones.clone());
+    let pipuck_filter = warp::any().map(move || pipucks.clone());
+    let experiment_filter = warp::any().map(move || experiment_clone.clone());
+    
+    // TODO find a better solution for these hardcoded strings
     let index_route = warp::path::end().and(warp::fs::file(
         "/home/mallwright/Workspace/mns-supervisor/index.html",
     ));
@@ -118,20 +55,18 @@ async fn main() {
             ws.on_upgrade(move |socket| webui::run(socket, drones, pipucks, experiment))
         });
 
-    // does the 'async move' all referenced variables into the lambda?
-    let task_server = tokio::task::spawn(async move { 
-        warp::serve(index_route.or(static_route).or(socket_route))
-        .run(([127, 0, 0, 1], 3030)).await
-    });
+    let server_task = warp::serve(index_route.or(static_route).or(socket_route)).run(([127, 0, 0, 1], 3030));
+
+    
+
+    // TODO spawn tokio tasks at the end of this function so that it is clear what is running in parallel    
+    let server_task_handle = tokio::task::spawn(server_task);
+    let discovery_task_handle = tokio::task::spawn(discovery_task);
 
     
     // use try_join here? this will abort other tasks, when one task throws an error?
-    let (server_task_res, discover_task_res, temp_task_res) = 
-        tokio::join!(task_server, task_discover, task_temp);
-
-    if let Err(err) = temp_task_res {
-        eprintln!("Joining temp task failed: {}", err);
-    }
+    let (server_task_res, discover_task_res) = 
+        tokio::join!(server_task_handle, discovery_task_handle);
 
     if let Err(err) = server_task_res {
         eprintln!("Joining server task failed: {}", err);
