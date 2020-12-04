@@ -14,17 +14,11 @@ use tokio::{
 
 use regex::Regex;
 
-use super::{
-    Robots,
-    // robots,
-    Experiment,
+use crate::{
     experiment,
     optitrack,
     firmware,
-    robots::{
-        drone,
-        pipuck,
-    },   
+    robot::{self, Robot, Identifiable},
 };
 
 use serde::{Deserialize, Serialize};
@@ -69,11 +63,11 @@ enum Request {
     Experiment(experiment::Action),
     Emergency,  
     Drone {
-        action: drone::Action,
+        action: robot::drone::Action,
         uuid: uuid::Uuid
     },
     PiPuck {
-        action: pipuck::Action,
+        action: robot::pipuck::Action,
         uuid: uuid::Uuid
     },
     Update {
@@ -89,8 +83,8 @@ enum Request {
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "lowercase", tag = "type", content = "action")]
 enum Action {
-    Drone(drone::Action),
-    PiPuck(pipuck::Action),
+    Drone(robot::drone::Action),
+    PiPuck(robot::pipuck::Action),
     Experiment(experiment::Action),
     Firmware(firmware::Action),
 }
@@ -130,9 +124,8 @@ lazy_static::lazy_static! {
 }
 
 pub async fn run(ws: ws::WebSocket,
-                 drones: Robots<drone::Drone>,
-                 pipucks: Robots<pipuck::PiPuck>,
-                 experiment: Experiment) {
+                 robots: crate::Robots,
+                 experiment: crate::Experiment) {
     // Use a counter to assign a new unique ID for this user.
 
     log::info!("client connected!");
@@ -172,19 +165,30 @@ pub async fn run(ws: ws::WebSocket,
                     Request::Experiment(action) => {
                         experiment.write().await.execute(&action);
                     },
+                    // TODO: there is too much code duplication between drone and pipuck here
                     Request::Drone{action, uuid} => {
-                        let mut drones = drones.write().await;
-                        if let Some(drone) = drones.iter_mut().find(|drone| drone.uuid == uuid) {
-                            drone.execute(&action);
+                        let mut robots = robots.write().await;
+                        if let Some(robot) = robots.iter_mut().find(|robot| robot.id() == &uuid) {
+                            if let Robot::Drone(drone) = robot {
+                                drone.execute(&action);
+                            }
+                            else {
+                                log::error!("Could not execute {:?}. {} is not a drone.", action, uuid);
+                            }
                         }
                         else {
                             log::warn!("Could not execute {:?}, drone ({}) has disconnected", action, uuid);
                         }
                     },
                     Request::PiPuck{action, uuid} => {
-                        let mut pipucks = pipucks.write().await;
-                        if let Some(pipuck) = pipucks.iter_mut().find(|pipuck| pipuck.uuid == uuid) {
-                            pipuck.execute(&action).await;
+                        let mut robots = robots.write().await;
+                        if let Some(robot) = robots.iter_mut().find(|robot| robot.id() == &uuid) {
+                            if let Robot::PiPuck(pipuck) = robot {
+                                pipuck.execute(&action).await;
+                            }
+                            else {
+                                log::error!("Could not execute {:?}. {} is not a Pi-Puck.", action, uuid);
+                            }
                         }
                         else {
                             log::warn!("Could not execute {:?}, Pi-Puck ({}) has disconnected", action, uuid);
@@ -192,9 +196,9 @@ pub async fn run(ws: ws::WebSocket,
                     },
                     Request::Update{tab} => {
                         let reply = match &tab[..] {
-                            "connections" => Ok(connections_tab(&drones, &pipucks).await),
-                            "diagnostics" => Ok(diagnostics_tab(&drones, &pipucks).await),
-                            "experiment" => Ok(experiment_tab(&drones, &pipucks, &experiment).await),
+                            "connections" => Ok(connections_tab(&robots).await),
+                            "diagnostics" => Ok(diagnostics_tab(&robots).await),
+                            "experiment" => Ok(experiment_tab(&robots, &experiment).await),
                             "optitrack" => Ok(optitrack_tab().await),
                             _ => Err(Error::BadRequest),
                         };
@@ -228,9 +232,13 @@ pub async fn run(ws: ws::WebSocket,
                                 });
                                 if let Some((filename, content)) = &file {
                                     if uuid == *UUID_CONFIG_DRONE {
-                                        let mut drones = drones.write().await;
-                                        let mut tasks = drones
+                                        let mut robots = robots.write().await;
+                                        let mut tasks = robots
                                             .iter_mut()
+                                            .filter_map(|robot| match robot {
+                                                Robot::Drone(drone) => Some(drone),
+                                                _ => None
+                                            })
                                             .filter_map(|drone| drone.ssh())
                                             .map(|drone| {
                                                 drone.add_ctrl_software(filename, content)
@@ -243,9 +251,13 @@ pub async fn run(ws: ws::WebSocket,
                                         }
                                     }
                                     else if uuid == *UUID_CONFIG_PIPUCK {
-                                        let mut pipucks = pipucks.write().await;
-                                        let mut tasks = pipucks
+                                        let mut robots = robots.write().await;
+                                        let mut tasks = robots
                                             .iter_mut()
+                                            .filter_map(|robot| match robot {
+                                                Robot::PiPuck(pipuck) => Some(pipuck),
+                                                _ => None
+                                            })
                                             .map(|pipuck| pipuck.ssh.add_ctrl_software(filename, content))
                                             .collect::<FuturesUnordered<_>>();
                                         while let Some(result) = tasks.next().await {
@@ -261,9 +273,13 @@ pub async fn run(ws: ws::WebSocket,
                             }
                             firmware::Action::Clear => {
                                 if uuid == *UUID_CONFIG_DRONE {
-                                    let mut drones = drones.write().await;
-                                    let mut tasks = drones
+                                    let mut robots = robots.write().await;
+                                    let mut tasks = robots
                                         .iter_mut()
+                                        .filter_map(|robot| match robot {
+                                            Robot::Drone(drone) => Some(drone),
+                                            _ => None
+                                        })
                                         .filter_map(|drone| drone.ssh())
                                         .map(|drone| {
                                             drone.clear_ctrl_software()
@@ -276,9 +292,13 @@ pub async fn run(ws: ws::WebSocket,
                                     }
                                 }
                                 else if uuid == *UUID_CONFIG_PIPUCK {
-                                    let mut pipucks = pipucks.write().await;
-                                    let mut tasks = pipucks
+                                    let mut robots = robots.write().await;
+                                    let mut tasks = robots
                                         .iter_mut()
+                                        .filter_map(|robot| match robot {
+                                            Robot::PiPuck(pipuck) => Some(pipuck),
+                                            _ => None
+                                        })
                                         .map(|pipuck| pipuck.ssh.clear_ctrl_software())
                                         .collect::<FuturesUnordered<_>>();
                                     while let Some(result) = tasks.next().await {
@@ -303,10 +323,15 @@ pub async fn run(ws: ws::WebSocket,
     log::info!("client disconnected!");
 }
 
-async fn diagnostics_tab(_drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::PiPuck>) -> Reply {
-    let mut pipucks = pipucks.write().await;
-    let mut tasks = pipucks
+async fn diagnostics_tab(robots: &crate::Robots) -> Reply {
+    let mut robots = robots.write().await;
+    let mut tasks = robots
         .iter_mut()
+        /* only handle pipucks for now */
+        .filter_map(|robot| match robot {
+            Robot::PiPuck(pipuck) => Some(pipuck),
+            _ => None
+        })
         .map(|pipuck| async move {
             (pipuck.uuid.clone(), pipuck.ssh.ctrl_software().await)
         })
@@ -350,7 +375,7 @@ async fn diagnostics_tab(_drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck
     Reply { title: "Diagnostics".to_owned(), cards }
 }
 
-async fn experiment_tab(_: &Robots<drone::Drone>, _: &Robots<pipuck::PiPuck>, experiment: &Experiment) -> Reply {
+async fn experiment_tab(_: &crate::Robots, experiment: &crate::Experiment) -> Reply {
     let mut cards = Cards::default();
     let card = Card {
         span: 6,
@@ -424,31 +449,35 @@ async fn optitrack_tab() -> Reply {
     }
 }
 
-async fn connections_tab(drones: &Robots<drone::Drone>, pipucks: &Robots<pipuck::PiPuck>) -> Reply {
+async fn connections_tab(robots: &crate::Robots) -> Reply {
     let mut cards = Cards::default();
-    for drone in drones.read().await.iter() {
-        let card = Card {
-            span: 4,
-            title: String::from("Drone"),
-            content: Content::Table {
-                header: vec!["Unique Identifier".to_owned(), "Xbee Address".to_owned(), "SSH Address".to_owned()],
-                rows: vec![vec![drone.uuid.to_string(), drone.xbee.addr.to_string(), String::from("-")]]
-            },
-            actions: drone.actions().into_iter().map(Action::Drone).collect(),
-        };
-        cards.insert(drone.uuid.clone(), card);
-    }
-    for pipuck in pipucks.read().await.iter() {
-        let card = Card {
-            span: 4,
-            title: String::from("Pi-Puck"),
-            content: Content::Table {
-                header: vec!["Unique Identifier".to_owned(), "SSH Address".to_owned()],
-                rows: vec![vec![pipuck.uuid.to_string(), pipuck.ssh.addr.to_string()]]
-            },
-            actions: pipuck.actions().into_iter().map(Action::PiPuck).collect(),
-        };
-        cards.insert(pipuck.uuid.clone(), card);
+    for robot in robots.read().await.iter() {
+        match robot {
+            Robot::Drone(drone) => {
+                let card = Card {
+                    span: 4,
+                    title: String::from("Drone"),
+                    content: Content::Table {
+                        header: vec!["Unique Identifier".to_owned(), "Xbee Address".to_owned(), "SSH Address".to_owned()],
+                        rows: vec![vec![drone.uuid.to_string(), drone.xbee.addr.to_string(), String::from("-")]]
+                    },
+                    actions: drone.actions().into_iter().map(Action::Drone).collect(),
+                };
+                cards.insert(drone.uuid.clone(), card);
+            }
+            Robot::PiPuck(pipuck) => {
+                let card = Card {
+                    span: 4,
+                    title: String::from("Pi-Puck"),
+                    content: Content::Table {
+                        header: vec!["Unique Identifier".to_owned(), "SSH Address".to_owned()],
+                        rows: vec![vec![pipuck.uuid.to_string(), pipuck.ssh.addr.to_string()]]
+                    },
+                    actions: pipuck.actions().into_iter().map(Action::PiPuck).collect(),
+                };
+                cards.insert(pipuck.uuid.clone(), card);
+            }
+        }
     }
     Reply { title: "Connections".to_owned(), cards }
 }

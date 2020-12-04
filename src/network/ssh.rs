@@ -10,10 +10,7 @@ use std::{
     },
     path::{Path, PathBuf},
     time::{Duration, Instant},
-    ops::{Deref, DerefMut},
 };
-use tokio::sync::MutexGuard;
-use tokio::sync::Mutex;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -177,7 +174,7 @@ impl Device {
         channel.eof().await.map_err(|_| Error::ChannelFailure)
     }
 
-    pub async fn ping(&mut self) -> Result<Duration> {
+    pub async fn _ping(&mut self) -> Result<Duration> {
         let start = Instant::now();
         self.hostname().await?;
         Ok(start.elapsed())

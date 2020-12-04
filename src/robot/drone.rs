@@ -1,4 +1,4 @@
-use super::{ssh, xbee};
+use crate::network::{ssh, xbee};
 use serde::{Deserialize, Serialize};
 use uuid;
 use log;
@@ -144,7 +144,7 @@ impl Drone {
         }
     }
 
-    pub async fn set_power(&mut self, upcore: Option<bool>, pixhawk: Option<bool>) -> Result<()> {
+    pub async fn _set_power(&mut self, upcore: Option<bool>, pixhawk: Option<bool>) -> Result<()> {
         let mut dio_config: u16 = 0b0000_0000_0000_0000;
         let mut dio_set: u16 = 0b0000_0000_0000_0000;
         /* enable upcore power? */
@@ -166,5 +166,15 @@ impl Drone {
         self.xbee.send(cmd_om).await?;
         self.xbee.send(cmd_io).await?;
         Ok(())
+    }
+}
+
+impl super::Identifiable for Drone {
+    fn id(&self) -> &uuid::Uuid {
+        &self.uuid
+    }
+
+    fn set_id(&mut self, id: uuid::Uuid) {
+        self.uuid = id;
     }
 }

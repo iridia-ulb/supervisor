@@ -1,16 +1,16 @@
-use super::ssh;
+use crate::network::ssh;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 use uuid;
 use log;
 
+/*
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error(transparent)]
     SshError(#[from] ssh::Error),
 }
-
 pub type Result<T> = std::result::Result<T, Error>;
+*/
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum Action {
@@ -63,5 +63,15 @@ impl PiPuck {
         else {
             log::warn!("{:?} ignored due to change in Pi-Puck state", action);
         }
+    }
+}
+
+impl super::Identifiable for PiPuck {
+    fn id(&self) -> &uuid::Uuid {
+        &self.uuid
+    }
+
+    fn set_id(&mut self, id: uuid::Uuid) {
+        self.uuid = id;
     }
 }

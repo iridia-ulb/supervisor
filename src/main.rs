@@ -1,20 +1,16 @@
-use futures::StreamExt;
 use ipnet::Ipv4Net;
-use robots::{
-    drone::Drone,
-    pipuck::PiPuck,
-};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use warp::Filter;
 
-mod robots;
+mod robot;
+mod network;
 mod webui;
 mod experiment;
 mod optitrack;
 mod firmware;
 
-type Robots<T> = Arc<RwLock<Vec<T>>>;
+type Robots = Arc<RwLock<Vec<robot::Robot>>>;
 type Experiment = Arc<RwLock<experiment::Experiment>>;
 
 #[tokio::main]
@@ -22,18 +18,16 @@ async fn main() {
     /* initialize the logger */
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("mns_supervisor=info")).init();
     /* create data structures for tracking the robots and state of the experiment */
-    let drones = Robots::default();
-    let pipucks = Robots::default();
+    let robots = Robots::default();
     let experiment = Experiment::default();
     
     /* create a task for discovering robots connected to our network */
     let network = "192.168.1.0/24".parse::<Ipv4Net>().unwrap();
-    let discovery_task = robots::discover(network, pipucks.clone(), drones.clone());
+    let discovery_task = network::discover(network, robots.clone());
     
     /* create a task for coordinating with the webui */
     let experiment_clone = experiment.clone();
-    let drones_filter = warp::any().map(move || drones.clone());
-    let pipuck_filter = warp::any().map(move || pipucks.clone());
+    let robots_filter = warp::any().map(move || robots.clone());
     let experiment_filter = warp::any().map(move || experiment_clone.clone());
     
     // TODO find a better solution for these hardcoded strings
@@ -44,15 +38,13 @@ async fn main() {
         warp::path("static").and(warp::fs::dir("/home/mallwright/Workspace/mns-supervisor/static"));
     let socket_route = warp::path("socket")
         .and(warp::ws())
-        .and(drones_filter)
-        .and(pipuck_filter)
+        .and(robots_filter)
         .and(experiment_filter)
         .map(|ws: warp::ws::Ws, 
-              drones : Robots<Drone>,
-              pipucks : Robots<PiPuck>,
+              robots : Robots,
               experiment : Experiment | {
             // This will call our function if the handshake succeeds.
-            ws.on_upgrade(move |socket| webui::run(socket, drones, pipucks, experiment))
+            ws.on_upgrade(move |socket| webui::run(socket, robots, experiment))
         });
 
     let server_task = warp::serve(index_route.or(static_route).or(socket_route)).run(([127, 0, 0, 1], 3030));
