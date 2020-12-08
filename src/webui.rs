@@ -91,13 +91,14 @@ enum Action {
 
 #[derive(Serialize, Debug)]
 struct Card {
+    uuid: uuid::Uuid,
     span: u8,
     title: String,
     content: Content,
     actions: Vec<Action>,
 }
 
-type Cards = HashMap<uuid::Uuid, Card>;
+type Cards = Vec<Card>;
 
 // TODO, Reply will probably need to be wrapped in a enum soon Reply::Update, Reply::XXX
 #[derive(Serialize)]
@@ -108,12 +109,19 @@ struct Reply {
 
 lazy_static::lazy_static! {
     /* UUIDs */
-    static ref UUID_CONFIG: uuid::Uuid =
+    static ref NAMESPACE_CONNECTIONS: uuid::Uuid =
+        uuid::Uuid::new_v3(&uuid::Uuid::NAMESPACE_OID, "connections".as_bytes());
+    static ref NAMESPACE_EXPERIMENT: uuid::Uuid =
         uuid::Uuid::new_v3(&uuid::Uuid::NAMESPACE_OID, "experiment".as_bytes());
-    static ref UUID_CONFIG_DRONE: uuid::Uuid =
-        uuid::Uuid::new_v3(&UUID_CONFIG, "drones".as_bytes());
-    static ref UUID_CONFIG_PIPUCK: uuid::Uuid =
-        uuid::Uuid::new_v3(&UUID_CONFIG, "pipucks".as_bytes());
+    static ref NAMESPACE_OPTITRACK: uuid::Uuid =
+        uuid::Uuid::new_v3(&uuid::Uuid::NAMESPACE_OID, "optitrack".as_bytes());
+
+    static ref UUID_EXPERIMENT_DRONES: uuid::Uuid =
+        uuid::Uuid::new_v3(&NAMESPACE_EXPERIMENT, "drones".as_bytes());
+    static ref UUID_EXPERIMENT_PIPUCKS: uuid::Uuid =
+        uuid::Uuid::new_v3(&NAMESPACE_EXPERIMENT, "pipucks".as_bytes());
+    static ref UUID_EXPERIMENT_DASHBOARD: uuid::Uuid =
+        uuid::Uuid::new_v3(&NAMESPACE_EXPERIMENT, "dashboard".as_bytes());
     
     /* other */
     static ref IIO_CHECKS: Vec<(String, String)> =
@@ -232,11 +240,11 @@ pub async fn run(ws: ws::WebSocket,
                                     }
                                 });
                                 if let Some((filename, contents)) = file {
-                                    if uuid == *UUID_CONFIG_DRONE {
+                                    if uuid == *UUID_EXPERIMENT_DRONES {
                                         let mut experiment = experiment.write().await;
                                         experiment.drone_software.add(filename, contents);
                                     }
-                                    else if uuid == *UUID_CONFIG_PIPUCK {
+                                    else if uuid == *UUID_EXPERIMENT_PIPUCKS {
                                         let mut experiment = experiment.write().await;
                                         experiment.pipuck_software.add(filename, contents);
                                     }
@@ -246,11 +254,11 @@ pub async fn run(ws: ws::WebSocket,
                                 }
                             }
                             firmware::Action::Clear => {
-                                if uuid == *UUID_CONFIG_DRONE {
+                                if uuid == *UUID_EXPERIMENT_DRONES {
                                     let mut experiment = experiment.write().await;
                                     experiment.drone_software.clear();
                                 }
-                                else if uuid == *UUID_CONFIG_PIPUCK {
+                                else if uuid == *UUID_EXPERIMENT_PIPUCKS {
                                     let mut experiment = experiment.write().await;
                                     experiment.pipuck_software.clear();
                                 }
@@ -280,6 +288,7 @@ async fn experiment_tab(_: &crate::Robots, experiment: &crate::Experiment) -> Re
     let mut cards = Cards::default();
     let experiment = experiment.read().await;
     let card = Card {
+        uuid: UUID_EXPERIMENT_DRONES.clone(),
         span: 6,
         title: String::from("Drone Configuration"),
         content: Content::Table {
@@ -296,8 +305,9 @@ async fn experiment_tab(_: &crate::Robots, experiment: &crate::Experiment) -> Re
         actions: vec![firmware::Action::Upload, firmware::Action::Clear]
             .into_iter().map(Action::Firmware).collect(),
     };
-    cards.insert(*UUID_CONFIG_DRONE, card);
+    cards.push(card);
     let card = Card {
+        uuid: UUID_EXPERIMENT_PIPUCKS.clone(),
         span: 6,
         title: String::from("Pi-Puck Configuration"),
         content: Content::Table {
@@ -314,8 +324,9 @@ async fn experiment_tab(_: &crate::Robots, experiment: &crate::Experiment) -> Re
         actions: vec![firmware::Action::Upload, firmware::Action::Clear]
             .into_iter().map(Action::Firmware).collect(),
     };
-    cards.insert(*UUID_CONFIG_PIPUCK, card);
+    cards.push(card);
     let card = Card {
+        uuid: UUID_EXPERIMENT_DASHBOARD.clone(),
         span: 12,
         title: String::from("Dashboard"),
         content: Content::Text(String::from("Drone")),
@@ -324,7 +335,7 @@ async fn experiment_tab(_: &crate::Robots, experiment: &crate::Experiment) -> Re
         // the uuid, action name, and optionally arguments
         actions: experiment.actions().into_iter().map(Action::Experiment).collect(), // start/stop experiment
     };
-    cards.insert(uuid::Uuid::new_v3(&uuid::Uuid::NAMESPACE_OID, "experiment:dashboard".as_bytes()), card);
+    cards.push(card);
     Reply { title: "Experiment".to_owned(), cards }
 }
 
@@ -344,6 +355,7 @@ async fn optitrack_tab() -> Reply {
                     rigid_body.orientation.vector().y,
                     rigid_body.orientation.vector().z);
                 let card = Card {
+                    uuid: uuid::Uuid::new_v3(&NAMESPACE_OPTITRACK, &rigid_body.id.to_be_bytes()),
                     span: 3,
                     title: format!("Rigid body {}", rigid_body.id),
                     content: Content::Table {
@@ -355,7 +367,7 @@ async fn optitrack_tab() -> Reply {
                     // the uuid, action name, and optionally arguments
                     actions: vec![], // start/stop experiment
                 };
-                cards.insert(uuid::Uuid::new_v3(&uuid::Uuid::NAMESPACE_OID, &rigid_body.id.to_be_bytes()), card);
+                cards.push(card);
             }
         }
         Reply { title: "Optitrack".to_owned(), cards }
@@ -371,6 +383,7 @@ async fn connections_tab(robots: &crate::Robots) -> Reply {
         match robot {
             Robot::Drone(drone) => {
                 let card = Card {
+                    uuid: drone.uuid.clone(),
                     span: 4,
                     title: String::from("Drone"),
                     content: Content::Table {
@@ -379,10 +392,11 @@ async fn connections_tab(robots: &crate::Robots) -> Reply {
                     },
                     actions: drone.actions().into_iter().map(Action::Drone).collect(),
                 };
-                cards.insert(drone.uuid.clone(), card);
+                cards.push(card);
             }
             Robot::PiPuck(pipuck) => {
                 let card = Card {
+                    uuid: pipuck.uuid.clone(),
                     span: 4,
                     title: String::from("Pi-Puck"),
                     content: Content::Table {
@@ -391,7 +405,7 @@ async fn connections_tab(robots: &crate::Robots) -> Reply {
                     },
                     actions: pipuck.actions().into_iter().map(Action::PiPuck).collect(),
                 };
-                cards.insert(pipuck.uuid.clone(), card);
+                cards.push(card);
             }
         }
     }

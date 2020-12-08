@@ -30,45 +30,40 @@ ws.onclose = function() {
 };
 
 ws.onmessage = function(message) {
-   var update = JSON.parse(message.data);
+   let update = JSON.parse(message.data);
    /* Update the title of the current interface */
-   var uiTitle = document.getElementById('ui-title');
+   let uiTitle = document.getElementById('ui-title');
    if('title' in update) {
       uiTitle.innerHTML = update.title;
    }
-   /* iterate accross existing uiCards checking for updates,
-      if no update exists, remove the card from the uiContainer */
-   var uiContainer = document.getElementById('ui-container');
-   for(var uiCard of uiContainer.children) {
-      if('cards' in update && uiCard.id in update.cards) {
-         var uiCardUpdate = newCard(uiCard.id,
-            update.cards[uiCard.id].title,
-            update.cards[uiCard.id].span,
-            update.cards[uiCard.id].content,
-            update.cards[uiCard.id].actions);
-         if(uiCard.outerHTML != uiCardUpdate.outerHTML) {
-            uiContainer.replaceChild(uiCardUpdate, uiCard);
+   if('cards' in update) {
+      let uiContainer = document.getElementById('ui-container');
+      /* iterate over the existing uiCards (i.e., HTMLDivElement's) */
+      for(let uiCard of uiContainer.children) {
+         /* search for a card by its UUID */
+         let cardFound = false;
+         for(card of update.cards) {
+            if('uuid' in card && card.uuid == uiCard.id) {
+               /* card was found, generate a new card and compare */
+               let uiCardUpdate = 
+                  newCard(card.uuid, card.title, card.span, card.content, card.actions);
+               if(uiCard.outerHTML != uiCardUpdate.outerHTML) {
+                  uiContainer.replaceChild(uiCardUpdate, uiCard);
+               }
+               cardFound = true;
+               break;
+            }
+         }
+         /* if the card was not in the update, we remove it from the ui */
+         if(!cardFound) {
+            uiContainer.removeChild(uiCard);
          }
       }
-      else {
-         /* if a card isn't in the update it should be removed from the GUI */
-         uiContainer.removeChild(uiCard);
-      }
-   }
-   /* loop over the cards in the update to see if we need to
-      add any new cards */
-   if('cards' in update) {
-      var card;
-      // for X of Y
-      for(card in update.cards) {
-         if(update.cards.hasOwnProperty(card) &&
-            document.getElementById(card) == null) {           
-            var newUiCard = newCard(card,
-                                    update.cards[card].title,
-                                    update.cards[card].span,
-                                    update.cards[card].content,
-                                    update.cards[card].actions)
-            uiContainer.appendChild(newUiCard)
+      for(card of update.cards) {
+         if('uuid' in card && document.getElementById(card.uuid) == null) {
+            var newUiCard =
+               newCard(card.uuid, card.title, card.span, card.content, card.actions);
+            uiContainer.appendChild(newUiCard);
          }
       }
    }
@@ -166,7 +161,6 @@ function newCard(uuid, title, span, content, controls) {
    cardControls = document.createElement('div');
    cardControls.setAttribute('class', 'mdl-card__actions mdl-card--border');
    for(var control of controls) {
-      
       if(control.type == 'firmware' && control.action == 'Upload') {
          cardControlInput = document.createElement('input');
          cardControlInput.setAttribute('type', 'file');
@@ -204,39 +198,6 @@ function newCard(uuid, title, span, content, controls) {
       }
       cardControls.appendChild(cardControl);
    }
-   
-   /*
-   cardControlInput = document.createElement('input');
-   cardControlInput.setAttribute('type', 'file');
-   cardControlInput.setAttribute('multiple', true);
-   cardControlInput.setAttribute('id', 'filexxx');
-   cardControlInput.setAttribute('style', 'display: none');
-   cardControlInput.onchange = function() {
-      uploadInput = document.getElementById('filexxx');
-      for (var i = 0; i < uploadInput.files.length; i++) {
-         const file = uploadInput.files[i];
-         const reader = new FileReader();
-         reader.onload = function(ev) {
-            var message = JSON.stringify({
-               type: 'firmware',
-               action: 'Upload',
-               file: [file.name, ev.target.result]
-               uuid: id,
-            });
-            console.log(message);
-            ws.send(message);
-         };
-         reader.readAsDataURL(file);
-      }
-   };
-   cardControl = document.createElement('label');
-   cardControl.setAttribute('for', 'filexxx');
-   cardControl.setAttribute('class', 'mdl-button mdl-button--colored mdl-js-button mdl-js-ripple-effect');
-   cardControl.innerHTML = 'Set Controller';
-   cardControl.appendChild(cardControlInput);
-   cardControls.appendChild(cardControl);
-   */
-
    card.appendChild(cardControls);
    return card;
 }
