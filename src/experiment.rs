@@ -69,8 +69,16 @@ impl Experiment {
 pub struct Software(pub Vec<(PathBuf, Vec<u8>)>);
 
 impl Software {
-    pub fn add<F: Into<PathBuf>, C: Into<Vec<u8>>>(&mut self, filename: F, contents: C) {
-        self.0.push((filename.into(), contents.into()));
+    pub fn add<F: Into<PathBuf>, C: Into<Vec<u8>>>(&mut self, new_filename: F, new_contents: C) {
+        let new_filename = new_filename.into();
+        let new_contents = new_contents.into();
+        if let Some((_, contents)) = self.0.iter_mut()
+            .find(|(filename, _)| filename == &new_filename) {
+            contents.splice(.., new_contents.into_iter());
+        }
+        else {
+            self.0.push((new_filename, new_contents));
+        }
     }
 
     pub fn clear(&mut self) {

@@ -289,7 +289,7 @@ async fn experiment_tab(_: &crate::Robots, experiment: &crate::Experiment) -> Re
     let experiment = experiment.read().await;
     let card = Card {
         uuid: UUID_EXPERIMENT_DRONES.clone(),
-        span: 6,
+        span: 4,
         title: String::from("Drone Configuration"),
         content: Content::Table {
             header: vec!["File".to_owned(), "MD5 Checksum".to_owned()],
@@ -308,7 +308,7 @@ async fn experiment_tab(_: &crate::Robots, experiment: &crate::Experiment) -> Re
     cards.push(card);
     let card = Card {
         uuid: UUID_EXPERIMENT_PIPUCKS.clone(),
-        span: 6,
+        span: 4,
         title: String::from("Pi-Puck Configuration"),
         content: Content::Table {
             header: vec!["File".to_owned(), "MD5 Checksum".to_owned()],
@@ -327,7 +327,7 @@ async fn experiment_tab(_: &crate::Robots, experiment: &crate::Experiment) -> Re
     cards.push(card);
     let card = Card {
         uuid: UUID_EXPERIMENT_DASHBOARD.clone(),
-        span: 12,
+        span: 4,
         title: String::from("Dashboard"),
         content: Content::Text(String::from("Drone")),
         // the actions depend on the state of the drone
