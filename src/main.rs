@@ -26,8 +26,7 @@ type Experiment = Arc<RwLock<experiment::Experiment>>;
 #[tokio::main]
 async fn main() {
     /* initialize the logger */
-    //env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("mns_supervisor=info")).init();
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("mns_supervisor=trace")).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("mns_supervisor=info")).init();
     /* create data structures for tracking the robots and state of the experiment */
     let robots = Robots::default();
     let experiment = Experiment::default();
@@ -50,8 +49,8 @@ async fn main() {
             ws.on_upgrade(move |socket| webui::run(socket, robots, experiment))
         });
     let static_route = warp::get()
-        .and(static_dir::static_dir!("static"));
-    //    .and(warp::fs::dir("/home/mallwright/Workspace/mns-supervisor/static"));
+    //    .and(static_dir::static_dir!("static"));
+        .and(warp::fs::dir("/home/mallwright/Workspace/mns-supervisor/static"));
 
     let server_task = warp::serve(socket_route.or(static_route)).run(([127, 0, 0, 1], 3030));
     

@@ -216,6 +216,7 @@ pub async fn run(ws: ws::WebSocket,
                     Request::Firmware{action, uuid, file} => {
                         match action {
                             firmware::Action::Upload => {
+                                eprintln!("{:?} {} {:?}", action, uuid, file);
                                 let file = file.and_then(|(name, content)| {
                                     match content.split(',').tuples::<(_,_)>().next() {
                                         Some((_, data)) => {
@@ -230,41 +231,14 @@ pub async fn run(ws: ws::WebSocket,
                                         None => None
                                     }
                                 });
-                                if let Some((filename, content)) = &file {
+                                if let Some((filename, contents)) = file {
                                     if uuid == *UUID_CONFIG_DRONE {
-                                        let mut robots = robots.write().await;
-                                        let mut tasks = robots
-                                            .iter_mut()
-                                            .filter_map(|robot| match robot {
-                                                Robot::Drone(drone) => Some(drone),
-                                                _ => None
-                                            })
-                                            .filter_map(|drone| drone.ssh())
-                                            .map(|drone| {
-                                                drone.add_ctrl_software(filename, content)
-                                            })
-                                            .collect::<FuturesUnordered<_>>();
-                                        while let Some(result) = tasks.next().await {
-                                            if let Err(error) = result {
-                                                log::error!("Failed to add control software {}: {}", filename, error)
-                                            }
-                                        }
+                                        let mut experiment = experiment.write().await;
+                                        experiment.drone_software.add(filename, contents);
                                     }
                                     else if uuid == *UUID_CONFIG_PIPUCK {
-                                        let mut robots = robots.write().await;
-                                        let mut tasks = robots
-                                            .iter_mut()
-                                            .filter_map(|robot| match robot {
-                                                Robot::PiPuck(pipuck) => Some(pipuck),
-                                                _ => None
-                                            })
-                                            .map(|pipuck| pipuck.ssh.add_ctrl_software(filename, content))
-                                            .collect::<FuturesUnordered<_>>();
-                                        while let Some(result) = tasks.next().await {
-                                            if let Err(error) = result {
-                                                log::error!("Failed to add control software {}: {}", filename, error)
-                                            }
-                                        }
+                                        let mut experiment = experiment.write().await;
+                                        experiment.pipuck_software.add(filename, contents);
                                     }
                                     else {
                                         log::error!("UUID target does not support adding control software");
@@ -273,39 +247,12 @@ pub async fn run(ws: ws::WebSocket,
                             }
                             firmware::Action::Clear => {
                                 if uuid == *UUID_CONFIG_DRONE {
-                                    let mut robots = robots.write().await;
-                                    let mut tasks = robots
-                                        .iter_mut()
-                                        .filter_map(|robot| match robot {
-                                            Robot::Drone(drone) => Some(drone),
-                                            _ => None
-                                        })
-                                        .filter_map(|drone| drone.ssh())
-                                        .map(|drone| {
-                                            drone.clear_ctrl_software()
-                                        })
-                                        .collect::<FuturesUnordered<_>>();
-                                    while let Some(result) = tasks.next().await {
-                                        if let Err(error) = result {
-                                            log::error!("Failed to clear control software: {}", error);
-                                        }
-                                    }
+                                    let mut experiment = experiment.write().await;
+                                    experiment.drone_software.clear();
                                 }
                                 else if uuid == *UUID_CONFIG_PIPUCK {
-                                    let mut robots = robots.write().await;
-                                    let mut tasks = robots
-                                        .iter_mut()
-                                        .filter_map(|robot| match robot {
-                                            Robot::PiPuck(pipuck) => Some(pipuck),
-                                            _ => None
-                                        })
-                                        .map(|pipuck| pipuck.ssh.clear_ctrl_software())
-                                        .collect::<FuturesUnordered<_>>();
-                                    while let Some(result) = tasks.next().await {
-                                        if let Err(error) = result {
-                                            log::error!("Failed to clear control software: {}", error);
-                                        }
-                                    }
+                                    let mut experiment = experiment.write().await;
+                                    experiment.pipuck_software.clear();
                                 }
                                 else {
                                     log::error!("UUID target does not support clearing control software");
@@ -323,67 +270,29 @@ pub async fn run(ws: ws::WebSocket,
     log::info!("client disconnected!");
 }
 
-async fn diagnostics_tab(robots: &crate::Robots) -> Reply {
-    let mut robots = robots.write().await;
-    let mut tasks = robots
-        .iter_mut()
-        /* only handle pipucks for now */
-        .filter_map(|robot| match robot {
-            Robot::PiPuck(pipuck) => Some(pipuck),
-            _ => None
-        })
-        .map(|pipuck| async move {
-            (pipuck.uuid.clone(), pipuck.ssh.ctrl_software().await)
-        })
-        .collect::<FuturesUnordered<_>>();
+async fn diagnostics_tab(_robots: &crate::Robots) -> Reply {
     /* hashmap of cards */
-    let mut cards = Cards::default();
-    /* create a card for each robot once it replies */
-    while let Some((uuid, result)) = tasks.next().await {
-        let card = match result {
-            Ok(files) => {
-                /* table header */
-                let header = ["File", "Checksum"].iter().map(|s| {
-                    String::from(*s)
-                }).collect::<Vec<_>>();
-                /* card */
-                Card {
-                    span: 3,
-                    title: format!("Pi-Puck"),
-                    content: Content::Table {
-                        header: header,
-                        rows: files
-                            .into_iter()
-                            .map(|(checksum, path)| vec![path, checksum])
-                            .collect()
-                    },
-                    actions: Vec::default(),
-                }
-            },
-            Err(error) => {
-                let error = format!("{} {}", ERROR_ICON, error);
-                Card {
-                    span: 3,
-                    title: format!("Pi-Puck"),
-                    content: Content::Text(error),
-                    actions: Vec::default(),
-                }
-            }
-        };
-        cards.insert(uuid, card);
-    }
+    let cards = Cards::default();
     Reply { title: "Diagnostics".to_owned(), cards }
 }
 
 async fn experiment_tab(_: &crate::Robots, experiment: &crate::Experiment) -> Reply {
     let mut cards = Cards::default();
+    let experiment = experiment.read().await;
     let card = Card {
         span: 6,
         title: String::from("Drone Configuration"),
-        content: Content::Text(String::from("Drone")),
-        // the actions depend on the state of the drone
-        // the action part of the message must contain
-        // the uuid, action name, and optionally arguments
+        content: Content::Table {
+            header: vec!["File".to_owned(), "MD5 Checksum".to_owned()],
+            rows: experiment.drone_software.0
+                .iter()
+                .map(|(filename, contents)| {
+                    let filename = filename.to_string_lossy().into_owned();
+                    let checksum = format!("{:x}", md5::compute(contents));
+                    vec![filename, checksum]
+                })
+                .collect::<Vec<_>>()
+        },
         actions: vec![firmware::Action::Upload, firmware::Action::Clear]
             .into_iter().map(Action::Firmware).collect(),
     };
@@ -391,10 +300,17 @@ async fn experiment_tab(_: &crate::Robots, experiment: &crate::Experiment) -> Re
     let card = Card {
         span: 6,
         title: String::from("Pi-Puck Configuration"),
-        content: Content::Text(String::from("Drone")),
-        // the actions depend on the state of the drone
-        // the action part of the message must contain
-        // the uuid, action name, and optionally arguments
+        content: Content::Table {
+            header: vec!["File".to_owned(), "MD5 Checksum".to_owned()],
+            rows: experiment.pipuck_software.0
+                .iter()
+                .map(|(filename, contents)| {
+                    let filename = filename.to_string_lossy().into_owned();
+                    let checksum = format!("{:x}", md5::compute(contents));
+                    vec![filename, checksum]
+                })
+                .collect::<Vec<_>>()
+        },
         actions: vec![firmware::Action::Upload, firmware::Action::Clear]
             .into_iter().map(Action::Firmware).collect(),
     };
@@ -406,7 +322,7 @@ async fn experiment_tab(_: &crate::Robots, experiment: &crate::Experiment) -> Re
         // the actions depend on the state of the drone
         // the action part of the message must contain
         // the uuid, action name, and optionally arguments
-        actions: experiment.read().await.actions().into_iter().map(Action::Experiment).collect(), // start/stop experiment
+        actions: experiment.actions().into_iter().map(Action::Experiment).collect(), // start/stop experiment
     };
     cards.insert(uuid::Uuid::new_v3(&uuid::Uuid::NAMESPACE_OID, "experiment:dashboard".as_bytes()), card);
     Reply { title: "Experiment".to_owned(), cards }

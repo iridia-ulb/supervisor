@@ -43,6 +43,32 @@ enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
+// by testing all connected robots at the same time, we lower the amount of time that we have to lock the collection
+// how often should we ping, every 500 ms?
+
+// a more clever way of doing this could involve looking for failed operations/only pinging devices that we not responding
+// this would involve keeping a last_error: Option<Error>, last_operation: Option<Instant> variable in the devices
+
+// this would reduce congestion but would not speed up the operation of pinging since we would have the collection locked for
+// that duration anyway
+
+// Does it make sense to make individual robots lockable?
+
+// type Robots = Arc<RwLock<Vec<robot::Robot>>>;
+// type Robots = Arc<RwLock<Vec<RwLock<robot::Robot>>>>;
+
+// in this way, even if robot state needed to be changed, we would only ever need to lock the outer collection if we were
+// adding/removing robots
+
+// if it is determined that a robot is not responding, should we remove it from the collection? This could be dangerous for a
+// drone under the control of ARGoS, 
+
+// Each device (ssh/xbee) could have a state online/offline, instead of removing the device from the collection,
+// it could be marked as inactive, and we could try here to reestablish that connection
+
+// For long running processes such as ARGoS, it may make sense to run this inside tmux or screen such that SSH disconnects and
+// reconnects are not effected. Upon reconnect, ARGoS should be detected and handled appropiately
+
 pub async fn discover(network: Ipv4Net, robots: Robots) {
         let mut queue = network.hosts()
             .map(|addr| probe(addr, None))
@@ -126,11 +152,12 @@ pub async fn discover(network: Ipv4Net, robots: Robots) {
         }
         /* xbee connection timed out/failed */
         /* attempt a ssh connection for 1000 ms */
+        let mut device = ssh::Device::new(addr);
         let assoc_ssh_attempt =
-            timeout(Duration::from_millis(1000), ssh::Device::new(addr));
+            timeout(Duration::from_millis(1000), device.connect());
         if let Ok(assoc_ssh_result) = assoc_ssh_attempt.await {
             match assoc_ssh_result {
-                Ok(device) => {
+                Ok(_) => {
                     return (addr, Ok(Device::Ssh(device)));
                 }
                 Err(_error) => {

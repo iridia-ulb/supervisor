@@ -46,13 +46,21 @@ impl PiPuck {
         if self.actions().contains(&action) {
             match action {
                 Action::RpiShutdown => {
-                    if let Err(error) = self.ssh.shell.exec("shutdown 0; exit").await {
-                        log::error!("{:?} failed with: {}", action, error);
+                    match self.ssh.default_shell() {
+                        Err(error) => log::error!("{:?} failed with: {}", action, error),
+                        Ok(shell) => match shell.exec("shutdown 0; exit").await {
+                            Ok(_) => self.ssh.disconnect(),
+                            Err(error) => log::error!("{:?} failed with: {}", action, error),
+                        }
                     }
                 },
                 Action::RpiReboot => {
-                    if let Err(error) = self.ssh.shell.exec("reboot; exit").await {
-                        log::error!("{:?} failed with: {}", action, error);
+                    match self.ssh.default_shell() {
+                        Err(error) => log::error!("{:?} failed with: {}", action, error),
+                        Ok(shell) => match shell.exec("reboot; exit").await {
+                            Ok(_) => self.ssh.disconnect(),
+                            Err(error) => log::error!("{:?} failed with: {}", action, error),
+                        }
                     }
                 },
                 Action::Identify => {
