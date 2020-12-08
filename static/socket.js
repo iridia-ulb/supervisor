@@ -46,14 +46,8 @@ ws.onmessage = function(message) {
             update.cards[uiCard.id].span,
             update.cards[uiCard.id].content,
             update.cards[uiCard.id].actions);
-         if(uiCard.innerHTML != uiCardUpdate.innerHTML) {
-            // This works but has the undesirable effect of moving the updated card
-            // to the end
-            uiContainer.removeChild(uiCard);
-            uiContainer.appendChild(uiCardUpdate);
-            // The following does not work
-            //uiCard.setAttribute('class', uiCardUpdate.getAttribute('class'));
-            //uiCard.innerHTML = uiCardUpdate.innerHTML;
+         if(uiCard.outerHTML != uiCardUpdate.outerHTML) {
+            uiContainer.replaceChild(uiCardUpdate, uiCard);
          }
       }
       else {
