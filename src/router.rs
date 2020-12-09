@@ -33,7 +33,7 @@ impl Encoder<Bytes> for ByteArrayCodec {
     type Error = io::Error;
 
     fn encode(&mut self, data: Bytes, buf: &mut BytesMut) -> Result<(), io::Error> {
-        buf.reserve(data.len() + 4);
+        buf.reserve(data.len() + std::mem::size_of<u32>());
         buf.put_u32(data.len() as u32);
         buf.put(data);
         Ok(())

@@ -83,3 +83,9 @@ impl super::Identifiable for PiPuck {
         self.uuid = id;
     }
 }
+
+impl super::Controllable for PiPuck {
+    fn ssh(&mut self) -> Option<&mut ssh::Device> {
+        Some(&mut self.ssh)
+    }
+}

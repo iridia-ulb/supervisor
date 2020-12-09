@@ -8,7 +8,7 @@ use std::{
         Read,
         Cursor
     },
-    path::Path,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -140,6 +140,16 @@ impl Device {
     pub async fn hostname(&mut self) -> Result<String> {
         if let State::Connected { shell, .. } = &mut self.state {
             shell.exec("hostname").await
+        }
+        else {
+            Err(Error::Disconnected)
+        }
+    }
+
+    pub async fn create_temp_dir(&mut self) -> Result<PathBuf> {
+        if let State::Connected { shell, .. } = &mut self.state {
+            shell.exec("mktemp -d").await
+                 .map(PathBuf::from)
         }
         else {
             Err(Error::Disconnected)

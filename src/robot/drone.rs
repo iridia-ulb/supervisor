@@ -48,7 +48,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct Drone {
     pub uuid: uuid::Uuid,
     pub xbee: xbee::Device,
-    state: State,
+    pub state: State,
 }
 
 impl Drone {
@@ -59,13 +59,6 @@ impl Drone {
             state: State::Standby,
         }
     }
-
-    pub fn ssh(&mut self) -> Option<&mut ssh::Device> {
-        match &mut self.state {
-            State::Standby => None,
-            State::Ready(ssh) => Some(ssh),
-        }
-    } 
 
     pub async fn init(&mut self) -> Result<()> {
         /* pin configuration */
@@ -176,5 +169,14 @@ impl super::Identifiable for Drone {
 
     fn set_id(&mut self, id: uuid::Uuid) {
         self.uuid = id;
+    }
+}
+
+impl super::Controllable for Drone {
+    fn ssh(&mut self) -> Option<&mut ssh::Device> {
+        match &mut self.state {
+            State::Standby => None,
+            State::Ready(device) => Some(device)
+        }
     }
 }

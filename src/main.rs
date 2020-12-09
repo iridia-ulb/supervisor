@@ -17,6 +17,7 @@ type Experiment = Arc<RwLock<experiment::Experiment>>;
 /// 1. Clean up this code so that it compiles again [DONE]
 /// 1a. Quick investigation into what a robot enum (static dispatch) would look like [DONE]
 /// 1b. Use static_dir to embedded static resources inside of the app [DONE]
+/// 1c. Start experiment triggers upload to all robots after check?
 /// 2. Add the ping functionality to remove robots if they don't reply
 ///    a. What if SSH drops from drone, but Xbee is still up? (move back to the standby state?)
 ///    b. What if Xbee drops, but SSH is still up? (these are difficult problems to solve)
@@ -29,7 +30,7 @@ async fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("mns_supervisor=info")).init();
     /* create data structures for tracking the robots and state of the experiment */
     let robots = Robots::default();
-    let experiment = Experiment::default();
+    let experiment = Arc::new(RwLock::new(experiment::Experiment::with_robots(robots.clone())));
     
     /* create a task for discovering robots connected to our network */
     let network = "192.168.1.0/24".parse::<Ipv4Net>().unwrap();

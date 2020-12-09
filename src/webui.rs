@@ -1,11 +1,10 @@
 use warp::ws;
 
 use std::{
-    collections::HashMap,
     time::Duration
 };
 
-use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
+use futures::{FutureExt, StreamExt};
 
 use tokio::{
     sync::mpsc,
@@ -28,8 +27,8 @@ use log;
 use itertools::Itertools;
 
 /// MDL HTML for icons
-// const OK_ICON: &str = "<i class=\"material-icons mdl-list__item-icon\" style=\"color:green;\">check_circle</i>";
-const ERROR_ICON: &str = "<i class=\"material-icons mdl-list__item-icon\" style=\"color:red;\">error</i>";
+const _OK_ICON: &str = "<i class=\"material-icons mdl-list__item-icon\" style=\"color:green;\">check_circle</i>";
+const _ERROR_ICON: &str = "<i class=\"material-icons mdl-list__item-icon\" style=\"color:red;\">error</i>";
 
 
 #[derive(Serialize, Debug)]
@@ -60,8 +59,11 @@ pub enum Error {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "lowercase", tag = "type")]
 enum Request {
-    Experiment(experiment::Action),
-    Emergency,  
+    Emergency,
+    Experiment {
+        action: experiment::Action,
+        uuid: uuid::Uuid,
+    }, 
     Drone {
         action: robot::drone::Action,
         uuid: uuid::Uuid
@@ -170,8 +172,8 @@ pub async fn run(ws: ws::WebSocket,
                     Request::Emergency => {
                         // Go to emergency mode
                     },
-                    Request::Experiment(action) => {
-                        experiment.write().await.execute(&action);
+                    Request::Experiment{action, ..} => {
+                        experiment.write().await.execute(&action).await;
                     },
                     // TODO: there is too much code duplication between drone and pipuck here
                     Request::Drone{action, uuid} => {
@@ -224,7 +226,6 @@ pub async fn run(ws: ws::WebSocket,
                     Request::Firmware{action, uuid, file} => {
                         match action {
                             firmware::Action::Upload => {
-                                eprintln!("{:?} {} {:?}", action, uuid, file);
                                 let file = file.and_then(|(name, content)| {
                                     match content.split(',').tuples::<(_,_)>().next() {
                                         Some((_, data)) => {

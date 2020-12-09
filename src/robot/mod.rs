@@ -1,10 +1,19 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use async_trait::async_trait;
-
-use crate::network::ssh::Result;
 
 pub mod drone;
 pub mod pipuck;
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    #[error("SSH is not available")]
+    SshUnavailable,
+
+    #[error(transparent)]
+    SshError(#[from] crate::network::ssh::Error),
+}
 
 #[derive(Debug)]
 pub enum Robot {
@@ -44,18 +53,21 @@ pub trait Controllable {
     // trait be failable (which they already are)
     fn ssh(&mut self) -> Option<&mut crate::network::ssh::Device>;
 
-    /// path to the control software
-    fn path(&self) -> PathBuf;
-
-    async fn upload(&mut self, software: &crate::experiment::Software) -> crate::network::ssh::Result<()> {
-        let ref upload_path = self.path();
+    /// installs software and returns the installation directory so that we can run argos
+    async fn install(&mut self, software: &crate::experiment::Software) -> Result<PathBuf> {
         if let Some(ssh) = self.ssh() {
+            let install_path = ssh.create_temp_dir().await?;
             for (filename, contents) in software.0.iter() {
-                ssh.upload(filename, upload_path, contents, 0o644).await?;
+                ssh.upload(install_path.as_path(), filename, contents, 0o644).await?;
             }
+            Ok(install_path)
         }
-        Ok(())
+        else {
+            Err(Error::SshUnavailable)
+        }
     }
 
-    async fn start(&mut self); // start ARGoS?
+    async fn start<W, C>(&mut self, _working_dir: &Path, _configuration: &Path) {
+        /* start ARGoS */
+    }
 }
