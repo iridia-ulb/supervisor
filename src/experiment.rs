@@ -130,41 +130,18 @@ impl Software {
         self.0.clear();
     }
 
-    // this function should check that one .argos file exists,
-    // that it points to a .lua file in the same directory (relatively)
-    /*
-    pub fn check(&self) -> Result<(), u8> {
+    // TODO move software into firmware.rs and refactor
+    pub fn argos_config(&self) -> Result<&(PathBuf, Vec<u8>), String> {
+        // also count! there should be only 1
+        match self.0.iter().find(|entry| entry.0.to_string_lossy().contains(".argos")) {
+            Some(file) => Ok(file),
+            None => Err("nup".to_owned())
+        }
+    } 
+   
+    pub fn check_config(&self) -> Result<(), String> {
+
+
         Ok(())
     }
-    */
-
 }
-
-// pub async fn clear_ctrl_software(&mut self) -> Result<()> {
-//     let path = self.shell.exec("mktemp -d").await?;
-//     self.ctrl_software_path = Some(path).map(PathBuf::from);
-//     Ok(())
-// }
-
-// pub async fn add_ctrl_software<F, C>(&mut self, filename: F, contents: C) -> Result<()>
-//     where F: AsRef<Path>, C: AsRef<[u8]> {
-//     let directory = self.ctrl_software_path.as_ref()
-//         .map(PathBuf::to_owned)
-//         .ok_or(Error::IoFailure)?;
-//     self.upload(filename, directory, contents, 0o644).await
-// }
-
-// pub async fn ctrl_software(&mut self) -> Result<Vec<(String, String)>> {
-//     if let Some(path) = &self.ctrl_software_path {
-//         let query = format!("find {} -type f -exec md5sum '{{}}' \\;", path.to_string_lossy());
-//         let response = self.shell.exec(query).await?
-//             .split_whitespace()
-//             .tuples::<(_, _)>()
-//             .map(|(c, p)| (String::from(c), String::from(p)))
-//             .collect::<Vec<_>>();
-//         Ok(response)
-//     }
-//     else {
-//         Ok(Vec::new())
-//     }
-// }

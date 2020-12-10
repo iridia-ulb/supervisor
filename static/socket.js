@@ -155,8 +155,10 @@ function newCard(uuid, title, span, content, controls) {
    cardTitle.appendChild(cardTitleText);
    card.appendChild(cardTitle);
    /* create content */
-   var cardContent = contentToHTML(content);
-   card.appendChild(cardContent);
+   for(section of content) {
+      var cardSection = contentToHTML(section);
+      card.appendChild(cardSection);
+   }
    /* create controls */
    cardControls = document.createElement('div');
    cardControls.setAttribute('class', 'mdl-card__actions mdl-card--border');

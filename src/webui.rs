@@ -27,8 +27,8 @@ use log;
 use itertools::Itertools;
 
 /// MDL HTML for icons
-const _OK_ICON: &str = "<i class=\"material-icons mdl-list__item-icon\" style=\"color:green;\">check_circle</i>";
-const _ERROR_ICON: &str = "<i class=\"material-icons mdl-list__item-icon\" style=\"color:red;\">error</i>";
+const OK_ICON: &str = "<i class=\"material-icons mdl-list__item-icon\" style=\"color:green;\">check_circle</i>";
+const ERROR_ICON: &str = "<i class=\"material-icons mdl-list__item-icon\" style=\"color:red;\">error</i>";
 
 
 #[derive(Serialize, Debug)]
@@ -96,7 +96,7 @@ struct Card {
     uuid: uuid::Uuid,
     span: u8,
     title: String,
-    content: Content,
+    content: Vec<Content>,
     actions: Vec<Action>,
 }
 
@@ -291,18 +291,22 @@ async fn experiment_tab(_: &crate::Robots, experiment: &crate::Experiment) -> Re
     let card = Card {
         uuid: UUID_EXPERIMENT_DRONES.clone(),
         span: 4,
-        title: String::from("Drone Configuration"),
-        content: Content::Table {
-            header: vec!["File".to_owned(), "MD5 Checksum".to_owned()],
-            rows: experiment.drone_software.0
-                .iter()
-                .map(|(filename, contents)| {
-                    let filename = filename.to_string_lossy().into_owned();
-                    let checksum = format!("{:x}", md5::compute(contents));
-                    vec![filename, checksum]
-                })
-                .collect::<Vec<_>>()
-        },
+        title: "Drone Configuration".to_owned(),
+        content: vec![
+            Content::Text("Control Software".to_owned()),
+            Content::Table {
+                header: vec!["File".to_owned(), "MD5 Checksum".to_owned()],
+                rows: experiment.drone_software.0
+                    .iter()
+                    .map(|(filename, contents)| {
+                        let filename = filename.to_string_lossy().into_owned();
+                        let checksum = format!("{:x}", md5::compute(contents));
+                        vec![filename, checksum]
+                    })
+                    .collect::<Vec<_>>()
+            },
+            Content::Text("Validation".to_owned()),
+        ],
         actions: vec![firmware::Action::Upload, firmware::Action::Clear]
             .into_iter().map(Action::Firmware).collect(),
     };
@@ -310,18 +314,30 @@ async fn experiment_tab(_: &crate::Robots, experiment: &crate::Experiment) -> Re
     let card = Card {
         uuid: UUID_EXPERIMENT_PIPUCKS.clone(),
         span: 4,
-        title: String::from("Pi-Puck Configuration"),
-        content: Content::Table {
-            header: vec!["File".to_owned(), "MD5 Checksum".to_owned()],
-            rows: experiment.pipuck_software.0
-                .iter()
-                .map(|(filename, contents)| {
-                    let filename = filename.to_string_lossy().into_owned();
-                    let checksum = format!("{:x}", md5::compute(contents));
-                    vec![filename, checksum]
-                })
-                .collect::<Vec<_>>()
-        },
+        title: "Pi-Puck Configuration".to_owned(),
+        content: vec![
+            Content::Text("Control Software".to_owned()),
+            Content::Table {
+                header: vec!["File".to_owned(), "MD5 Checksum".to_owned()],
+                rows: experiment.pipuck_software.0
+                    .iter()
+                    .map(|(filename, contents)| {
+                        let filename = filename.to_string_lossy().into_owned();
+                        let checksum = format!("{:x}", md5::compute(contents));
+                        vec![filename, checksum]
+                    })
+                    .collect::<Vec<_>>()
+            },
+            Content::Text("Validation".to_owned()),
+            Content::Table {
+                header: vec!["Check".to_owned(), "Status".to_owned()],
+                rows: vec![
+                    vec!["ARGoS configuration file exists".to_owned(), OK_ICON.to_owned()],
+                    vec!["Configuration file is valid XML".to_owned(), OK_ICON.to_owned()],
+                    vec!["Referenced files exist".to_owned(), ERROR_ICON.to_owned()],
+                ]
+            },
+        ],
         actions: vec![firmware::Action::Upload, firmware::Action::Clear]
             .into_iter().map(Action::Firmware).collect(),
     };
@@ -330,7 +346,7 @@ async fn experiment_tab(_: &crate::Robots, experiment: &crate::Experiment) -> Re
         uuid: UUID_EXPERIMENT_DASHBOARD.clone(),
         span: 4,
         title: String::from("Dashboard"),
-        content: Content::Text(String::from("Drone")),
+        content: vec![Content::Text(String::from("Drone"))],
         // the actions depend on the state of the drone
         // the action part of the message must contain
         // the uuid, action name, and optionally arguments
@@ -359,10 +375,10 @@ async fn optitrack_tab() -> Reply {
                     uuid: uuid::Uuid::new_v3(&NAMESPACE_OPTITRACK, &rigid_body.id.to_be_bytes()),
                     span: 3,
                     title: format!("Rigid body {}", rigid_body.id),
-                    content: Content::Table {
+                    content: vec![Content::Table {
                         header: vec!["Position".to_owned(), "Orientation".to_owned()],
                         rows: vec![vec![position, orientation]]
-                    },
+                    }],
                     // the actions depend on the state of the drone
                     // the action part of the message must contain
                     // the uuid, action name, and optionally arguments
@@ -387,10 +403,10 @@ async fn connections_tab(robots: &crate::Robots) -> Reply {
                     uuid: drone.uuid.clone(),
                     span: 4,
                     title: String::from("Drone"),
-                    content: Content::Table {
+                    content: vec![Content::Table {
                         header: vec!["Unique Identifier".to_owned(), "Xbee Address".to_owned(), "SSH Address".to_owned()],
                         rows: vec![vec![drone.uuid.to_string(), drone.xbee.addr.to_string(), String::from("-")]]
-                    },
+                    }],
                     actions: drone.actions().into_iter().map(Action::Drone).collect(),
                 };
                 cards.push(card);
@@ -400,10 +416,10 @@ async fn connections_tab(robots: &crate::Robots) -> Reply {
                     uuid: pipuck.uuid.clone(),
                     span: 4,
                     title: String::from("Pi-Puck"),
-                    content: Content::Table {
+                    content: vec![Content::Table {
                         header: vec!["Unique Identifier".to_owned(), "SSH Address".to_owned()],
                         rows: vec![vec![pipuck.uuid.to_string(), pipuck.ssh.addr.to_string()]]
-                    },
+                    }],
                     actions: pipuck.actions().into_iter().map(Action::PiPuck).collect(),
                 };
                 cards.push(card);

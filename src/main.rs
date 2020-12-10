@@ -17,11 +17,13 @@ type Experiment = Arc<RwLock<experiment::Experiment>>;
 /// 1. Clean up this code so that it compiles again [DONE]
 /// 1a. Quick investigation into what a robot enum (static dispatch) would look like [DONE]
 /// 1b. Use static_dir to embedded static resources inside of the app [DONE]
-/// 1c. Start experiment triggers upload to all robots after check?
+/// 1c. Start experiment triggers upload to all robots? [DONE]
+/// 1d. Add basic control software checks, is there one .argos file, are all referenced files included?
+/// 1e. Start ARGoS with the controller and shutdown at end of experiment 
 /// 2. Add the ping functionality to remove robots if they don't reply
 ///    a. What if SSH drops from drone, but Xbee is still up? (move back to the standby state?)
 ///    b. What if Xbee drops, but SSH is still up? (these are difficult problems to solve)
-/// 3. Investigate the SSH shell drop outs
+/// 3. Investigate the SSH shell drop outs (and add fallback code to tolerate this)
 /// 4. Add code to catch SIGINT
 
 #[tokio::main]
