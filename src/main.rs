@@ -8,7 +8,7 @@ mod network;
 mod webui;
 mod experiment;
 mod optitrack;
-mod firmware;
+mod software;
 
 type Robots = Arc<RwLock<Vec<robot::Robot>>>;
 type Experiment = Arc<RwLock<experiment::Experiment>>;

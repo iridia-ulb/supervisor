@@ -16,7 +16,7 @@ use regex::Regex;
 use crate::{
     experiment,
     optitrack,
-    firmware,
+    software,
     robot::{self, Robot, Identifiable},
 };
 
@@ -27,8 +27,8 @@ use log;
 use itertools::Itertools;
 
 /// MDL HTML for icons
-const OK_ICON: &str = "<i class=\"material-icons mdl-list__item-icon\" style=\"color:green;\">check_circle</i>";
-const ERROR_ICON: &str = "<i class=\"material-icons mdl-list__item-icon\" style=\"color:red;\">error</i>";
+const OK_ICON: &str = "<i class=\"material-icons mdl-list__item-icon\" style=\"color:green; vertical-align: middle;\">check_circle</i>";
+const ERROR_ICON: &str = "<i class=\"material-icons mdl-list__item-icon\" style=\"color:red; vertical-align: middle;\">error</i>";
 
 
 #[derive(Serialize, Debug)]
@@ -75,8 +75,8 @@ enum Request {
     Update {
         tab: String
     },
-    Firmware {
-        action: firmware::Action,
+    Software {
+        action: software::Action,
         file: Option<(String, String)>,
         uuid: uuid::Uuid
     }
@@ -88,7 +88,7 @@ enum Action {
     Drone(robot::drone::Action),
     PiPuck(robot::pipuck::Action),
     Experiment(experiment::Action),
-    Firmware(firmware::Action),
+    Software(software::Action),
 }
 
 #[derive(Serialize, Debug)]
@@ -136,20 +136,18 @@ lazy_static::lazy_static! {
 pub async fn run(ws: ws::WebSocket,
                  robots: crate::Robots,
                  experiment: crate::Experiment) {
-    // Use a counter to assign a new unique ID for this user.
-
-    log::info!("client connected!");
-    // Split the socket into a sender and receive of messages.
+    log::info!("Client connected!");
+    /* split the socket into a sender and receive of messages */
     let (user_ws_tx, mut user_ws_rx) = ws.split();
 
     let (tx, rx) = mpsc::unbounded_channel();
     tokio::task::spawn(rx.forward(user_ws_tx).map(|result| {
         if let Err(error) = result {
-            log::error!("websocket send failed: {}", error);
+            log::error!("Sending data over WebSocket failed: {}", error);
         }
     }));
 
-    // this loop is basically our gui updating thread
+    /* this loop is update task for a webui client */
     while let Some(data) = user_ws_rx.next().await {
         let request : ws::Message = match data {
             Ok(request) => request,
@@ -223,9 +221,9 @@ pub async fn run(ws: ws::WebSocket,
                             log::error!("Could not reply to client: {}", error);
                         }
                     },
-                    Request::Firmware{action, uuid, file} => {
+                    Request::Software{action, uuid, file} => {
                         match action {
-                            firmware::Action::Upload => {
+                            software::Action::Upload => {
                                 let file = file.and_then(|(name, content)| {
                                     match content.split(',').tuples::<(_,_)>().next() {
                                         Some((_, data)) => {
@@ -254,7 +252,7 @@ pub async fn run(ws: ws::WebSocket,
                                     }
                                 }
                             }
-                            firmware::Action::Clear => {
+                            software::Action::Clear => {
                                 if uuid == *UUID_EXPERIMENT_DRONES {
                                     let mut experiment = experiment.write().await;
                                     experiment.drone_software.clear();
@@ -272,11 +270,11 @@ pub async fn run(ws: ws::WebSocket,
                 }
             }
             else {
-                log::error!("cannot not deserialize message");
+                log::error!("Could not deserialize request");
             }
         }
     }
-    log::info!("client disconnected!");
+    log::info!("Client disconnected!");
 }
 
 async fn diagnostics_tab(_robots: &crate::Robots) -> Reply {
@@ -305,10 +303,13 @@ async fn experiment_tab(_: &crate::Robots, experiment: &crate::Experiment) -> Re
                     })
                     .collect::<Vec<_>>()
             },
-            Content::Text("Validation".to_owned()),
+            Content::Text(match experiment.drone_software.check_config() {
+                Ok(_) => format!("{} Configuration valid", OK_ICON),
+                Err(error) => format!("{} {}", ERROR_ICON, error),
+            }),
         ],
-        actions: vec![firmware::Action::Upload, firmware::Action::Clear]
-            .into_iter().map(Action::Firmware).collect(),
+        actions: vec![software::Action::Upload, software::Action::Clear]
+            .into_iter().map(Action::Software).collect(),
     };
     cards.push(card);
     let card = Card {
@@ -328,25 +329,20 @@ async fn experiment_tab(_: &crate::Robots, experiment: &crate::Experiment) -> Re
                     })
                     .collect::<Vec<_>>()
             },
-            Content::Text("Validation".to_owned()),
-            Content::Table {
-                header: vec!["Check".to_owned(), "Status".to_owned()],
-                rows: vec![
-                    vec!["ARGoS configuration file exists".to_owned(), OK_ICON.to_owned()],
-                    vec!["Configuration file is valid XML".to_owned(), OK_ICON.to_owned()],
-                    vec!["Referenced files exist".to_owned(), ERROR_ICON.to_owned()],
-                ]
-            },
+            Content::Text(match experiment.pipuck_software.check_config() {
+                Ok(_) => format!("{} Configuration valid", OK_ICON),
+                Err(error) => format!("{} {}", ERROR_ICON, error),
+            }),
         ],
-        actions: vec![firmware::Action::Upload, firmware::Action::Clear]
-            .into_iter().map(Action::Firmware).collect(),
+        actions: vec![software::Action::Upload, software::Action::Clear]
+            .into_iter().map(Action::Software).collect(),
     };
     cards.push(card);
     let card = Card {
         uuid: UUID_EXPERIMENT_DASHBOARD.clone(),
         span: 4,
         title: String::from("Dashboard"),
-        content: vec![Content::Text(String::from("Drone"))],
+        content: vec![Content::Text(String::from("Experiment"))],
         // the actions depend on the state of the drone
         // the action part of the message must contain
         // the uuid, action name, and optionally arguments

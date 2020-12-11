@@ -163,7 +163,7 @@ function newCard(uuid, title, span, content, controls) {
    cardControls = document.createElement('div');
    cardControls.setAttribute('class', 'mdl-card__actions mdl-card--border');
    for(var control of controls) {
-      if(control.type == 'firmware' && control.action == 'Upload') {
+      if(control.type == 'software' && control.action == 'Upload') {
          cardControlInput = document.createElement('input');
          cardControlInput.setAttribute('type', 'file');
          cardControlInput.setAttribute('multiple', true);
@@ -176,7 +176,7 @@ function newCard(uuid, title, span, content, controls) {
                const reader = new FileReader();
                reader.onload = function(ev) {
                   var message = JSON.stringify({
-                     type: 'firmware',
+                     type: 'software',
                      action: 'Upload',
                      file: [file.name, ev.target.result],
                      uuid: uuid,

@@ -54,7 +54,7 @@ pub trait Controllable {
     fn ssh(&mut self) -> Option<&mut crate::network::ssh::Device>;
 
     /// installs software and returns the installation directory so that we can run argos
-    async fn install(&mut self, software: &crate::experiment::Software) -> Result<PathBuf> {
+    async fn install(&mut self, software: &crate::software::Software) -> Result<PathBuf> {
         if let Some(ssh) = self.ssh() {
             let install_path = ssh.create_temp_dir().await?;
             for (filename, contents) in software.0.iter() {
