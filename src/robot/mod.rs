@@ -8,11 +8,14 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("SSH is not available")]
-    SshUnavailable,
+    #[error("Could not convert path to UTF-8")]
+    InvalidPath,
+    
+    #[error("Network is not available")]
+    NetworkUnavailable,
 
     #[error(transparent)]
-    SshError(#[from] crate::network::ssh::Error),
+    NetworkError(#[from] crate::network::ssh::Error),  
 }
 
 #[derive(Debug)]
@@ -42,8 +45,8 @@ impl Identifiable for Robot {
     }
 }
 
-// the drone and pipuck will both need to have a field for its control software
-// perhaps even a field that represents an instance of ARGoS
+/* this trait is probably doing too much */
+// it would be better if this trait was split into traits for handling
 #[async_trait]
 pub trait Controllable {
     // this method returns None if ssh is not available (device state!?)
@@ -55,19 +58,28 @@ pub trait Controllable {
 
     /// installs software and returns the installation directory so that we can run argos
     async fn install(&mut self, software: &crate::software::Software) -> Result<PathBuf> {
-        if let Some(ssh) = self.ssh() {
-            let install_path = ssh.create_temp_dir().await?;
-            for (filename, contents) in software.0.iter() {
-                ssh.upload(install_path.as_path(), filename, contents, 0o644).await?;
-            }
-            Ok(install_path)
+        let ssh = self.ssh().ok_or(Error::NetworkUnavailable)?;
+        let controller_path = ssh.create_temp_dir().await?;
+        for (filename, contents) in software.0.iter() {
+            ssh.upload(controller_path.as_path(), filename, contents, 0o644).await?;
         }
-        else {
-            Err(Error::SshUnavailable)
-        }
+        Ok(controller_path)
     }
 
-    async fn start<W, C>(&mut self, _working_dir: &Path, _configuration: &Path) {
-        /* start ARGoS */
+    // configuration is just the path to the .argos, we cd into this directory and run ARGoS in there
+    async fn start<W, C>(&mut self, working_dir: W, config_file: C) -> Result<String>
+        where C: AsRef<Path> + Send, W: AsRef<Path> + Send {
+        let working_dir = working_dir
+            .as_ref()
+            .to_str()
+            .ok_or(Error::InvalidPath)?;
+        let config_file = config_file
+            .as_ref()
+            .to_str()
+            .ok_or(Error::InvalidPath)?;
+        let ssh = self.ssh().ok_or(Error::NetworkUnavailable)?;
+        let shell = ssh.default_shell()?;
+        shell.exec(format!("(cd {} && argos3 -c {})", working_dir, config_file)).await
+            .map_err(|e| Error::NetworkError(e))
     }
 }

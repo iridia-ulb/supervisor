@@ -2,8 +2,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::robot::pipuck::PiPuck;
-
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Action {
     Upload,

@@ -76,22 +76,39 @@ impl Experiment {
                     /* define the upload tasks */
                     let mut robots = robots.write().await;
                     let mut tasks = robots.iter_mut()
-                        .map(|robot| match robot {
-                            Robot::PiPuck(pipuck) => pipuck.install(pipuck_software),
-                            Robot::Drone(drone) => drone.install(drone_software)
+                        .map(|robot| async {
+                            match robot {
+                                Robot::PiPuck(pipuck) => {
+                                    let working_dir = pipuck.install(pipuck_software).await.unwrap();
+                                    let config_file = pipuck_software.argos_config().unwrap().0.clone();
+                                    (working_dir, config_file, robot)
+                                }
+                                Robot::Drone(drone) => {
+                                    let working_dir = drone.install(drone_software).await.unwrap();
+                                    let config_file = drone_software.argos_config().unwrap().0.clone();
+                                    (working_dir, config_file, robot)
+                                }
+                            }
                         })
                         .collect::<FuturesUnordered<_>>();
                     /* upload the software to connected robots in parallel */
-                    while let Some(result) = tasks.next().await {
-                        match result {
-                            Ok(install_dir) => log::info!("Installed software to {}", install_dir.to_string_lossy()),
-                            Err(error) => {
-                                log::error!("{}", error);
-                                /* if there are any errors, abort starting the experiment */
-                                log::warn!("Starting the experiment aborted");
-                                return;
+                    while let Some((working_dir, config_file, robot)) = tasks.next().await {
+                        match robot {
+                            Robot::PiPuck(pipuck) => {
+                                pipuck.start(working_dir, config_file).await.unwrap();
+                            }
+                            Robot::Drone(drone) => {
+                                drone.start(working_dir, config_file).await.unwrap();
                             }
                         }
+                        /*
+                        if let Err(error) = result {
+                            log::error!("{}", error);
+                            /* if there are any errors, abort starting the experiment */
+                            log::warn!("Starting the experiment aborted");
+                            return;
+                        }
+                        */
                     }
                     /* at this point, we consider the experiment started, update the
                        state of the experiment to reflect this */
