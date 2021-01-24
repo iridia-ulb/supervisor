@@ -24,7 +24,7 @@ enum State {
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("Could not upload software: {0}")]
-    UploadFailure(#[from] crate::network::ssh::Error),
+    UploadFailure(#[from] crate::network::fernbedienung::Error),
     /*
     #[error("Connection timed out")]
     Timeout,
@@ -95,6 +95,7 @@ impl Experiment {
                     while let Some((working_dir, config_file, robot)) = tasks.next().await {
                         match robot {
                             Robot::PiPuck(pipuck) => {
+                                // this panics when robot shuts down
                                 pipuck.start(working_dir, config_file).await.unwrap();
                             }
                             Robot::Drone(drone) => {

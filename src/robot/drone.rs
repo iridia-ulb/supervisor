@@ -1,4 +1,4 @@
-use crate::network::{ssh, xbee};
+use crate::network::{fernbedienung, xbee};
 use serde::{Deserialize, Serialize};
 use uuid;
 use log;
@@ -10,7 +10,7 @@ const MUX_CONTROL_BIT_INDEX: u8 = 4;
 #[derive(Debug)]
 pub enum State {
     Standby,
-    Ready(ssh::Device),
+    Ready(fernbedienung::Device),
 }
 
 // Note: the power off, shutdown, reboot up core actions
@@ -39,7 +39,7 @@ pub enum Error {
     #[error(transparent)]
     XbeeError(#[from] xbee::Error),
     #[error(transparent)]
-    SshError(#[from] ssh::Error),
+    FernbedienungError(#[from] fernbedienung::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -173,7 +173,7 @@ impl super::Identifiable for Drone {
 }
 
 impl super::Controllable for Drone {
-    fn ssh(&mut self) -> Option<&mut ssh::Device> {
+    fn fernbedienung(&mut self) -> Option<&mut fernbedienung::Device> {
         match &mut self.state {
             State::Standby => None,
             State::Ready(device) => Some(device)

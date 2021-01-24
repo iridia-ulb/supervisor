@@ -1,16 +1,7 @@
-use crate::network::ssh;
+use crate::network::fernbedienung;
 use serde::{Deserialize, Serialize};
 use uuid;
 use log;
-
-/*
-#[derive(thiserror::Error, Debug)]
-pub enum Error {
-    #[error(transparent)]
-    SshError(#[from] ssh::Error),
-}
-pub type Result<T> = std::result::Result<T, Error>;
-*/
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum Action {
@@ -25,15 +16,15 @@ pub enum Action {
 #[derive(Debug)]
 pub struct PiPuck {
     pub uuid: uuid::Uuid,
-    pub ssh: ssh::Device,
+    pub device: fernbedienung::Device,
 }
 
 impl PiPuck {
     
-    pub fn new(ssh: ssh::Device) -> Self {
+    pub fn new(device: fernbedienung::Device) -> Self {
         Self {
             uuid: uuid::Uuid::new_v4(), 
-            ssh,
+            device,
         }
     }
 
@@ -46,21 +37,13 @@ impl PiPuck {
         if self.actions().contains(&action) {
             match action {
                 Action::RpiShutdown => {
-                    match self.ssh.default_shell() {
-                        Err(error) => log::error!("{:?} failed with: {}", action, error),
-                        Ok(shell) => match shell.exec("shutdown 0; exit").await {
-                            Ok(_) => self.ssh.disconnect(),
-                            Err(error) => log::error!("{:?} failed with: {}", action, error),
-                        }
+                    if let Err(error) = self.device.shutdown().await {
+                        log::error!("{:?} failed with: {}", action, error);
                     }
                 },
                 Action::RpiReboot => {
-                    match self.ssh.default_shell() {
-                        Err(error) => log::error!("{:?} failed with: {}", action, error),
-                        Ok(shell) => match shell.exec("reboot; exit").await {
-                            Ok(_) => self.ssh.disconnect(),
-                            Err(error) => log::error!("{:?} failed with: {}", action, error),
-                        }
+                    if let Err(error) = self.device.reboot().await {
+                        log::error!("{:?} failed with: {}", action, error);
                     }
                 },
                 Action::Identify => {
@@ -85,7 +68,7 @@ impl super::Identifiable for PiPuck {
 }
 
 impl super::Controllable for PiPuck {
-    fn ssh(&mut self) -> Option<&mut ssh::Device> {
-        Some(&mut self.ssh)
+    fn fernbedienung(&mut self) -> Option<&mut fernbedienung::Device> {
+        Some(&mut self.device)
     }
 }

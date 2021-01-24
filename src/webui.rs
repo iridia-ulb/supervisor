@@ -414,7 +414,7 @@ async fn connections_tab(robots: &crate::Robots) -> Reply {
                     title: String::from("Pi-Puck"),
                     content: vec![Content::Table {
                         header: vec!["Unique Identifier".to_owned(), "SSH Address".to_owned()],
-                        rows: vec![vec![pipuck.uuid.to_string(), pipuck.ssh.addr.to_string()]]
+                        rows: vec![vec![pipuck.uuid.to_string(), pipuck.device.addr.to_string()]]
                     }],
                     actions: pipuck.actions().into_iter().map(Action::PiPuck).collect(),
                 };

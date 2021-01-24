@@ -15,7 +15,7 @@ pub enum Error {
     NetworkUnavailable,
 
     #[error(transparent)]
-    NetworkError(#[from] crate::network::ssh::Error),  
+    NetworkError(#[from] crate::network::fernbedienung::Error),  
 }
 
 #[derive(Debug)]
@@ -54,32 +54,27 @@ pub trait Controllable {
     // it is not clear how the device state fits into this picture yet
     // it may be correct to ignore device state, and all other methods in this
     // trait be failable (which they already are)
-    fn ssh(&mut self) -> Option<&mut crate::network::ssh::Device>;
+    fn fernbedienung(&mut self) -> Option<&mut crate::network::fernbedienung::Device>;
 
     /// installs software and returns the installation directory so that we can run argos
     async fn install(&mut self, software: &crate::software::Software) -> Result<PathBuf> {
-        let ssh = self.ssh().ok_or(Error::NetworkUnavailable)?;
-        let controller_path = ssh.create_temp_dir().await?;
+        let fernbedienung = self.fernbedienung().ok_or(Error::NetworkUnavailable)?;
+        let controller_path = fernbedienung.create_temp_dir().await?;
         for (filename, contents) in software.0.iter() {
-            ssh.upload(controller_path.as_path(), filename, contents, 0o644).await?;
+            fernbedienung.upload(controller_path.as_path(), filename, contents.to_owned(), 0o644).await?;
         }
         Ok(controller_path)
     }
 
     // configuration is just the path to the .argos, we cd into this directory and run ARGoS in there
     async fn start<W, C>(&mut self, working_dir: W, config_file: C) -> Result<String>
-        where C: AsRef<Path> + Send, W: AsRef<Path> + Send {
-        let working_dir = working_dir
-            .as_ref()
-            .to_str()
-            .ok_or(Error::InvalidPath)?;
-        let config_file = config_file
-            .as_ref()
-            .to_str()
-            .ok_or(Error::InvalidPath)?;
-        let ssh = self.ssh().ok_or(Error::NetworkUnavailable)?;
-        let shell = ssh.default_shell()?;
-        shell.exec(format!("(cd {} && argos3 -c {})", working_dir, config_file)).await
+        where C: AsRef<Path> + Send, W: Into<PathBuf> + Send {
+        /* prepare arguments */
+        let target = PathBuf::from("argos3");
+        let argument = format!("-c {}", config_file.as_ref().to_string_lossy());
+        /* execute */
+        let fernbedienung = self.fernbedienung().ok_or(Error::NetworkUnavailable)?;
+        fernbedienung.run(target, working_dir, vec![argument]).await
             .map_err(|e| Error::NetworkError(e))
     }
 }

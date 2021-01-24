@@ -1,5 +1,5 @@
 pub mod xbee;
-pub mod ssh;
+pub mod fernbedienung;
 
 use futures::stream::FuturesUnordered;
 
@@ -18,7 +18,7 @@ use std::{
 
 #[derive(Debug)]
 pub enum Device {
-    Ssh(ssh::Device),
+    Fernbedienung(fernbedienung::Device),
     Xbee(xbee::Device),
 }
 
@@ -103,7 +103,7 @@ pub async fn discover(network: Ipv4Net, robots: Robots) {
     
     async fn associate(device: Device, robots: &Robots) {
         match device {
-            Device::Ssh(mut device) => {
+            Device::Fernbedienung(mut device) => {
                 if let Ok(hostname) = device.hostname().await {
                     match &hostname[..] {
                         "raspberrypi0-wifi" => {
@@ -151,19 +151,12 @@ pub async fn discover(network: Ipv4Net, robots: Robots) {
             }
         }
         /* xbee connection timed out/failed */
-        /* attempt a ssh connection for 1000 ms */
-        let mut device = ssh::Device::new(addr);
-        let assoc_ssh_attempt =
-            timeout(Duration::from_millis(1000), device.connect());
-        if let Ok(assoc_ssh_result) = assoc_ssh_attempt.await {
-            match assoc_ssh_result {
-                Ok(_) => {
-                    return (addr, Ok(Device::Ssh(device)));
-                }
-                Err(_error) => {
-                    // TODO, _error is the ssh error and could be useful
-                    return (addr, Err(Error::Timeout));
-                }
+        /* attempt a fernbedienung connection for 500 ms */
+        let assoc_fernbedienung_attempt =
+            timeout(Duration::from_millis(500), fernbedienung::Device::new(addr));
+        if let Ok(assoc_fernbedienung_result) = assoc_fernbedienung_attempt.await {
+            if let Ok(device) = assoc_fernbedienung_result {
+                return (addr, Ok(Device::Fernbedienung(device)));
             }
         }
         (addr, Err(Error::Timeout))
