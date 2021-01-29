@@ -8,8 +8,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("Could not convert path to UTF-8")]
-    InvalidPath,
+//    #[error("Could not convert path to UTF-8")]
+//    InvalidPath,
     
     #[error("Network is not available")]
     NetworkUnavailable,
@@ -61,7 +61,7 @@ pub trait Controllable {
         let fernbedienung = self.fernbedienung().ok_or(Error::NetworkUnavailable)?;
         let controller_path = fernbedienung.create_temp_dir().await?;
         for (filename, contents) in software.0.iter() {
-            fernbedienung.upload(controller_path.as_path(), filename, contents.to_owned(), 0o644).await?;
+            fernbedienung.upload(controller_path.as_path(), filename, contents.to_owned()).await?;
         }
         Ok(controller_path)
     }
@@ -73,8 +73,9 @@ pub trait Controllable {
         let target = PathBuf::from("argos3");
         let argument = format!("-c {}", config_file.as_ref().to_string_lossy());
         /* execute */
-        let fernbedienung = self.fernbedienung().ok_or(Error::NetworkUnavailable)?;
-        fernbedienung.run(target, working_dir, vec![argument]).await
-            .map_err(|e| Error::NetworkError(e))
+        // let fernbedienung = self.fernbedienung().ok_or(Error::NetworkUnavailable)?;
+        // fernbedienung.run(target, working_dir, vec![argument]).await
+        //     .map_err(|e| Error::NetworkError(e))
+        todo!();
     }
 }

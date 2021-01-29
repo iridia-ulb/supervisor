@@ -71,13 +71,14 @@ type Result<T> = std::result::Result<T, Error>;
 
 pub async fn discover(network: Ipv4Net, robots: Robots) {
         let mut queue = network.hosts()
+            // .inspect(|addr| log::info!("{}", addr))
             .map(|addr| probe(addr, None))
             .collect::<FuturesUnordered<_>>();
     
         loop {
             tokio::select! {
                 /*
-                /* address received for probing */
+                /* TODO address received for probing */
                 Some(addr) = addr_rx.recv() => {
                     probing.push(probe(addr, None));
                 },
@@ -104,11 +105,13 @@ pub async fn discover(network: Ipv4Net, robots: Robots) {
     async fn associate(device: Device, robots: &Robots) {
         match device {
             Device::Fernbedienung(mut device) => {
+                let pipuck = PiPuck::new(device);
+                robots.write().await.push(Robot::PiPuck(pipuck));
+                /*
                 if let Ok(hostname) = device.hostname().await {
                     match &hostname[..] {
                         "raspberrypi0-wifi" => {
-                            let pipuck = PiPuck::new(device);
-                            robots.write().await.push(Robot::PiPuck(pipuck));
+                            
                         },
                         _ => {
                             log::warn!("{} accepted SSH connection with root login, but the \
@@ -121,6 +124,7 @@ pub async fn discover(network: Ipv4Net, robots: Robots) {
                     // getting hostname failed
                     // place back in the pool with 1 second delay
                 }
+                */
             },
             Device::Xbee(device) => {
                 let mut drone = Drone::new(device);

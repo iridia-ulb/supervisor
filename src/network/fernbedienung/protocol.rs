@@ -1,4 +1,5 @@
-mod process {
+pub mod process {
+    use std::path::PathBuf;
     use bytes::BytesMut;
     use serde::{Deserialize, Serialize};
 
@@ -8,9 +9,17 @@ mod process {
     }
 
     #[derive(Debug, Serialize)]
+    pub struct Run {
+        pub target: PathBuf,
+        pub working_dir: PathBuf,
+        pub args: Vec<String>,
+    }
+
+    #[derive(Debug, Serialize)]
     pub enum Request {
+        Run(Run),
         Write(Vec<u8>),
-        Kill,
+        Signal(u32),
     }
 
     #[derive(Debug, Deserialize)]
@@ -21,8 +30,9 @@ mod process {
     }
 }
 
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use uuid::Uuid;
 
 #[derive(Debug, Serialize)]
 pub struct Upload {
@@ -32,23 +42,21 @@ pub struct Upload {
 }
 
 #[derive(Debug, Serialize)]
-pub struct Run {
-    pub target: PathBuf,
-    pub working_dir: PathBuf,
-    pub args: Vec<String>,
+pub enum RequestKind {
+    Ping,
+    Upload(Upload),
+    Process(process::Request),
 }
 
 #[derive(Debug, Serialize)]
-pub enum Request {
-    Ping,
-    Upload(Upload),
-    Run(Run),    
-    Process(u32, process::Request),
+pub struct Request(pub Uuid, pub RequestKind);
+
+#[derive(Debug, Deserialize)]
+pub enum ResponseKind {
+    Ok,
+    Error(String),
+    Process(process::Response),
 }
 
 #[derive(Debug, Deserialize)]
-enum Response {
-    Ok,
-    Error(String),
-    Process(u32, process::Response),
-}
+pub struct Response(pub Option<Uuid>, pub ResponseKind);

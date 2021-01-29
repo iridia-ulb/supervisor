@@ -77,6 +77,7 @@ impl Experiment {
                     let mut robots = robots.write().await;
                     let mut tasks = robots.iter_mut()
                         .map(|robot| async {
+                            // TODO calling unwrap below causes panic if the process did not have write permissions
                             match robot {
                                 Robot::PiPuck(pipuck) => {
                                     let working_dir = pipuck.install(pipuck_software).await.unwrap();
