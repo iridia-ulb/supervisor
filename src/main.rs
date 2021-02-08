@@ -1,17 +1,15 @@
+use futures::stream::FuturesUnordered;
 use ipnet::Ipv4Net;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::mpsc;
 use warp::Filter;
 
+mod arena;
 mod robot;
 mod network;
 mod webui;
-mod experiment;
 mod optitrack;
 mod software;
-
-type Robots = Arc<RwLock<Vec<robot::Robot>>>;
-type Experiment = Arc<RwLock<experiment::Experiment>>;
 
 /// TODO:
 /// 1. Clean up this code so that it compiles again [DONE]
@@ -31,25 +29,24 @@ async fn main() {
     /* initialize the logger */
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("mns_supervisor=info")).init();
     /* create data structures for tracking the robots and state of the experiment */
-    let robots = Robots::default();
-    let experiment = Arc::new(RwLock::new(experiment::Experiment::with_robots(robots.clone())));
+    let (arena_requests_tx, arena_requests_rx) = mpsc::unbounded_channel();
+    let arena = arena::new(arena_requests_rx);
     
     /* create a task for discovering robots connected to our network */
     let network = "192.168.1.0/24".parse::<Ipv4Net>().unwrap();
-    let discovery_task = network::discover(network, robots.clone());
+    let discovery_task = network::new(network, arena_requests_tx.clone());
     
     /* create a task for coordinating with the webui */
-    let robots_filter = warp::any().map(move || robots.clone());
-    let experiment_filter = warp::any().map(move || experiment.clone());
+    let arena_filter = warp::any().map(move || arena_requests_tx.clone());
     let socket_route = warp::path("socket")
         .and(warp::ws())
-        .and(robots_filter)
-        .and(experiment_filter)
-        .map(|ws: warp::ws::Ws, 
-                robots : Robots,
-                experiment : Experiment | {
+        .and(arena_filter)
+        .map(|websocket: warp::ws::Ws,
+              arena_request_tx: mpsc::UnboundedSender<arena::Request> | {
+            /* not clear why this needs to be cloned here */
+            let arena_requests_tx = arena_requests_tx.clone();
             /* start an instance of the webui if handshake is successful */
-            ws.on_upgrade(move |socket| webui::run(socket, robots, experiment))
+            websocket.on_upgrade(move |socket| webui::run(socket, arena_requests_tx))
         });
     let static_route = warp::get()
     //    .and(static_dir::static_dir!("static"));
@@ -60,6 +57,13 @@ async fn main() {
 
 
     let server_task_handle = tokio::task::spawn(server_task);
+
+    // tokio::spawn requires Send 
+    // (dyn futures::Future<Output = std::result::Result<(), drone::task::Error>> + 'static) is not `Send`
+    // tokio::sync::mpsc::UnboundedSender<arena::Request>` which is not `Send`
+    // ** future is not `Send` as this value is used across an await
+    
+    //
     let discovery_task_handle = tokio::task::spawn(discovery_task);
     
     // use try_join here? this will abort other tasks, when one task throws an error?

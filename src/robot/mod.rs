@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 
+use std::{pin::Pin, task::{Context, Poll}, future::Future};
+
 pub mod drone;
 pub mod pipuck;
 
@@ -15,33 +17,48 @@ pub enum Error {
     NetworkUnavailable,
 
     #[error(transparent)]
-    NetworkError(#[from] crate::network::fernbedienung::Error),  
+    NetworkError(#[from] crate::network::fernbedienung::Error),
+
+    #[error(transparent)]
+    PiPuckError(#[from] pipuck::Error),
+
+    #[error(transparent)]
+    DroneError(#[from] drone::Error),
 }
 
-#[derive(Debug)]
 pub enum Robot {
     Drone(drone::Drone),
     PiPuck(pipuck::PiPuck),
 }
 
+// since both drone and pipuck already implement future, is it necessary to have `enum Robot`?
+// enum Robot enables the use of FuturesUnordered<Robot> instead of FuturesUnordered<dyn Future... etc>
+impl std::future::Future for Robot {
+    type Output = Result<()>;
+    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+        match self.get_mut() {
+            Robot::Drone(drone) => drone.task
+                .as_mut()
+                .poll(cx)
+                .map(|r| r.map_err(Error::DroneError)),
+            Robot::PiPuck(pipuck) => pipuck.task
+                .as_mut()
+                .poll(cx)
+                .map(|result| result.map_err(Error::PiPuckError)),
+        }
+    }
+}
+
 pub trait Identifiable {
     fn id(&self) -> &uuid::Uuid;
-    fn set_id(&mut self, id: uuid::Uuid);
 }
 
 impl Identifiable for Robot {
     fn id(&self) -> &uuid::Uuid {
         match self {
-            Robot::Drone(drone) => drone.id(),
-            Robot::PiPuck(pipuck) => pipuck.id(),
+            Robot::Drone(drone) => &drone.uuid,
+            Robot::PiPuck(pipuck) => &pipuck.uuid,
         }
-    }
-
-    fn set_id(&mut self, id: uuid::Uuid) {
-        match self {
-            Robot::Drone(drone) => drone.set_id(id),
-            Robot::PiPuck(pipuck) => pipuck.set_id(id),
-        };
     }
 }
 

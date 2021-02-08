@@ -14,7 +14,7 @@ use tokio::{
 use regex::Regex;
 
 use crate::{
-    experiment,
+    arena,
     optitrack,
     software,
     robot::{self, Robot, Identifiable},
@@ -134,8 +134,7 @@ lazy_static::lazy_static! {
 }
 
 pub async fn run(ws: ws::WebSocket,
-                 robots: crate::Robots,
-                 experiment: crate::Experiment) {
+                 arena_request_tx: mpsc::UnboundedSender<arena::Request>) {
     log::info!("Client connected!");
     /* split the socket into a sender and receive of messages */
     let (user_ws_tx, mut user_ws_rx) = ws.split();

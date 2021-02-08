@@ -160,6 +160,7 @@ impl Device {
     }
 
     pub async fn create() -> impl std::future::Future<Output = ()> {
+        
         async {
 
         }
@@ -188,7 +189,7 @@ impl Device {
         let result = match self.requests.send(request).await {
             Ok(()) => Ok(()),
             Err(_) => Err(Error::SendError),
-        }
+        };
         self.callbacks.lock().await.remove(&uuid);
         result
     }
