@@ -1,4 +1,4 @@
-use bytes::{buf::ext::BufExt, BytesMut};
+use bytes::{Buf, BytesMut};
 use futures::StreamExt;
 use natnet_decode::{
     NatNet,

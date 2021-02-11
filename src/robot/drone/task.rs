@@ -1,20 +1,28 @@
-//! Hello
-//use futures::{FutureExt, stream::FuturesOrdered};
 use serde::{Deserialize, Serialize};
-//use log;
+use std::net::Ipv4Addr;
 use tokio::sync::{mpsc, oneshot};
+use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
 use crate::network::{fernbedienung, xbee};
 
-pub enum RequestKind {
+pub struct State {
+    pub xbee: Ipv4Addr,
+    pub linux: Option<Ipv4Addr>,
+    pub actions: Vec<Action>,    
+}
+
+pub enum Request {
     GetState,
     Pair(fernbedienung::Device),
+    Execute(Action),
 }
-
-pub struct Request(RequestKind, oneshot::Sender<Response>);
 
 pub enum Response {
-
+    State(State),
+    ToBeRemoved,
 }
+
+pub type Sender = mpsc::UnboundedSender<(Request, Option<oneshot::Sender<Response>>)>;
+pub type Receiver = mpsc::UnboundedReceiver<(Request, Option<oneshot::Sender<Response>>)>;
 
 const UPCORE_POWER_BIT_INDEX: u8 = 11;
 const PIXHAWK_POWER_BIT_INDEX: u8 = 12;
@@ -24,7 +32,7 @@ const MUX_CONTROL_BIT_INDEX: u8 = 4;
 // Note: the power off, shutdown, reboot up core actions
 // should change the state to standby which, in turn,
 // should move the IP address back to the probing pool
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Copy, Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub enum Action {
     #[serde(rename = "Power on UpCore")]
     UpCorePowerOn,
@@ -52,15 +60,21 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-pub async fn new(mut xbee: xbee::Device, mut rx: mpsc::UnboundedReceiver<Request>) -> Result<()> {
-    //init(&mut xbee).await?;
+pub async fn new(mut xbee: xbee::Device, rx: Receiver) -> Result<()> {
+    /* initialize the xbee */
+    init(&mut xbee).await?;
+    /* wait for requests */
+    let mut requests = UnboundedReceiverStream::new(rx);
+    while let Some((request, callback)) = requests.next().await {
+
+    }
     Ok(())
 }
 
 async fn init(xbee: &mut xbee::Device) -> Result<()> {
     /* pin configuration */
-    let pin_disable_output: u8 = 0;
-    let pin_digital_output: u8 = 4;
+    let pin_disable_output = 0u8.to_be_bytes();
+    let pin_digital_output = 4u8.to_be_bytes();
     /* mux configuration */
     let mut dio_config: u16 = 0b0000_0000_0000_0000;
     let mut dio_set: u16 = 0b0000_0000_0000_0000;
@@ -72,14 +86,14 @@ async fn init(xbee: &mut xbee::Device) -> Result<()> {
         /* The UART pins need to be disabled for the moment */
         /* D7 -> CTS, D6 -> RTS, P3 -> DOUT, P4 -> DIN */
         /* disabled pins */
-        xbee::Command::new("D7", &pin_disable_output.to_be_bytes()),
-        xbee::Command::new("D6", &pin_disable_output.to_be_bytes()),
-        xbee::Command::new("P3", &pin_disable_output.to_be_bytes()),
-        xbee::Command::new("P4", &pin_disable_output.to_be_bytes()),
+        xbee::Command::new("D7", &pin_disable_output),
+        xbee::Command::new("D6", &pin_disable_output),
+        xbee::Command::new("P3", &pin_disable_output),
+        xbee::Command::new("P4", &pin_disable_output),
         /* digital output pins */
-        xbee::Command::new("D4", &pin_digital_output.to_be_bytes()),
-        xbee::Command::new("D1", &pin_digital_output.to_be_bytes()),
-        xbee::Command::new("D2", &pin_digital_output.to_be_bytes()),
+        xbee::Command::new("D4", &pin_digital_output),
+        xbee::Command::new("D1", &pin_digital_output),
+        xbee::Command::new("D2", &pin_digital_output),
         /* mux configuration */
         xbee::Command::new("OM", &dio_config.to_be_bytes()),
         xbee::Command::new("IO", &dio_set.to_be_bytes()),

@@ -28,11 +28,13 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+pub type Checksums = Vec<(String, md5::Digest)>;
+
 #[derive(Default, Debug)]
-pub struct Software(pub Vec<(PathBuf, Vec<u8>)>);
+pub struct Software(pub Vec<(String, Vec<u8>)>);
 
 impl Software {
-    pub fn add<F: Into<PathBuf>, C: Into<Vec<u8>>>(&mut self, new_filename: F, new_contents: C) {
+    pub fn add<F: Into<String>, C: Into<Vec<u8>>>(&mut self, new_filename: F, new_contents: C) {
         let new_filename = new_filename.into();
         let new_contents = new_contents.into();
         if let Some((_, contents)) = self.0.iter_mut()
@@ -48,10 +50,16 @@ impl Software {
         self.0.clear();
     }
 
-    pub fn argos_config(&self) -> Result<&(PathBuf, Vec<u8>)> {
+    pub fn checksums(&self) -> Checksums {
+        self.0.iter()
+            .map(|(filename, data)| (filename.clone(), md5::compute(data)))
+            .collect()
+    }
+
+    pub fn argos_config(&self) -> Result<&(String, Vec<u8>)> {
         let config = self.0.iter()
             .filter(|entry| {
-                entry.0.to_string_lossy().contains(".argos")
+                entry.0.ends_with(".argos")
             })
             .collect::<Vec<_>>();
         match config.len() {
@@ -84,7 +92,7 @@ impl Software {
                 _ => None,
             })
             .map(|script| self.0.iter()
-                .find(|(filename, _)| filename.to_string_lossy() == script )
+                .find(|(filename, _)| filename == script )
                 .ok_or(Error::MissingReferencedFile(script.to_owned())))
             .collect::<Result<Vec<_>>>()?;
         Ok(())

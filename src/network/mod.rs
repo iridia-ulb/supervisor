@@ -3,7 +3,8 @@ pub mod fernbedienung;
 
 use futures::stream::FuturesUnordered;
 
-use tokio::{stream::StreamExt, sync::mpsc, time::timeout};
+use tokio::{sync::mpsc, time::timeout};
+use tokio_stream::StreamExt;
 
 use ipnet::Ipv4Net;
 
@@ -46,38 +47,52 @@ pub async fn new(network: Ipv4Net, arena_request_tx: mpsc::UnboundedSender<arena
         .map(|addr| probe(addr, None))
         .collect::<FuturesUnordered<_>>();
 
-    loop {
-        tokio::select! {
-            /*
-            /* TODO address received for probing */
-            Some(addr) = addr_rx.recv() => {
-                probing.push(probe(addr, None));
-            },
-            */
-            /* probe from the FuturesUnordered completed */
-            Some((addr, probe_result)) = queue.next() => {
-                /* association was sucessful */
-                if let Ok(device) = probe_result {
-                    associate(device, &arena_request_tx).await;
-                }
-                else {
-                    /* TODO: perhaps match on different error types and 
-                                delay accordingly */
-                    queue.push(probe(addr, Some(Duration::new(1,0))));
-                }
-            }
-            else => {
-                break;
-            }
+    if let Some((addr, probe_result)) = queue.next().await {
+        /* association was sucessful */
+        if let Ok(device) = probe_result {
+            associate(device, &arena_request_tx).await;
+        }
+        else {
+            /* TODO: perhaps match on different error types and 
+                        delay accordingly */
+            queue.push(probe(addr, Some(Duration::new(1,0))));
         }
     }
+
+    // loop {
+    //     tokio::select! {
+    //         /*
+    //         /* TODO address received for probing */
+    //         Some(addr) = addr_rx.recv() => {
+    //             probing.push(probe(addr, None));
+    //         },
+    //         */
+    //         /* probe from the FuturesUnordered completed */
+    //         Some((addr, probe_result)) = queue.next() => {
+    //             /* association was sucessful */
+    //             if let Ok(device) = probe_result {
+    //                 associate(device, &arena_request_tx).await;
+    //             }
+    //             else {
+    //                 /* TODO: perhaps match on different error types and 
+    //                             delay accordingly */
+    //                 queue.push(probe(addr, Some(Duration::new(1,0))));
+    //             }
+    //         }
+    //         else => {
+    //             break;
+    //         }
+    //     }
+    // }
 }
     
 async fn associate(device: Device, arena_request_tx: &mpsc::UnboundedSender<arena::Request>) {
     match device {
         Device::Fernbedienung(device) => {
-            let pipuck = Robot::PiPuck(PiPuck::new(device));
-            //arena_request_tx.send(arena::Request::AddRobot(pipuck));
+            let pipuck = PiPuck::new(device);
+            if let Err(error) = arena_request_tx.send(arena::Request::AddPiPuck(pipuck)) {
+                log::error!("Could not add Pi-Puck to the arena: {}", error);
+            }
             /*
             if let Ok(hostname) = device.hostname().await {
                 match &hostname[..] {
@@ -98,8 +113,10 @@ async fn associate(device: Device, arena_request_tx: &mpsc::UnboundedSender<aren
             */
         },
         Device::Xbee(device) => {
-            let drone = Robot::Drone(Drone::new(device));
-            //arena_request_tx.send(arena::Request::AddRobot(drone));
+            let drone = Drone::new(device);
+            if let Err(error) = arena_request_tx.send(arena::Request::AddDrone(drone)) {
+                log::error!("Could not add drone to the arena: {}", error);
+            }
         }
     }
 }
@@ -109,7 +126,7 @@ async fn associate(device: Device, arena_request_tx: &mpsc::UnboundedSender<aren
 async fn probe(addr: Ipv4Addr, delay: Option<Duration>) -> (Ipv4Addr, Result<Device>) {
     /* wait delay before probing */
     if let Some(delay) = delay {
-        tokio::time::delay_for(delay).await;
+        tokio::time::sleep(delay).await;
     }
     /* attempt to connect to Xbee for 500 ms */
     let assoc_xbee_attempt =

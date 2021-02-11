@@ -1,3 +1,4 @@
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use warp::ws;
 
 use std::{
@@ -6,10 +7,7 @@ use std::{
 
 use futures::{FutureExt, StreamExt};
 
-use tokio::{
-    sync::mpsc,
-    time::timeout,
-};
+use tokio::{sync::{mpsc, oneshot}, time::timeout};
 
 use regex::Regex;
 
@@ -17,7 +15,8 @@ use crate::{
     arena,
     optitrack,
     software,
-    robot::{self, Robot, Identifiable},
+    robot::drone,
+    robot::pipuck,
 };
 
 use serde::{Deserialize, Serialize};
@@ -51,25 +50,38 @@ pub enum Error {
 
     #[error("Could not reply to client")]
     ReplyError,
+
+
+
+    #[error("Could not send request to arena")]
+    ArenaRequestError,
+    #[error("Could not get a response from arena")]
+    ArenaResponseError,
+
+    #[error("Timed out while waiting for response from arena")]
+    ArenaTimeoutError,
+
+    #[error("Timed out while waiting for response from Optitrack system")]
+    OptitrackTimeoutError,
 }
 
-//pub type Result<T> = std::result::Result<T, Error>;
+type Result<T> = std::result::Result<T, Error>;
 
 // TODO remove serialize
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "lowercase", tag = "type")]
 enum Request {
     Emergency,
-    Experiment {
-        action: experiment::Action,
+    Arena {
+        action: arena::Action,
         uuid: uuid::Uuid,
     }, 
     Drone {
-        action: robot::drone::Action,
+        action: drone::Action,
         uuid: uuid::Uuid
     },
     PiPuck {
-        action: robot::pipuck::Action,
+        action: pipuck::Action,
         uuid: uuid::Uuid
     },
     Update {
@@ -85,9 +97,9 @@ enum Request {
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "lowercase", tag = "type", content = "action")]
 enum Action {
-    Drone(robot::drone::Action),
-    PiPuck(robot::pipuck::Action),
-    Experiment(experiment::Action),
+    Drone(drone::Action),
+    PiPuck(pipuck::Action),
+    Arena(arena::Action),
     Software(software::Action),
 }
 
@@ -113,17 +125,19 @@ lazy_static::lazy_static! {
     /* UUIDs */
     static ref NAMESPACE_CONNECTIONS: uuid::Uuid =
         uuid::Uuid::new_v3(&uuid::Uuid::NAMESPACE_OID, "connections".as_bytes());
-    static ref NAMESPACE_EXPERIMENT: uuid::Uuid =
-        uuid::Uuid::new_v3(&uuid::Uuid::NAMESPACE_OID, "experiment".as_bytes());
+    static ref NAMESPACE_ARENA: uuid::Uuid =
+        uuid::Uuid::new_v3(&uuid::Uuid::NAMESPACE_OID, "arena".as_bytes());
     static ref NAMESPACE_OPTITRACK: uuid::Uuid =
         uuid::Uuid::new_v3(&uuid::Uuid::NAMESPACE_OID, "optitrack".as_bytes());
+    static ref NAMESPACE_ERROR: uuid::Uuid =
+        uuid::Uuid::new_v3(&uuid::Uuid::NAMESPACE_OID, "error".as_bytes());
 
-    static ref UUID_EXPERIMENT_DRONES: uuid::Uuid =
-        uuid::Uuid::new_v3(&NAMESPACE_EXPERIMENT, "drones".as_bytes());
-    static ref UUID_EXPERIMENT_PIPUCKS: uuid::Uuid =
-        uuid::Uuid::new_v3(&NAMESPACE_EXPERIMENT, "pipucks".as_bytes());
-    static ref UUID_EXPERIMENT_DASHBOARD: uuid::Uuid =
-        uuid::Uuid::new_v3(&NAMESPACE_EXPERIMENT, "dashboard".as_bytes());
+    static ref UUID_ARENA_DRONES: uuid::Uuid =
+        uuid::Uuid::new_v3(&NAMESPACE_ARENA, "drones".as_bytes());
+    static ref UUID_ARENA_PIPUCKS: uuid::Uuid =
+        uuid::Uuid::new_v3(&NAMESPACE_ARENA, "pipucks".as_bytes());
+    static ref UUID_ARENA_DASHBOARD: uuid::Uuid =
+        uuid::Uuid::new_v3(&NAMESPACE_ARENA, "dashboard".as_bytes());
     
     /* other */
     static ref IIO_CHECKS: Vec<(String, String)> =
@@ -137,17 +151,21 @@ pub async fn run(ws: ws::WebSocket,
                  arena_request_tx: mpsc::UnboundedSender<arena::Request>) {
     log::info!("Client connected!");
     /* split the socket into a sender and receive of messages */
-    let (user_ws_tx, mut user_ws_rx) = ws.split();
+    let (websocket_tx, mut websocket_rx) = ws.split();
 
+    // TODO is this multiplexing necessary?
     let (tx, rx) = mpsc::unbounded_channel();
-    tokio::task::spawn(rx.forward(user_ws_tx).map(|result| {
+    let rx_stream = UnboundedReceiverStream::new(rx);
+
+    // TODO is it desirable to spawn here?
+    tokio::task::spawn(rx_stream.forward(websocket_tx).map(|result| {
         if let Err(error) = result {
             log::error!("Sending data over WebSocket failed: {}", error);
         }
     }));
 
     /* this loop is update task for a webui client */
-    while let Some(data) = user_ws_rx.next().await {
+    while let Some(data) = websocket_rx.next().await {
         let request : ws::Message = match data {
             Ok(request) => request,
             Err(error) => {
@@ -167,58 +185,56 @@ pub async fn run(ws: ws::WebSocket,
             if let Ok(action) = serde_json::from_str::<Request>(request) {
                 match action {
                     Request::Emergency => {
-                        // Go to emergency mode
+                        todo!("Enter emergency mode?")
                     },
-                    Request::Experiment{action, ..} => {
-                        experiment.write().await.execute(&action).await;
+                    Request::Arena { .. } => {
+                        todo!("Either remove this or implement it")
                     },
-                    // TODO: there is too much code duplication between drone and pipuck here
-                    Request::Drone{action, uuid} => {
-                        let mut robots = robots.write().await;
-                        if let Some(robot) = robots.iter_mut().find(|robot| robot.id() == &uuid) {
-                            if let Robot::Drone(drone) = robot {
-                                drone.execute(&action);
-                            }
-                            else {
-                                log::error!("Could not execute {:?}. {} is not a drone.", action, uuid);
-                            }
-                        }
-                        else {
-                            log::warn!("Could not execute {:?}, drone ({}) has disconnected", action, uuid);
+                    Request::Drone{uuid, action} => {
+                        let request = arena::Request::ForwardDroneAction(uuid, action);
+                        if let Err(error) = arena_request_tx.send(request) {
+                            log::error!("Could not forward drone action to arena: {}", error);
                         }
                     },
-                    Request::PiPuck{action, uuid} => {
-                        let mut robots = robots.write().await;
-                        if let Some(robot) = robots.iter_mut().find(|robot| robot.id() == &uuid) {
-                            if let Robot::PiPuck(pipuck) = robot {
-                                pipuck.execute(&action).await;
-                            }
-                            else {
-                                log::error!("Could not execute {:?}. {} is not a Pi-Puck.", action, uuid);
-                            }
-                        }
-                        else {
-                            log::warn!("Could not execute {:?}, Pi-Puck ({}) has disconnected", action, uuid);
+                    Request::PiPuck{uuid, action} => {
+                        let request = arena::Request::ForwardPiPuckAction(uuid, action);
+                        if let Err(error) = arena_request_tx.send(request) {
+                            log::error!("Could not forward Pi-Puck action to arena: {}", error);
                         }
                     },
                     Request::Update{tab} => {
-                        let reply = match &tab[..] {
-                            "connections" => Ok(connections_tab(&robots).await),
-                            "diagnostics" => Ok(diagnostics_tab(&robots).await),
-                            "experiment" => Ok(experiment_tab(&robots, &experiment).await),
-                            "optitrack" => Ok(optitrack_tab().await),
+                        log::info!("Start update for {}", tab);
+                        let result = match &tab[..] {
+                            "connections" => connections_tab(&arena_request_tx).await,
+                            "diagnostics" => diagnostics_tab(&arena_request_tx).await,
+                            "experiment" => experiment_tab(&arena_request_tx).await,
+                            "optitrack" => optitrack_tab().await,
                             _ => Err(Error::BadRequest),
                         };
-                        let result = reply
-                            .and_then(|inner| {
-                                serde_json::to_string(&inner).map_err(|err| Error::JsonError(err))
-                            }).and_then(|inner| {
-                                let message = Ok(ws::Message::text(inner));
-                                tx.send(message).map_err(|_| Error::ReplyError)
-                            });
-                        if let Err(error) = result {
-                            log::error!("Could not reply to client: {}", error);
+                        let reply = match result {
+                            Ok(cards) => Reply { title: tab, cards },
+                            Err(error) => {
+                                let error_message = format!("{}", error);
+                                let card = Card {
+                                    uuid: uuid::Uuid::new_v3(&NAMESPACE_ERROR, error_message.as_bytes()),
+                                    span: 4,
+                                    title: "Error".to_owned(),
+                                    content: vec![Content::Text(error_message)],
+                                    actions: vec![],
+                                };
+                                Reply { title: tab, cards: vec![ card ] }
+                            }
+                        };
+                        match serde_json::to_string(&reply) {
+                            Ok(content) => {
+                                let message = Ok(ws::Message::text(content));
+                                if let Err(_) = tx.send(message) {
+                                    log::error!("Could not reply to client");
+                                }
+                            },
+                            Err(_) => log::error!("Could not serialize reply"),
                         }
+                        log::info!("End update");
                     },
                     Request::Software{action, uuid, file} => {
                         match action {
@@ -238,34 +254,42 @@ pub async fn run(ws: ws::WebSocket,
                                     }
                                 });
                                 if let Some((filename, contents)) = file {
-                                    if uuid == *UUID_EXPERIMENT_DRONES {
-                                        let mut experiment = experiment.write().await;
-                                        experiment.drone_software.add(filename, contents);
+                                    if uuid == *UUID_ARENA_DRONES {
+                                        let request = arena::Request::AddDroneSoftware(filename, contents);
+                                        if let Err(error) = arena_request_tx.send(request) {
+                                            log::error!("Could not add drone software: {}", error);
+                                        }
                                     }
-                                    else if uuid == *UUID_EXPERIMENT_PIPUCKS {
-                                        let mut experiment = experiment.write().await;
-                                        experiment.pipuck_software.add(filename, contents);
+                                    else if uuid == *UUID_ARENA_PIPUCKS {
+                                        let request = arena::Request::AddPiPuckSoftware(filename, contents);
+                                        if let Err(error) = arena_request_tx.send(request) {
+                                            log::error!("Could not add Pi-Puck software: {}", error);
+                                        }
                                     }
                                     else {
-                                        log::error!("UUID target does not support adding control software");
+                                        log::error!("target {} does not support adding software", uuid);
                                     }
                                 }
                             }
                             software::Action::Clear => {
-                                if uuid == *UUID_EXPERIMENT_DRONES {
-                                    let mut experiment = experiment.write().await;
-                                    experiment.drone_software.clear();
+                                if uuid == *UUID_ARENA_DRONES {
+                                    let request = arena::Request::ClearDroneSoftware;
+                                    if let Err(error) = arena_request_tx.send(request) {
+                                        log::error!("Could not clear drone software: {}", error);
+                                    }
                                 }
-                                else if uuid == *UUID_EXPERIMENT_PIPUCKS {
-                                    let mut experiment = experiment.write().await;
-                                    experiment.pipuck_software.clear();
+                                else if uuid == *UUID_ARENA_PIPUCKS {
+                                    let request = arena::Request::ClearPiPuckSoftware;
+                                    if let Err(error) = arena_request_tx.send(request) {
+                                        log::error!("Could not clear Pi-Puck software: {}", error);
+                                    }
                                 }
                                 else {
-                                    log::error!("UUID target does not support clearing control software");
+                                    log::error!("target {} does not support clearing software", uuid);
                                 }
                             }
                         }
-                    },
+                    }
                 }
             }
             else {
@@ -273,62 +297,83 @@ pub async fn run(ws: ws::WebSocket,
             }
         }
     }
-    log::info!("Client disconnected!");
+    log::info!("webui task is complete (client disconnected)");
 }
 
-async fn diagnostics_tab(_robots: &crate::Robots) -> Reply {
+async fn diagnostics_tab(_arena_request_tx: &mpsc::UnboundedSender<arena::Request>) -> Result<Cards> {
     /* hashmap of cards */
-    let cards = Cards::default();
-    Reply { title: "Diagnostics".to_owned(), cards }
+    Ok(Cards::default())
 }
 
-async fn experiment_tab(_: &crate::Robots, experiment: &crate::Experiment) -> Reply {
+async fn experiment_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request>) -> Result<Cards> {
     let mut cards = Cards::default();
-    let experiment = experiment.read().await;
+    /* check pipuck software */
+    let (check_pipuck_software_callback_tx, check_pipuck_software_callback_rx) =
+        oneshot::channel();
+    let check_pipuck_software_request = 
+        arena::Request::CheckPiPuckSoftware(check_pipuck_software_callback_tx);
+    arena_request_tx
+        .send(check_pipuck_software_request)
+        .map_err(|_| Error::ArenaRequestError)?;
+    let (pipuck_software_checksums, pipuck_software_check) = check_pipuck_software_callback_rx.await
+        .map_err(|_| Error::ArenaResponseError)?;
+    /* check drone software */
+    let (check_drone_software_callback_tx, check_drone_software_callback_rx) =
+        oneshot::channel();
+    let check_drone_software_request = 
+        arena::Request::CheckDroneSoftware(check_drone_software_callback_tx);
+    arena_request_tx
+        .send(check_drone_software_request)
+        .map_err(|_| Error::ArenaRequestError)?;
+    let (drone_software_checksums, drone_software_check) = check_drone_software_callback_rx.await
+        .map_err(|_| Error::ArenaResponseError)?;
+    /* get actions */
+    let (get_actions_callback_tx, get_actions_callback_rx) = oneshot::channel();
+    let get_actions_request = arena::Request::GetActions(get_actions_callback_tx);
+    arena_request_tx
+        .send(get_actions_request)
+        .map_err(|_| Error::ArenaRequestError)?;
+    let actions = get_actions_callback_rx.await
+        .map_err(|_| Error::ArenaResponseError)?;
+
     let card = Card {
-        uuid: UUID_EXPERIMENT_DRONES.clone(),
+        uuid: UUID_ARENA_DRONES.clone(),
         span: 4,
         title: "Drone Configuration".to_owned(),
         content: vec![
             Content::Text("Control Software".to_owned()),
             Content::Table {
                 header: vec!["File".to_owned(), "MD5 Checksum".to_owned()],
-                rows: experiment.drone_software.0
-                    .iter()
-                    .map(|(filename, contents)| {
-                        let filename = filename.to_string_lossy().into_owned();
-                        let checksum = format!("{:x}", md5::compute(contents));
-                        vec![filename, checksum]
-                    })
+                rows: drone_software_checksums
+                    .into_iter()
+                    .map(|(filename, checksum)| vec![filename, format!("{:x}", checksum)])
                     .collect::<Vec<_>>()
             },
-            Content::Text(match experiment.drone_software.check_config() {
+            Content::Text(match drone_software_check {
                 Ok(_) => format!("{} Configuration valid", OK_ICON),
                 Err(error) => format!("{} {}", ERROR_ICON, error),
             }),
         ],
         actions: vec![software::Action::Upload, software::Action::Clear]
-            .into_iter().map(Action::Software).collect(),
+            .into_iter()
+            .map(Action::Software)
+            .collect(),
     };
     cards.push(card);
     let card = Card {
-        uuid: UUID_EXPERIMENT_PIPUCKS.clone(),
+        uuid: UUID_ARENA_PIPUCKS.clone(),
         span: 4,
         title: "Pi-Puck Configuration".to_owned(),
         content: vec![
             Content::Text("Control Software".to_owned()),
             Content::Table {
                 header: vec!["File".to_owned(), "MD5 Checksum".to_owned()],
-                rows: experiment.pipuck_software.0
-                    .iter()
-                    .map(|(filename, contents)| {
-                        let filename = filename.to_string_lossy().into_owned();
-                        let checksum = format!("{:x}", md5::compute(contents));
-                        vec![filename, checksum]
-                    })
+                rows: pipuck_software_checksums
+                    .into_iter()
+                    .map(|(filename, checksum)| vec![filename, format!("{:x}", checksum)])
                     .collect::<Vec<_>>()
             },
-            Content::Text(match experiment.pipuck_software.check_config() {
+            Content::Text(match pipuck_software_check {
                 Ok(_) => format!("{} Configuration valid", OK_ICON),
                 Err(error) => format!("{} {}", ERROR_ICON, error),
             }),
@@ -338,88 +383,107 @@ async fn experiment_tab(_: &crate::Robots, experiment: &crate::Experiment) -> Re
     };
     cards.push(card);
     let card = Card {
-        uuid: UUID_EXPERIMENT_DASHBOARD.clone(),
+        uuid: UUID_ARENA_DASHBOARD.clone(),
         span: 4,
         title: String::from("Dashboard"),
         content: vec![Content::Text(String::from("Experiment"))],
         // the actions depend on the state of the drone
         // the action part of the message must contain
         // the uuid, action name, and optionally arguments
-        actions: experiment.actions().into_iter().map(Action::Experiment).collect(), // start/stop experiment
+        actions: actions.into_iter().map(Action::Arena).collect(), // start/stop experiment
     };
     cards.push(card);
-    Reply { title: "Experiment".to_owned(), cards }
+    Ok(cards)
 }
 
-async fn optitrack_tab() -> Reply {
+async fn optitrack_tab() -> Result<Cards> {
     let mut cards = Cards::default();
-
-    if let Ok(inner) = timeout(Duration::from_millis(100), optitrack::once()).await {
-        if let Ok(frame_of_data) = inner {
-            for rigid_body in frame_of_data.rigid_bodies {
-                let position = format!("x = {:.3}, y = {:.3}, z = {:.3}",
-                    rigid_body.position.x,
-                    rigid_body.position.y,
-                    rigid_body.position.z);
-                let orientation = format!("w = {:.3}, x = {:.3}, y = {:.3}, z = {:.3}",
-                    rigid_body.orientation.w,
-                    rigid_body.orientation.vector().x,
-                    rigid_body.orientation.vector().y,
-                    rigid_body.orientation.vector().z);
-                let card = Card {
-                    uuid: uuid::Uuid::new_v3(&NAMESPACE_OPTITRACK, &rigid_body.id.to_be_bytes()),
-                    span: 3,
-                    title: format!("Rigid body {}", rigid_body.id),
-                    content: vec![Content::Table {
-                        header: vec!["Position".to_owned(), "Orientation".to_owned()],
-                        rows: vec![vec![position, orientation]]
-                    }],
-                    // the actions depend on the state of the drone
-                    // the action part of the message must contain
-                    // the uuid, action name, and optionally arguments
-                    actions: vec![], // start/stop experiment
-                };
-                cards.push(card);
-            }
+    let update = timeout(Duration::from_millis(100), optitrack::once());
+    if let Ok(frame_of_data) = update.await.map_err(|_| Error::OptitrackTimeoutError)? {
+        for rigid_body in frame_of_data.rigid_bodies {
+            let position = format!("x = {:.3}, y = {:.3}, z = {:.3}",
+                rigid_body.position.x,
+                rigid_body.position.y,
+                rigid_body.position.z);
+            let orientation = format!("w = {:.3}, x = {:.3}, y = {:.3}, z = {:.3}",
+                rigid_body.orientation.w,
+                rigid_body.orientation.vector().x,
+                rigid_body.orientation.vector().y,
+                rigid_body.orientation.vector().z);
+            let card = Card {
+                uuid: uuid::Uuid::new_v3(&NAMESPACE_OPTITRACK, &rigid_body.id.to_be_bytes()),
+                span: 3,
+                title: format!("Rigid body {}", rigid_body.id),
+                content: vec![Content::Table {
+                    header: vec!["Position".to_owned(), "Orientation".to_owned()],
+                    rows: vec![vec![position, orientation]]
+                }],
+                // the actions depend on the state of the drone
+                // the action part of the message must contain
+                // the uuid, action name, and optionally arguments
+                actions: vec![], // start/stop experiment
+            };
+            cards.push(card);
         }
-        Reply { title: "Optitrack".to_owned(), cards }
     }
-    else {
-        Reply { title: "Optitrack [OFFLINE]".to_owned(), cards }
-    }
+    Ok(cards)
 }
 
-async fn connections_tab(robots: &crate::Robots) -> Reply {
+async fn connections_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request>) -> Result<Cards> {
+    /* get connected Pi-Pucks */
+    let (get_pipucks_callback_tx, get_pipucks_callback_rx) = oneshot::channel();
+    let get_pipucks_request = 
+        arena::Request::GetPiPucks(get_pipucks_callback_tx);
+    arena_request_tx
+        .send(get_pipucks_request)
+        .map_err(|_| Error::ArenaRequestError)?;
+    let pipucks = get_pipucks_callback_rx.await
+        .map_err(|_| Error::ArenaResponseError)?;
+    log::info!("num pipucks {}", pipucks.len());
+    /* get connected drones */
+    let (get_drones_callback_tx, get_drones_callback_rx) = oneshot::channel();
+    let get_drones_request = 
+        arena::Request::GetDrones(get_drones_callback_tx);
+    arena_request_tx
+        .send(get_drones_request)
+        .map_err(|_| Error::ArenaRequestError)?;
+    let drones = get_drones_callback_rx.await
+        .map_err(|_| Error::ArenaResponseError)?;
+    /* generate cards */
     let mut cards = Cards::default();
-    for robot in robots.read().await.iter() {
-        match robot {
-            Robot::Drone(drone) => {
-                let card = Card {
-                    uuid: drone.uuid.clone(),
-                    span: 4,
-                    title: String::from("Drone"),
-                    content: vec![Content::Table {
-                        header: vec!["Unique Identifier".to_owned(), "Xbee Address".to_owned(), "SSH Address".to_owned()],
-                        rows: vec![vec![drone.uuid.to_string(), drone.xbee.addr.to_string(), String::from("-")]]
-                    }],
-                    actions: drone.actions().into_iter().map(Action::Drone).collect(),
-                };
-                cards.push(card);
-            }
-            Robot::PiPuck(pipuck) => {
-                let card = Card {
-                    uuid: pipuck.uuid.clone(),
-                    span: 4,
-                    title: String::from("Pi-Puck"),
-                    content: vec![Content::Table {
-                        header: vec!["Unique Identifier".to_owned(), "SSH Address".to_owned()],
-                        rows: vec![vec![pipuck.uuid.to_string(), pipuck.device.addr.to_string()]]
-                    }],
-                    actions: pipuck.actions().into_iter().map(Action::PiPuck).collect(),
-                };
-                cards.push(card);
-            }
-        }
+    /* generate Pi-Puck cards */
+    for (uuid, state) in pipucks.into_iter() {
+        let card = Card {
+            uuid: uuid,
+            span: 4,
+            title: String::from("Pi-Puck"),
+            content: vec![Content::Table {
+                header: vec!["Unique Identifier".to_owned(), "Linux Address".to_owned()],
+                rows: vec![vec![uuid.to_string(), state.linux.to_string()]]
+            }],
+            actions: state.actions.into_iter().map(Action::PiPuck).collect(),
+        };
+        cards.push(card);       
     }
-    Reply { title: "Connections".to_owned(), cards }
+    /* generate drone cards */
+    for (uuid, state) in drones.into_iter() {
+        let card = Card {
+            uuid: uuid,
+            span: 4,
+            title: String::from("Drone"),
+            content: vec![Content::Table {
+                header: vec!["Unique Identifier".to_owned(), "Xbee".to_owned(), "Linux".to_owned()],
+                rows: vec![
+                    vec![
+                        uuid.to_string(),
+                        state.xbee.to_string(),
+                        state.linux.map_or_else(|| "-".to_owned(), |ip| ip.to_string())
+                    ]
+                ]
+            }],
+            actions: state.actions.into_iter().map(Action::Drone).collect(),
+        };
+        cards.push(card);
+    }
+    Ok(cards)
 }

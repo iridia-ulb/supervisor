@@ -1,5 +1,5 @@
 use std::{net::Ipv4Addr, time::Duration};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 //use protocol::Request;
 //use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -200,17 +200,17 @@ impl Device {
         Ok("/".into())
     }
 
-    pub async fn hostname(&self) -> Result<String> {
-        Ok("Bob".to_owned())
-    }
+    // pub async fn hostname(&self) -> Result<String> {
+    //     Ok("Bob".to_owned())
+    // }
 
-    pub async fn shutdown(&self) -> Result<()> {
-        Ok(())
-    }
+    // pub async fn shutdown(&self) -> Result<()> {
+    //     Ok(())
+    // }
 
-    pub async fn reboot(&self) -> Result<()> {
-        Ok(())
-    }
+    // pub async fn reboot(&self) -> Result<()> {
+    //     Ok(())
+    // }
 
     
 }

@@ -1,18 +1,18 @@
 use futures::FutureExt;
-use serde::{Deserialize, Serialize};
 use uuid;
-use log;
 use std::{pin::Pin, task::{Context, Poll}, future::Future};
-use tokio::sync::{mpsc, oneshot};
-use crate::network::{fernbedienung, xbee};
+use tokio::sync::mpsc;
+use crate::network::xbee;
 
 mod task;
 
-pub use task::{Error, Result, Request, Action};
+pub use task::{
+    Action, Error, Receiver, Request, Result, Response, Sender, State
+};
 
 pub struct Drone {
     pub uuid: uuid::Uuid,
-    pub tx: mpsc::UnboundedSender<Request>,
+    pub tx: Sender,
     pub task: Pin<Box<dyn Future<Output = Result<()>> + Send>>,
 }
 
@@ -22,11 +22,17 @@ impl Drone {
         Self {
             uuid: uuid::Uuid::new_v4(), 
             task: task::new(xbee, rx).boxed(),
+            // note that holding tx here is not ideal since it prevents
+            // task and hence this active object from completing
             tx
+            // put tx and uuid in a HashMap inside of arena?
+            // future should also return the UUID so that the hashmap entry can be removed
         }
     }
 }
 
+// ideally the output here would be the use IP addresses so that we can return them
+// to the network module
 impl Future for Drone {
     type Output = Result<()>;
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {

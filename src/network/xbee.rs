@@ -28,7 +28,7 @@ impl std::fmt::Debug for Device {
 
 impl Device {
     pub async fn new(addr: Ipv4Addr) -> Result<Device> {
-        let mut handle = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
+        let handle = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
         handle.connect((addr, 3054)).await?;
         let command = Command::new("MY", &[]);
         handle.send(&command.0).await?;
