@@ -37,7 +37,7 @@ pub enum Request {
     /* Arena requests */
     GetActions(oneshot::Sender<Vec<Action>>),
     /* Drone requests */
-    AddDrone(Drone),
+    AddDrone(Uuid, drone::Sender, Drone),
     AddDroneSoftware(String, Vec<u8>),
     ClearDroneSoftware,
     CheckDroneSoftware(oneshot::Sender<(software::Checksums, software::Result<()>)>),
@@ -45,7 +45,7 @@ pub enum Request {
     ForwardDroneActionAll(drone::Action),
     GetDrones(oneshot::Sender<HashMap<Uuid, drone::State>>),
     /* Pi-Puck requests */
-    AddPiPuck(PiPuck),
+    AddPiPuck(Uuid, pipuck::Sender, PiPuck),
     AddPiPuckSoftware(String, Vec<u8>),
     ClearPiPuckSoftware,
     CheckPiPuckSoftware(oneshot::Sender<(software::Checksums, software::Result<()>)>),
@@ -59,17 +59,14 @@ pub async fn new(arena_request_rx: mpsc::UnboundedReceiver<Request>) {
 
     let mut requests = UnboundedReceiverStream::new(arena_request_rx);
     
-    let mut drones : FuturesUnordered<Drone> = Default::default();
-    let mut pipucks : FuturesUnordered<PiPuck> = Default::default();
-
     let mut drone_software : crate::software::Software = Default::default();
+    let mut drone_tasks : FuturesUnordered<Drone> = Default::default();
+    let mut drone_tx_map : HashMap<Uuid, drone::Sender> = Default::default();
+    
     let mut pipuck_software : crate::software::Software = Default::default();
+    let mut pipuck_tasks : FuturesUnordered<PiPuck> = Default::default();
+    let mut pipuck_tx_map : HashMap<Uuid, pipuck::Sender> = Default::default();
 
-    // if let Some(request) = requests.next().await {
-    //     match request {
-    //         _ => {},               
-    //     }
-    // }
     loop {
         tokio::select! {
             Some(request) = requests.next() => match request {
@@ -84,7 +81,10 @@ pub async fn new(arena_request_rx: mpsc::UnboundedReceiver<Request>) {
                     }
                 },
                 /* Drone requests */
-                Request::AddDrone(drone) => drones.push(drone),
+                Request::AddDrone(uuid, tx, task) => {
+                    drone_tx_map.insert(uuid, tx);
+                    drone_tasks.push(task)
+                }
                 Request::AddDroneSoftware(path, contents) => drone_software.0.push((path, contents)),
                 Request::ClearDroneSoftware => drone_software.0.clear(),
                 Request::CheckDroneSoftware(callback) => {
@@ -95,19 +95,22 @@ pub async fn new(arena_request_rx: mpsc::UnboundedReceiver<Request>) {
                     }
                 },
                 Request::ForwardDroneAction(uuid, action) => 
-                    handle_forward_drone_action(uuid, action, drones.iter()).await,
+                    handle_forward_drone_action(uuid, action, &drone_tx_map),
                 Request::ForwardDroneActionAll(action) => {
-                    for drone in drones.iter() {
+                    for (uuid, tx) in drone_tx_map.iter() {
                         let request = drone::Request::Execute(action);
-                        if let Err(error) = drone.tx.send((request, None)) {
-                            log::error!("Could not send action to drone {}: {}", drone.uuid, error);
+                        if let Err(error) = tx.send((request, None)) {
+                            log::error!("Could not send action to drone {}: {}", uuid, error);
                         }
                     }
                 },
                 Request::GetDrones(callback) => 
-                    handle_get_drones_request(drones.iter(), callback).await,
+                    handle_get_drones_request(&drone_tx_map, callback).await,
                 /* Pi-Puck requests */
-                Request::AddPiPuck(pipuck) => pipucks.push(pipuck),
+                Request::AddPiPuck(uuid, tx, task) => {
+                    pipuck_tx_map.insert(uuid, tx);
+                    pipuck_tasks.push(task)
+                },
                 Request::AddPiPuckSoftware(path, contents) => pipuck_software.0.push((path, contents)),
                 Request::ClearPiPuckSoftware => pipuck_software.0.clear(),
                 Request::CheckPiPuckSoftware(callback) => {
@@ -118,29 +121,31 @@ pub async fn new(arena_request_rx: mpsc::UnboundedReceiver<Request>) {
                     }
                 },
                 Request::ForwardPiPuckAction(uuid, action) => 
-                    handle_forward_pipuck_action(uuid, action, pipucks.iter()).await,
+                    handle_forward_pipuck_action(uuid, action, &pipuck_tx_map),
                 Request::ForwardPiPuckActionAll(action) => {
-                    for pipuck in pipucks.iter() {
+                    for (uuid, tx) in pipuck_tx_map.iter() {
                         let request = pipuck::Request::Execute(action);
-                        if let Err(error) = pipuck.tx.send((request, None)) {
-                            log::error!("Could not send action to Pi-Puck {}: {}", pipuck.uuid, error);
+                        if let Err(error) = tx.send((request, None)) {
+                            log::error!("Could not send action to Pi-Puck {}: {}", uuid, error);
                         }
                     }
                 },
                 Request::GetPiPucks(callback) => 
-                    handle_get_pipucks_request(pipucks.iter(), callback).await,
+                    handle_get_pipucks_request(&pipuck_tx_map, callback).await,
             },
-            Some(result) = drones.next() => match result {
-                // todo: return uuid, ip of robot?
-                // return unused ip address to pool?
-                Ok(_) => log::info!("Robot task completed sucessfully"),
-                Err(error) => log::error!("Robot task failed: {}", error),
+            Some(result) = drone_tasks.next() => match result {
+                Ok((uuid, xbee_addr, linux_addr)) => {
+                    drone_tx_map.remove(&uuid);
+                    // TODO return xbee_addr and linux_addr to the network module
+                },
+                Err(error) => log::error!("Drone task panicked: {}", error),
             },
-            Some(result) = pipucks.next() => match result {
-                // todo: return uuid, ip of robot?
-                // return unused ip address to pool?
-                Ok(_) => log::info!("Robot task completed sucessfully"),
-                Err(error) => log::error!("Robot task failed: {}", error),
+            Some(result) = pipuck_tasks.next() => match result {
+                Ok((uuid, linux_addr)) => {
+                    pipuck_tx_map.remove(&uuid);
+                    // TODO return linux_addr to the network module
+                },
+                Err(error) => log::error!("Pi-Puck task panicked: {}", error),
             },
             else => {
                 // I believe this only occurs when all robot tasks are complete
@@ -153,28 +158,28 @@ pub async fn new(arena_request_rx: mpsc::UnboundedReceiver<Request>) {
     log::info!("arena task is complete");
 }
 
-async fn handle_forward_pipuck_action<'a, P>(uuid: Uuid, action: pipuck::Action, pipucks: P)
-    where P: IntoIterator<Item = &'a PiPuck> {
-    if let Some(pipuck) = pipucks.into_iter().find(|pipuck| pipuck.uuid == uuid) {
-        let request = pipuck::Request::Execute(action);
-        if let Err(error) = pipuck.tx.send((request, None)) {
-            log::error!("Could not send action {:?} to Pi-Puck {}: {}", action, uuid, error);
+fn handle_forward_pipuck_action(uuid: Uuid, action: pipuck::Action, pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>) {
+    match pipuck_tx_map.get(&uuid) {
+        Some(tx) => {
+            let request = pipuck::Request::Execute(action);
+            if let Err(error) = tx.send((request, None)) {
+                log::error!("Could not send action {:?} to Pi-Puck {}: {}", action, uuid, error);
+            }
         }
-    }
-    else {
-        log::error!("Could not find Pi-Puck {}", uuid);
+        None => log::error!("Could not find Pi-Puck {}", uuid)
     }
 }
 
-async fn handle_get_pipucks_request<'a, P>(pipucks: P, callback: oneshot::Sender<HashMap<Uuid, pipuck::State>>)
-    where P: IntoIterator<Item = &'a PiPuck> {
-    let pipuck_states = pipucks
+async fn handle_get_pipucks_request(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>,
+                                    callback: oneshot::Sender<HashMap<Uuid, pipuck::State>>) {
+    let pipuck_states = pipuck_tx_map
         .into_iter()
-        .filter_map(|pipuck| {
+        .filter_map(|(uuid, tx)| {
+            let uuid = uuid.clone();
             let (response_tx, response_rx) = oneshot::channel();
             let request = (pipuck::Request::GetState, Some(response_tx));
-            pipuck.tx.send(request).map(|_| async move {
-                (pipuck.uuid, response_rx.await)
+            tx.send(request).map(|_| async move {
+                (uuid, response_rx.await)
             }).ok()
         })
         .collect::<FuturesUnordered<_>>()
@@ -190,28 +195,28 @@ async fn handle_get_pipucks_request<'a, P>(pipucks: P, callback: oneshot::Sender
     }
 }
 
-async fn handle_forward_drone_action<'a, D>(uuid: Uuid, action: drone::Action, drones: D)
-    where D: IntoIterator<Item = &'a Drone> {
-    if let Some(drone) = drones.into_iter().find(|drone| drone.uuid == uuid) {
-        let request = drone::Request::Execute(action);
-        if let Err(error) = drone.tx.send((request, None)) {
-            log::error!("Could not send action {:?} to drone {}: {}", action, uuid, error);
+fn handle_forward_drone_action(uuid: Uuid, action: drone::Action, drone_tx_map: &HashMap<Uuid, drone::Sender>) {
+    match drone_tx_map.get(&uuid) {
+        Some(tx) => {
+            let request = drone::Request::Execute(action);
+            if let Err(error) = tx.send((request, None)) {
+                log::error!("Could not send action {:?} to drone {}: {}", action, uuid, error);
+            }
         }
-    }
-    else {
-        log::error!("Could not find drone {}", uuid);
+        None => log::error!("Could not find drone {}", uuid)
     }
 }
 
-async fn handle_get_drones_request<'a, D>(drones: D, callback: oneshot::Sender<HashMap<Uuid, drone::State>>)
-    where D: IntoIterator<Item = &'a Drone> {
-    let drone_states = drones
+async fn handle_get_drones_request(drone_tx_map: &HashMap<Uuid, drone::Sender>,
+                                   callback: oneshot::Sender<HashMap<Uuid, drone::State>>) {
+    let drone_states = drone_tx_map
         .into_iter()
-        .filter_map(|drone| {
+        .filter_map(|(uuid, tx)| {
+            let uuid = uuid.clone();
             let (response_tx, response_rx) = oneshot::channel();
             let request = (drone::Request::GetState, Some(response_tx));
-            drone.tx.send(request).map(|_| async move {
-                (drone.uuid, response_rx.await)
+            tx.send(request).map(|_| async move {
+                (uuid, response_rx.await)
             }).ok()
         })
         .collect::<FuturesUnordered<_>>()

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 use std::net::Ipv4Addr;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
@@ -60,15 +61,16 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-pub async fn new(mut xbee: xbee::Device, rx: Receiver) -> Result<()> {
+pub async fn new(uuid: Uuid, rx: Receiver, mut xbee: xbee::Device) -> (Uuid, Ipv4Addr, Option<Ipv4Addr>) {
     /* initialize the xbee */
-    init(&mut xbee).await?;
+    init(&mut xbee).await;
     /* wait for requests */
     let mut requests = UnboundedReceiverStream::new(rx);
     while let Some((request, callback)) = requests.next().await {
 
     }
-    Ok(())
+    
+    (uuid, xbee.addr, None)
 }
 
 async fn init(xbee: &mut xbee::Device) -> Result<()> {

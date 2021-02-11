@@ -26,41 +26,41 @@ pub enum Error {
     DroneError(#[from] drone::Error),
 }
 
-pub enum Robot {
-    Drone(drone::Drone),
-    PiPuck(pipuck::PiPuck),
-}
+// pub enum Robot {
+//     Drone(drone::Drone),
+//     PiPuck(pipuck::PiPuck),
+// }
 
 // since both drone and pipuck already implement future, is it necessary to have `enum Robot`?
 // enum Robot enables the use of FuturesUnordered<Robot> instead of FuturesUnordered<dyn Future... etc>
-impl std::future::Future for Robot {
-    type Output = Result<()>;
-    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
-        match self.get_mut() {
-            Robot::Drone(drone) => drone.task
-                .as_mut()
-                .poll(cx)
-                .map(|r| r.map_err(Error::DroneError)),
-            Robot::PiPuck(pipuck) => pipuck.task
-                .as_mut()
-                .poll(cx)
-                .map(|result| result.map_err(Error::PiPuckError)),
-        }
-    }
-}
+// impl std::future::Future for Robot {
+//     type Output = Result<()>;
+//     fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+//         match self.get_mut() {
+//             Robot::Drone(drone) => drone.task
+//                 .as_mut()
+//                 .poll(cx)
+//                 .map(|r| r.map_err(Error::DroneError)),
+//             Robot::PiPuck(pipuck) => pipuck.task
+//                 .as_mut()
+//                 .poll(cx)
+//                 .map(|result| result.map_err(Error::PiPuckError)),
+//         }
+//     }
+// }
 
-pub trait Identifiable {
-    fn id(&self) -> &uuid::Uuid;
-}
+// pub trait Identifiable {
+//     fn id(&self) -> &uuid::Uuid;
+// }
 
-impl Identifiable for Robot {
-    fn id(&self) -> &uuid::Uuid {
-        match self {
-            Robot::Drone(drone) => &drone.uuid,
-            Robot::PiPuck(pipuck) => &pipuck.uuid,
-        }
-    }
-}
+// impl Identifiable for Robot {
+//     fn id(&self) -> &uuid::Uuid {
+//         match self {
+//             Robot::Drone(drone) => &drone.uuid,
+//             Robot::PiPuck(pipuck) => &pipuck.uuid,
+//         }
+//     }
+// }
 
 /* this trait is probably doing too much */
 // it would be better if this trait was split into traits for handling

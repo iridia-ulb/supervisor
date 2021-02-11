@@ -20,16 +20,12 @@ pub enum Device {
 }
 
 
-use crate::robot::{Robot, drone::Drone, pipuck::PiPuck};
+use crate::robot::{drone::Drone, pipuck::PiPuck};
 use crate::arena;
 
 #[derive(thiserror::Error, Debug)]
 enum Error {
     /*
-    #[error("Error communicating with SSH server")]
-    SshConnectionError {
-        source: ssh::Error,
-    },
     #[error("Error communicating with Xbee")]
     XbeeConnectionError {
         source: xbee::Error,
@@ -89,8 +85,8 @@ pub async fn new(network: Ipv4Net, arena_request_tx: mpsc::UnboundedSender<arena
 async fn associate(device: Device, arena_request_tx: &mpsc::UnboundedSender<arena::Request>) {
     match device {
         Device::Fernbedienung(device) => {
-            let pipuck = PiPuck::new(device);
-            if let Err(error) = arena_request_tx.send(arena::Request::AddPiPuck(pipuck)) {
+            let (uuid, tx, task) = PiPuck::new(device);
+            if let Err(error) = arena_request_tx.send(arena::Request::AddPiPuck(uuid, tx, task)) {
                 log::error!("Could not add Pi-Puck to the arena: {}", error);
             }
             /*
@@ -113,8 +109,8 @@ async fn associate(device: Device, arena_request_tx: &mpsc::UnboundedSender<aren
             */
         },
         Device::Xbee(device) => {
-            let drone = Drone::new(device);
-            if let Err(error) = arena_request_tx.send(arena::Request::AddDrone(drone)) {
+            let (uuid, tx, task) = Drone::new(device);
+            if let Err(error) = arena_request_tx.send(arena::Request::AddDrone(uuid, tx, task)) {
                 log::error!("Could not add drone to the arena: {}", error);
             }
         }

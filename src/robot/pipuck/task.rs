@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 use std::net::Ipv4Addr;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
@@ -37,19 +38,14 @@ pub enum Action {
 pub enum Error {
     #[error(transparent)]
     FernbedienungError(#[from] fernbedienung::Error),
+
+    #[error(transparent)]
+    JoinError(#[from] tokio::task::JoinError),
 }
 
+// pub type Result<T> = std::result::Result<T, Error>;
 
-
-pub type Result<T> = std::result::Result<T, Error>;
-
-// HACK since select! in arena::new does not poll futures-unordered once the arena
-// request branch completes
-pub async fn new(device: fernbedienung::Device, rx: Receiver) -> Result<()> {
-    tokio::spawn(new2(device, rx)).await.unwrap()
-}
-
-pub async fn new2(device: fernbedienung::Device, rx: Receiver) -> Result<()> {
+pub async fn new(uuid: Uuid, rx: Receiver, device: fernbedienung::Device) -> (Uuid, Ipv4Addr) {
     let mut requests = UnboundedReceiverStream::new(rx);
 
     while let Some((request, callback)) = requests.next().await {
@@ -68,7 +64,6 @@ pub async fn new2(device: fernbedienung::Device, rx: Receiver) -> Result<()> {
             Request::Execute(_action) => {}
         }
     }
-
-    Ok(())
+    (uuid, device.addr)
 }
 

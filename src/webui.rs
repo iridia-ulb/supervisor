@@ -149,7 +149,7 @@ lazy_static::lazy_static! {
 
 pub async fn run(ws: ws::WebSocket,
                  arena_request_tx: mpsc::UnboundedSender<arena::Request>) {
-    log::info!("Client connected!");
+    log::info!("client connected!");
     /* split the socket into a sender and receive of messages */
     let (websocket_tx, mut websocket_rx) = ws.split();
 
@@ -203,12 +203,11 @@ pub async fn run(ws: ws::WebSocket,
                         }
                     },
                     Request::Update{tab} => {
-                        log::info!("Start update for {}", tab);
                         let result = match &tab[..] {
-                            "connections" => connections_tab(&arena_request_tx).await,
-                            "diagnostics" => diagnostics_tab(&arena_request_tx).await,
-                            "experiment" => experiment_tab(&arena_request_tx).await,
-                            "optitrack" => optitrack_tab().await,
+                            "Connections" => connections_tab(&arena_request_tx).await,
+                            "Diagnostics" => diagnostics_tab(&arena_request_tx).await,
+                            "Experiment" => experiment_tab(&arena_request_tx).await,
+                            "Optitrack" => optitrack_tab().await,
                             _ => Err(Error::BadRequest),
                         };
                         let reply = match result {
@@ -234,7 +233,6 @@ pub async fn run(ws: ws::WebSocket,
                             },
                             Err(_) => log::error!("Could not serialize reply"),
                         }
-                        log::info!("End update");
                     },
                     Request::Software{action, uuid, file} => {
                         match action {
@@ -439,7 +437,6 @@ async fn connections_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request
         .map_err(|_| Error::ArenaRequestError)?;
     let pipucks = get_pipucks_callback_rx.await
         .map_err(|_| Error::ArenaResponseError)?;
-    log::info!("num pipucks {}", pipucks.len());
     /* get connected drones */
     let (get_drones_callback_tx, get_drones_callback_rx) = oneshot::channel();
     let get_drones_request = 
