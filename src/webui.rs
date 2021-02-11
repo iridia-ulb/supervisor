@@ -48,18 +48,10 @@ pub enum Error {
     #[error(transparent)]
     JsonError(#[from] serde_json::Error),
 
-    #[error("Could not reply to client")]
-    ReplyError,
-
-
-
     #[error("Could not send request to arena")]
     ArenaRequestError,
     #[error("Could not get a response from arena")]
     ArenaResponseError,
-
-    #[error("Timed out while waiting for response from arena")]
-    ArenaTimeoutError,
 
     #[error("Timed out while waiting for response from Optitrack system")]
     OptitrackTimeoutError,
@@ -187,8 +179,11 @@ pub async fn run(ws: ws::WebSocket,
                     Request::Emergency => {
                         todo!("Enter emergency mode?")
                     },
-                    Request::Arena { .. } => {
-                        todo!("Either remove this or implement it")
+                    Request::Arena{action, ..} => {
+                        let request = arena::Request::Execute(action);
+                        if let Err(error) = arena_request_tx.send(request) {
+                            log::error!("Could not execute action on arena: {}", error);
+                        }
                     },
                     Request::Drone{uuid, action} => {
                         let request = arena::Request::ForwardDroneAction(uuid, action);

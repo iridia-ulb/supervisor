@@ -36,6 +36,7 @@ enum State {
 pub enum Request {
     /* Arena requests */
     GetActions(oneshot::Sender<Vec<Action>>),
+    Execute(Action),
     /* Drone requests */
     AddDrone(Uuid, drone::Sender, Drone),
     AddDroneSoftware(String, Vec<u8>),
@@ -80,13 +81,16 @@ pub async fn new(arena_request_rx: mpsc::UnboundedReceiver<Request>) {
                         log::error!("Could not respond with arena actions");
                     }
                 },
+                Request::Execute(action) => {
+                    log::info!("{:?}", action);
+                },
                 /* Drone requests */
                 Request::AddDrone(uuid, tx, task) => {
                     drone_tx_map.insert(uuid, tx);
                     drone_tasks.push(task)
                 }
-                Request::AddDroneSoftware(path, contents) => drone_software.0.push((path, contents)),
-                Request::ClearDroneSoftware => drone_software.0.clear(),
+                Request::AddDroneSoftware(path, contents) => drone_software.add(path, contents),
+                Request::ClearDroneSoftware => drone_software.clear(),
                 Request::CheckDroneSoftware(callback) => {
                     let checksums = drone_software.checksums();
                     let check = drone_software.check_config();
@@ -111,8 +115,8 @@ pub async fn new(arena_request_rx: mpsc::UnboundedReceiver<Request>) {
                     pipuck_tx_map.insert(uuid, tx);
                     pipuck_tasks.push(task)
                 },
-                Request::AddPiPuckSoftware(path, contents) => pipuck_software.0.push((path, contents)),
-                Request::ClearPiPuckSoftware => pipuck_software.0.clear(),
+                Request::AddPiPuckSoftware(path, contents) => pipuck_software.add(path, contents),
+                Request::ClearPiPuckSoftware => pipuck_software.clear(),
                 Request::CheckPiPuckSoftware(callback) => {
                     let checksums = pipuck_software.checksums();
                     let check = pipuck_software.check_config();

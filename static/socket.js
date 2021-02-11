@@ -8,7 +8,7 @@ const ws = new WebSocket(uri);
 emergency = document.getElementById('emergency-stop');
 emergency.onclick = function() {}
 
-var uiCurrentView = 'connections';
+var uiCurrentView = 'Connections';
 var uiTimer = null;
 
 function setView(uiView) {
