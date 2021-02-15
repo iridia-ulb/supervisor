@@ -71,6 +71,8 @@ pub async fn new(uuid: Uuid, rx: Receiver, mut xbee: xbee::Device) -> (Uuid, Ipv
     }
     
     (uuid, xbee.addr, None)
+
+    // if Fernbedienung exits, we should go into emergency mode and take control over the drone using the Xbee
 }
 
 async fn init(xbee: &mut xbee::Device) -> Result<()> {

@@ -74,14 +74,14 @@ pub trait Controllable {
     fn fernbedienung(&mut self) -> Option<&mut crate::network::fernbedienung::Device>;
 
     /// installs software and returns the installation directory so that we can run argos
-    async fn install(&mut self, software: &crate::software::Software) -> Result<PathBuf> {
-        let fernbedienung = self.fernbedienung().ok_or(Error::NetworkUnavailable)?;
-        let controller_path = fernbedienung.create_temp_dir().await?;
-        for (filename, contents) in software.0.iter() {
-            fernbedienung.upload(controller_path.as_path(), filename, contents.to_owned()).await?;
-        }
-        Ok(controller_path)
-    }
+    // async fn install(&mut self, software: &crate::software::Software) -> Result<PathBuf> {
+    //     let fernbedienung = self.fernbedienung().ok_or(Error::NetworkUnavailable)?;
+    //     let controller_path = fernbedienung.create_temp_dir().await?;
+    //     for (filename, contents) in software.0.iter() {
+    //         fernbedienung.upload(controller_path.as_path(), filename, contents.to_owned()).await?;
+    //     }
+    //     Ok(controller_path)
+    // }
 
     // configuration is just the path to the .argos, we cd into this directory and run ARGoS in there
     async fn start<W, C>(&mut self, working_dir: W, config_file: C) -> Result<String>

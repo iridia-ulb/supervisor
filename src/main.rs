@@ -32,11 +32,15 @@ async fn main() {
     
     /* create a task for tracking the robots and state of the experiment */
     let (arena_requests_tx, arena_requests_rx) = mpsc::unbounded_channel();
-    let arena_task = arena::new(arena_requests_rx);
-
-    /* create a task for monitoring the network */
-    let network = "192.168.1.0/24".parse::<Ipv4Net>().unwrap();
-    let network_task = network::new(network, arena_requests_tx.clone());
+    let (network_addr_tx, network_addr_rx) = mpsc::unbounded_channel();
+    
+    /* add all network addresses from the 192.168.1.0/24 subnet */
+    for network_addr in "192.168.1.0/24".parse::<Ipv4Net>().unwrap().hosts() {
+        network_addr_tx.send(network_addr).unwrap();
+    }
+    
+    let arena_task = arena::new(arena_requests_rx, network_addr_tx);   
+    let network_task = network::new(network_addr_rx, arena_requests_tx.clone());
 
     /* create a task for the webui */
     let arena_filter = warp::any().map(move || arena_requests_tx.clone());

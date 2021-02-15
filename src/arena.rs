@@ -1,6 +1,6 @@
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, net::Ipv4Addr};
 use futures::{StreamExt, stream::FuturesUnordered};
 use log;
 use tokio::sync::{mpsc, oneshot};
@@ -55,7 +55,8 @@ pub enum Request {
     GetPiPucks(oneshot::Sender<HashMap<Uuid, pipuck::State>>),
 }
 
-pub async fn new(arena_request_rx: mpsc::UnboundedReceiver<Request>) {
+pub async fn new(arena_request_rx: mpsc::UnboundedReceiver<Request>,
+                 network_addr_tx: mpsc::UnboundedSender<Ipv4Addr>) {
     let mut state = State::Standby;
 
     let mut requests = UnboundedReceiverStream::new(arena_request_rx);
@@ -140,14 +141,23 @@ pub async fn new(arena_request_rx: mpsc::UnboundedReceiver<Request>) {
             Some(result) = drone_tasks.next() => match result {
                 Ok((uuid, xbee_addr, linux_addr)) => {
                     drone_tx_map.remove(&uuid);
-                    // TODO return xbee_addr and linux_addr to the network module
+                    if let Err(error) = network_addr_tx.send(xbee_addr) {
+                        log::error!("Could not return the Xbee address of drone {} to the network module: {}", uuid, error);
+                    }
+                    if let Some(linux_addr) = linux_addr {
+                        if let Err(error) = network_addr_tx.send(linux_addr) {
+                            log::error!("Could not return the Linux address of drone {} to the network module: {}", uuid, error);
+                        }
+                    }
                 },
                 Err(error) => log::error!("Drone task panicked: {}", error),
             },
             Some(result) = pipuck_tasks.next() => match result {
                 Ok((uuid, linux_addr)) => {
                     pipuck_tx_map.remove(&uuid);
-                    // TODO return linux_addr to the network module
+                    if let Err(error) = network_addr_tx.send(linux_addr) {
+                        log::error!("Could not return the Linux address of Pi-Puck {} to the network module: {}", uuid, error);
+                    }
                 },
                 Err(error) => log::error!("Pi-Puck task panicked: {}", error),
             },
@@ -167,10 +177,10 @@ fn handle_forward_pipuck_action(uuid: Uuid, action: pipuck::Action, pipuck_tx_ma
         Some(tx) => {
             let request = pipuck::Request::Execute(action);
             if let Err(error) = tx.send((request, None)) {
-                log::error!("Could not send action {:?} to Pi-Puck {}: {}", action, uuid, error);
+                log::warn!("Could not send action {:?} to Pi-Puck {}: {}", action, uuid, error);
             }
         }
-        None => log::error!("Could not find Pi-Puck {}", uuid)
+        None => log::warn!("Could not find Pi-Puck {}", uuid)
     }
 }
 
@@ -181,7 +191,7 @@ async fn handle_get_pipucks_request(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender
         .filter_map(|(uuid, tx)| {
             let uuid = uuid.clone();
             let (response_tx, response_rx) = oneshot::channel();
-            let request = (pipuck::Request::GetState, Some(response_tx));
+            let request = (pipuck::Request::State, Some(response_tx));
             tx.send(request).map(|_| async move {
                 (uuid, response_rx.await)
             }).ok()
@@ -204,10 +214,10 @@ fn handle_forward_drone_action(uuid: Uuid, action: drone::Action, drone_tx_map: 
         Some(tx) => {
             let request = drone::Request::Execute(action);
             if let Err(error) = tx.send((request, None)) {
-                log::error!("Could not send action {:?} to drone {}: {}", action, uuid, error);
+                log::warn!("Could not send action {:?} to drone {}: {}", action, uuid, error);
             }
         }
-        None => log::error!("Could not find drone {}", uuid)
+        None => log::warn!("Could not find drone {}", uuid)
     }
 }
 

@@ -1,19 +1,25 @@
+use futures::stream::FuturesUnordered;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use std::net::Ipv4Addr;
+use std::{net::Ipv4Addr, sync::Arc};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
 use crate::network::fernbedienung;
 
 pub struct State {
-    pub linux: Ipv4Addr,
+    pub linux: Ipv4Addr, // rename to addr
     pub actions: Vec<Action>,
 }
 
-#[derive(Copy, Clone)]
+pub enum Experiment {
+    Start(String, Vec<String>), // working dir, arguments
+    Stop
+}
+
 pub enum Request {
-    GetState,
-    Execute(Action)
+    State,
+    Execute(Action),
+    Experiment(Experiment),
 }
 
 pub enum Response {
@@ -30,8 +36,10 @@ pub enum Action {
     RpiShutdown,
     #[serde(rename = "Reboot RPi")]
     RpiReboot,
+    /*
     #[serde(rename = "Identify")]
     Identify,
+    */
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -43,27 +51,65 @@ pub enum Error {
     JoinError(#[from] tokio::task::JoinError),
 }
 
-// pub type Result<T> = std::result::Result<T, Error>;
-
 pub async fn new(uuid: Uuid, rx: Receiver, device: fernbedienung::Device) -> (Uuid, Ipv4Addr) {
-    let mut requests = UnboundedReceiverStream::new(rx);
-
-    while let Some((request, callback)) = requests.next().await {
-        match request {
-            Request::GetState => {
-                if let Some(callback) = callback {
-                    let state = State {
-                        linux: device.addr,
-                        actions: vec![]
-                    };
-                    if let Err(_) = callback.send(Response::State(state)) {
-                        log::error!("Could not respond with state");
+    let (device_task, device_interface, device_addr) = device.split();
+    let request_task = async move {
+        let mut requests = UnboundedReceiverStream::new(rx);
+        let processes : FuturesUnordered<_> = Default::default();
+        loop {
+            tokio::select! {
+                Some((request, callback)) = requests.next() => {
+                    match request {
+                        Request::State => {
+                            if let Some(callback) = callback {
+                                let state = State {
+                                    linux: device_addr,
+                                    actions: vec![Action::RpiShutdown, Action::RpiReboot]
+                                };
+                                if let Err(_) = callback.send(Response::State(state)) {
+                                    log::error!("Could not respond with state");
+                                }
+                            }
+                        }
+                        Request::Execute(action) => match action {
+                            Action::RpiReboot => {
+                                if let Err(error) = device_interface.clone().reboot().await {
+                                    log::error!("Reboot failed: {}", error);
+                                }
+                                break;
+                            },
+                            Action::RpiShutdown => {
+                                if let Err(error) = device_interface.clone().shutdown().await {
+                                    log::error!("Shut down failed: {}", error);
+                                }
+                                break;
+                            }
+                        }
+                        Request::Experiment(experiment) => match experiment {
+                            Experiment::Start(working_dir, args) => {
+                                let task = fernbedienung::process::Run {
+                                    target: "argos3".into(),
+                                    working_dir: working_dir.into(),
+                                    args: args,
+                                };
+                                let process = device_interface.clone().run(task, None, None);
+                                processes.push(process);
+                            }
+                            Experiment::Stop => {
+                                //process.signal().await;
+            
+                            }
+                        }
                     }
                 }
             }
-            Request::Execute(_action) => {}
         }
+    };
+    /* select here instead of join since if one future completes the
+       other should be dropped */
+    tokio::select! {
+        _ = device_task => {},
+        _ = request_task => {},
     }
-    (uuid, device.addr)
+    (uuid, device_addr)
 }
-

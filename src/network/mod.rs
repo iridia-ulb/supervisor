@@ -4,7 +4,7 @@ pub mod fernbedienung;
 use futures::stream::FuturesUnordered;
 
 use tokio::{sync::mpsc, time::timeout};
-use tokio_stream::StreamExt;
+use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
 
 use ipnet::Ipv4Net;
 
@@ -37,76 +37,58 @@ enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-pub async fn new(network: Ipv4Net, arena_request_tx: mpsc::UnboundedSender<arena::Request>) {
-    let mut queue = network.hosts()
-        // .inspect(|addr| log::info!("{}", addr))
-        .map(|addr| probe(addr, None))
-        .collect::<FuturesUnordered<_>>();
+pub async fn new(network_addr_rx: mpsc::UnboundedReceiver<Ipv4Addr>,
+                 arena_request_tx: mpsc::UnboundedSender<arena::Request>) {
+    let mut probe_queue : FuturesUnordered<_> = Default::default();
+    let mut addresses = UnboundedReceiverStream::new(network_addr_rx);
 
-    if let Some((addr, probe_result)) = queue.next().await {
-        /* association was sucessful */
-        if let Ok(device) = probe_result {
-            associate(device, &arena_request_tx).await;
-        }
-        else {
-            /* TODO: perhaps match on different error types and 
-                        delay accordingly */
-            queue.push(probe(addr, Some(Duration::new(1,0))));
+    loop {
+        tokio::select!{
+            Some(network_addr) = addresses.next() => {
+                probe_queue.push(probe(network_addr, None));
+            },
+            Some((probe_addr, probe_result)) = probe_queue.next() => {
+                if let Ok(device) = probe_result {
+                    associate(device, &arena_request_tx).await;
+                }
+                else {
+                    /* TODO: perhaps match on different error types and delay accordingly */
+                    probe_queue.push(probe(probe_addr, Some(Duration::new(1,0))));
+                }
+            }
+            else => break
         }
     }
-
-    // loop {
-    //     tokio::select! {
-    //         /*
-    //         /* TODO address received for probing */
-    //         Some(addr) = addr_rx.recv() => {
-    //             probing.push(probe(addr, None));
-    //         },
-    //         */
-    //         /* probe from the FuturesUnordered completed */
-    //         Some((addr, probe_result)) = queue.next() => {
-    //             /* association was sucessful */
-    //             if let Ok(device) = probe_result {
-    //                 associate(device, &arena_request_tx).await;
-    //             }
-    //             else {
-    //                 /* TODO: perhaps match on different error types and 
-    //                             delay accordingly */
-    //                 queue.push(probe(addr, Some(Duration::new(1,0))));
-    //             }
-    //         }
-    //         else => {
-    //             break;
-    //         }
-    //     }
-    // }
 }
     
 async fn associate(device: Device, arena_request_tx: &mpsc::UnboundedSender<arena::Request>) {
     match device {
         Device::Fernbedienung(device) => {
-            let (uuid, tx, task) = PiPuck::new(device);
-            if let Err(error) = arena_request_tx.send(arena::Request::AddPiPuck(uuid, tx, task)) {
-                log::error!("Could not add Pi-Puck to the arena: {}", error);
-            }
-            /*
-            if let Ok(hostname) = device.hostname().await {
-                match &hostname[..] {
-                    "raspberrypi0-wifi" => {
-                        
+            /* the task of the device needs to be run in order for hostname to resolve */
+            let (mut task, interface, addr) = device.split();
+            tokio::select! {
+                _ = &mut task => {},
+                hostname = interface.clone().hostname() => match hostname {
+                    Ok(hostname) => {
+                        let device = fernbedienung::Device::unite(task, interface, addr);
+                        match &hostname[..] {
+                            // TODO add matches here for drone, pipuck
+                            // note if I change the hostname this matching won't work
+                            // perhaps change ARGoS to take a controller id as a command switch
+                            "ToshibaLaptop" => {
+                                let (uuid, tx, task) = PiPuck::new(device);
+                                if let Err(error) = arena_request_tx.send(arena::Request::AddPiPuck(uuid, tx, task)) {
+                                    log::error!("Could not add Pi-Puck to the arena: {}", error);
+                                }
+                            },
+                            _ => log::warn!("Unrecognized fernbedienung device {} detected", hostname),
+                        }
                     },
-                    _ => {
-                        log::warn!("{} accepted SSH connection with root login, but the \
-                                    hostname ({}) was not recognised", hostname, device.addr);
-                        // place back in the pool with 5 second delay
+                    Err(error) => {
+                        // the IP address should be returned to our pool here
                     }
                 }
-            }
-            else {
-                // getting hostname failed
-                // place back in the pool with 1 second delay
-            }
-            */
+            }            
         },
         Device::Xbee(device) => {
             let (uuid, tx, task) = Drone::new(device);
