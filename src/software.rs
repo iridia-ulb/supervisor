@@ -30,7 +30,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 pub type Checksums = Vec<(String, md5::Digest)>;
 
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct Software(pub Vec<(String, Vec<u8>)>);
 
 impl Software {

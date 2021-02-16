@@ -1,4 +1,4 @@
-use futures::stream::FuturesUnordered;
+use futures::{Future, stream::FuturesUnordered};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use std::{net::Ipv4Addr, sync::Arc};
@@ -6,25 +6,23 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
 use crate::network::fernbedienung;
 
+#[derive(Debug)]
 pub struct State {
     pub linux: Ipv4Addr, // rename to addr
     pub actions: Vec<Action>,
 }
 
-pub enum Experiment {
-    Start(String, Vec<String>), // working dir, arguments
-    Stop
-}
-
 pub enum Request {
     State,
     Execute(Action),
-    Experiment(Experiment),
+    Upload(crate::software::Software),
 }
 
+#[derive(Debug)]
 pub enum Response {
     State(State),
-    ToBeRemoved
+    Ok,
+    Error(Error),
 }
 
 pub type Sender = mpsc::UnboundedSender<(Request, Option<oneshot::Sender<Response>>)>;
@@ -52,23 +50,46 @@ pub enum Error {
 }
 
 pub async fn new(uuid: Uuid, rx: Receiver, device: fernbedienung::Device) -> (Uuid, Ipv4Addr) {
+
+
     let (device_task, device_interface, device_addr) = device.split();
+
+
+    let software = crate::software::Software::default();
+    let path = "/tmp";
+
+    
+
+
+// Ok(path) => {
+//     for (filename, contents) in software.0.iter() {
+//         if let Err(err) = device_interface.clone().upload(&path, filename, contents.clone()).await {
+
+//         }
+//     }
+//     Response::Ok
+// }
+
+
+
+
+
+
+
     let request_task = async move {
         let mut requests = UnboundedReceiverStream::new(rx);
-        let processes : FuturesUnordered<_> = Default::default();
+        //let processes : FuturesUnordered<_> = Default::default();
         loop {
             tokio::select! {
                 Some((request, callback)) = requests.next() => {
                     match request {
-                        Request::State => {
-                            if let Some(callback) = callback {
-                                let state = State {
-                                    linux: device_addr,
-                                    actions: vec![Action::RpiShutdown, Action::RpiReboot]
-                                };
-                                if let Err(_) = callback.send(Response::State(state)) {
-                                    log::error!("Could not respond with state");
-                                }
+                        Request::State => if let Some(callback) = callback {
+                            let state = State {
+                                linux: device_addr,
+                                actions: vec![Action::RpiShutdown, Action::RpiReboot]
+                            };
+                            if let Err(_) = callback.send(Response::State(state)) {
+                                log::error!("Could not respond with state");
                             }
                         }
                         Request::Execute(action) => match action {
@@ -85,6 +106,27 @@ pub async fn new(uuid: Uuid, rx: Receiver, device: fernbedienung::Device) -> (Uu
                                 break;
                             }
                         }
+                        Request::Upload(software) => if let Some(callback) = callback {
+                            let response = match device_interface.clone().create_temp_dir().await {
+                                Ok(path) => {
+                                    let upload_result = software.0.into_iter()
+                                        .map(|(filename, contents)| {
+                                            device_interface.clone().upload(&path, filename, contents)
+                                        })
+                                        .collect::<FuturesUnordered<_>>()
+                                        .collect::<Result<Vec<_>, _>>().await;
+                                    match upload_result {
+                                        Ok(_) => Response::Ok,
+                                        Err(error) => Response::Error(Error::FernbedienungError(error))
+                                    }
+                                }
+                                Err(error) => Response::Error(Error::FernbedienungError(error))
+                            };
+                            if let Err(response) = callback.send(response) {
+                                log::error!("Could not respond with {:?}", response);
+                            }
+                        }
+                        /*
                         Request::Experiment(experiment) => match experiment {
                             Experiment::Start(working_dir, args) => {
                                 let task = fernbedienung::process::Run {
@@ -92,7 +134,7 @@ pub async fn new(uuid: Uuid, rx: Receiver, device: fernbedienung::Device) -> (Uu
                                     working_dir: working_dir.into(),
                                     args: args,
                                 };
-                                let process = device_interface.clone().run(task, None, None);
+                                let process = device_interface.clone().run(task, None, None, None, None);
                                 processes.push(process);
                             }
                             Experiment::Stop => {
@@ -100,6 +142,7 @@ pub async fn new(uuid: Uuid, rx: Receiver, device: fernbedienung::Device) -> (Uu
             
                             }
                         }
+                        */
                     }
                 }
             }

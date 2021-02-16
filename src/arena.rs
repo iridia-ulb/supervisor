@@ -1,5 +1,6 @@
 
 use serde::{Deserialize, Serialize};
+use software::Software;
 use std::{collections::HashMap, net::Ipv4Addr};
 use futures::{StreamExt, stream::FuturesUnordered};
 use log;
@@ -14,9 +15,13 @@ use crate::{robot::{pipuck::{self, PiPuck}, drone::{self, Drone}}, software};
 pub enum Error {
     #[error(transparent)]
     PiPuckError(#[from] pipuck::Error),
+    
     #[error(transparent)]
     DroneError(#[from] drone::Error),
-}
+    
+    #[error(transparent)]
+    SoftwareError(#[from] software::Error),
+ }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum Action {
@@ -61,6 +66,7 @@ pub async fn new(arena_request_rx: mpsc::UnboundedReceiver<Request>,
 
     let mut requests = UnboundedReceiverStream::new(arena_request_rx);
     
+    // does my inception of an active object allow me to put this together?
     let mut drone_software : crate::software::Software = Default::default();
     let mut drone_tasks : FuturesUnordered<Drone> = Default::default();
     let mut drone_tx_map : HashMap<Uuid, drone::Sender> = Default::default();
@@ -82,9 +88,16 @@ pub async fn new(arena_request_rx: mpsc::UnboundedReceiver<Request>,
                         log::error!("Could not respond with arena actions");
                     }
                 },
-                Request::Execute(action) => {
-                    log::info!("{:?}", action);
-                },
+                Request::Execute(action) => match action {
+                    Action::StartExperiment => {
+                        if let Ok(_) = handle_start_experiment_request().await {
+                            state = State::Active;
+                        }
+                    },
+                    Action::StopExperiment => {
+                        state = State::Standby;
+                    }
+                }
                 /* Drone requests */
                 Request::AddDrone(uuid, tx, task) => {
                     drone_tx_map.insert(uuid, tx);
@@ -170,6 +183,40 @@ pub async fn new(arena_request_rx: mpsc::UnboundedReceiver<Request>,
         }
     }
     log::info!("arena task is complete");
+}
+
+async fn handle_start_experiment_request(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>,
+                                         pipuck_software: &Software,
+                                         drone_tx_map: &HashMap<Uuid, drone::Sender>,
+                                         drone_software: &Software) -> Result<()> {
+    if let Err(error) = pipuck_software.check_config() {
+        if pipuck_tx_map.len() > 0 {
+            return Err(Error::SoftwareError(error));
+        }
+    }
+    if let Err(error) = drone_software.check_config() {
+        if drone_tx_map.len() > 0 {
+            return Err(Error::SoftwareError(error));
+        }
+    }
+    // TODO get the semantics of this right, if any pipucks fail to recv software for any reason ABORT
+    let pipuck_software_upload_result = pipuck_tx_map
+        .into_iter()
+        .filter_map(|(uuid, tx)| {
+            let uuid = uuid.clone();
+            let (response_tx, response_rx) = oneshot::channel();
+            let software = pipuck_software.clone();
+            let request = (pipuck::Request::Upload(software), Some(response_tx));
+            tx.send(request).map(|_| async move {
+                (uuid, response_rx.await)
+            }).ok() // this ok maps result to option and discards via filter_map (incorrect semantics)
+        })
+        .collect::<FuturesUnordered<_>>()
+        .map(|(uuid, result)| async move { Some((uuid, result)) });
+        
+        //.collect::<Result<Vec<_>,_>>().await;
+
+    Ok(())
 }
 
 fn handle_forward_pipuck_action(uuid: Uuid, action: pipuck::Action, pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>) {

@@ -15,6 +15,7 @@ pub enum Request {
     GetState,
     Pair(fernbedienung::Device),
     Execute(Action),
+    //Upload(crate::software::Software),
 }
 
 pub enum Response {

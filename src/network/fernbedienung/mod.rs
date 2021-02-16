@@ -9,9 +9,9 @@ use std::sync::Arc;
 use bytes::BytesMut;
 use mpsc::UnboundedSender;
 use tokio_stream::wrappers::UnboundedReceiverStream;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, UnboundedReceiver};
 use uuid::Uuid;
-use futures::{FutureExt, SinkExt, StreamExt};
+use futures::{self, FutureExt, SinkExt, StreamExt};
 
 
 use tokio::{sync::Mutex, net::TcpStream};
@@ -106,6 +106,8 @@ impl Interface {
 
     pub async fn run(self: Arc<Self>,
                      task: process::Run,
+                     signal_rx: Option<UnboundedReceiver<u32>>,
+                     stdin_rx: Option<UnboundedReceiver<BytesMut>>,
                      stdout_tx: Option<UnboundedSender<BytesMut>>,
                      stderr_tx: Option<UnboundedSender<BytesMut>>) -> Result<bool> {
         let uuid = Uuid::new_v4();
@@ -124,38 +126,76 @@ impl Interface {
 
         /* process response */
         let mut responses = UnboundedReceiverStream::new(rx);
-        while let Some(response) = responses.next().await {
-            match response {
-                ResponseKind::Process(response) => match response {
-                    process::Response::Terminated(result) => {
-                        self.1.lock().await.remove(&uuid);
-                        return Ok(result);
-                    }
-                    process::Response::Output(source, data) => match source {
-                        process::Source::Stdout => if let Some(stdout_tx) = &stdout_tx {
+
+        let mut signal_rx = match signal_rx {
+            Some(signal_rx) => UnboundedReceiverStream::new(signal_rx).left_stream(),
+            None => futures::stream::pending().right_stream(),
+        };
+
+        let mut stdin_rx = match stdin_rx {
+            Some(stdin_rx) => UnboundedReceiverStream::new(stdin_rx).left_stream(),
+            None => futures::stream::pending().right_stream(),
+        };
+        
+        loop {
+            tokio::select! {
+                Some(signal) = signal_rx.next() => {
+                    let request = Request(uuid, RequestKind::Process(
+                        process::Request::Signal(signal))
+                    );
+                    self.0.lock().await
+                        .send(request).await
+                        .map_err(|_| Error::SendError)?;
+                },
+                Some(stdin) = stdin_rx.next() => {
+                    let request = Request(uuid, RequestKind::Process(
+                        process::Request::StandardInput(stdin))
+                    );
+                    self.0.lock().await
+                        .send(request).await
+                        .map_err(|_| Error::SendError)?;
+
+                },
+                Some(response) = responses.next() => match response {
+                    ResponseKind::Process(response) => match response {
+                        process::Response::Started => {},
+                        process::Response::Terminated(result) => {
+                            self.1.lock().await.remove(&uuid);
+                            return Ok(result);
+                        },
+                        process::Response::StandardOutput(data) => if let Some(stdout_tx) = &stdout_tx {
                             if let Err(error) = stdout_tx.send(data) {
                                 log::error!("Could not forward standard output to channel: {}", error);
                             }
-                        }
-                        process::Source::Stderr => if let Some(stderr_tx) = &stderr_tx {
+                        },
+                        process::Response::StandardError(data) => if let Some(stderr_tx) = &stderr_tx {
                             if let Err(error) = stderr_tx.send(data) {
                                 log::error!("Could not forward standard error to channel: {}", error);
                             }
-                        }
+                        },
                     },
                     _ => {}
                 },
-                _ => {}
+                else => break
             }
         }
         Err(Error::TerminationError)
     }
 
-    // pub async fn create_temp_dir(&mut self) -> Result<PathBuf> {
-    //     let result = Device::run(self, "mktmp", "/tmp", vec!["-d".to_owned()]).await;
-                
-    //     Ok("/".into())
-    // }
+    pub async fn create_temp_dir(self: Arc<Self>) -> Result<String> {
+        let task = process::Run {
+            target: "mktemp".into(),
+            working_dir: "/tmp".into(),
+            args: vec!["-d".to_owned()],
+        };
+        let (stdout_tx, stdout_rx) = mpsc::unbounded_channel();
+        self.run(task, None, None, Some(stdout_tx), None).await?;
+        let stdout_stream = UnboundedReceiverStream::new(stdout_rx);
+        let stdout = stdout_stream.concat().await;
+        let temp_dir = std::str::from_utf8(stdout.as_ref())
+            .map_err(|_| Error::ConversionError)?;
+        Ok(temp_dir.trim().to_owned())
+    }
 
     pub async fn hostname(self: Arc<Self>) -> Result<String> {
         let task = process::Run {
@@ -164,12 +204,9 @@ impl Interface {
             args: vec![],
         };
         let (stdout_tx, stdout_rx) = mpsc::unbounded_channel();
-        self.run(task, Some(stdout_tx), None).await?;
+        self.run(task, None, None, Some(stdout_tx), None).await?;
         let stdout_stream = UnboundedReceiverStream::new(stdout_rx);
-        let stdout = stdout_stream.fold(BytesMut::new(), |mut buf, rx| async move {
-            buf.unsplit(rx);
-            buf
-        }).await;
+        let stdout = stdout_stream.concat().await;
         let hostname = std::str::from_utf8(stdout.as_ref())
             .map_err(|_| Error::ConversionError)?;
         Ok(hostname.trim().to_owned())
@@ -181,7 +218,7 @@ impl Interface {
             working_dir: "/tmp".into(),
             args: vec!["shutdown".to_owned()],
         };
-        self.run(task, None, None).await
+        self.run(task, None, None, None, None).await
     }
 
     pub async fn reboot(self: Arc<Self>) -> Result<bool> {
@@ -190,7 +227,7 @@ impl Interface {
             working_dir: "/tmp".into(),
             args: vec!["reboot".to_owned()],
         };
-        self.run(task, None, None).await
+        self.run(task, None, None, None, None).await
     }
 }
 

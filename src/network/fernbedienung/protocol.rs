@@ -18,7 +18,7 @@ pub mod process {
     #[derive(Debug, Serialize)]
     pub enum Request {
         Run(Run),
-        Write(Vec<u8>),
+        StandardInput(BytesMut),
         Signal(u32),
     }
 
@@ -26,7 +26,8 @@ pub mod process {
     pub enum Response {
         Started,
         Terminated(bool),
-        Output(Source, BytesMut),
+        StandardOutput(BytesMut),
+        StandardError(BytesMut),
     }
 }
 
