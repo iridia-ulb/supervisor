@@ -141,7 +141,7 @@ lazy_static::lazy_static! {
 
 pub async fn run(ws: ws::WebSocket,
                  arena_request_tx: mpsc::UnboundedSender<arena::Request>) {
-    log::info!("client connected!");
+    log::info!("Client connected");
     /* split the socket into a sender and receive of messages */
     let (websocket_tx, mut websocket_rx) = ws.split();
 
@@ -260,7 +260,7 @@ pub async fn run(ws: ws::WebSocket,
                                         }
                                     }
                                     else {
-                                        log::error!("target {} does not support adding software", uuid);
+                                        log::error!("Target {} does not support adding software", uuid);
                                     }
                                 }
                             }
@@ -278,7 +278,7 @@ pub async fn run(ws: ws::WebSocket,
                                     }
                                 }
                                 else {
-                                    log::error!("target {} does not support clearing software", uuid);
+                                    log::error!("Target {} does not support clearing software", uuid);
                                 }
                             }
                         }
@@ -290,7 +290,7 @@ pub async fn run(ws: ws::WebSocket,
             }
         }
     }
-    log::info!("webui task is complete (client disconnected)");
+    log::info!("Client disconnected");
 }
 
 async fn diagnostics_tab(_arena_request_tx: &mpsc::UnboundedSender<arena::Request>) -> Result<Cards> {

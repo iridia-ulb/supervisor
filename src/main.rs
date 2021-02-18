@@ -10,6 +10,7 @@ mod network;
 mod webui;
 mod optitrack;
 mod software;
+mod journal;
 
 /// TODO:
 /// 1. Clean up this code so that it compiles again [DONE]
@@ -33,13 +34,15 @@ async fn main() {
     /* create a task for tracking the robots and state of the experiment */
     let (arena_requests_tx, arena_requests_rx) = mpsc::unbounded_channel();
     let (network_addr_tx, network_addr_rx) = mpsc::unbounded_channel();
+    let (journal_requests_tx, journal_requests_rx) = mpsc::unbounded_channel();
     
     /* add all network addresses from the 192.168.1.0/24 subnet */
     for network_addr in "192.168.1.0/24".parse::<Ipv4Net>().unwrap().hosts() {
         network_addr_tx.send(network_addr).unwrap();
     }
     
-    let arena_task = arena::new(arena_requests_rx, network_addr_tx);   
+    let journal_task = journal::new(journal_requests_rx);
+    let arena_task = arena::new(arena_requests_rx, network_addr_tx, journal_requests_tx);
     let network_task = network::new(network_addr_rx, arena_requests_tx.clone());
 
     /* create a task for the webui */
@@ -57,6 +60,6 @@ async fn main() {
     let webui_task = warp::serve(socket_route.or(static_route)).run(server_addr);
 
     /* run tasks to completion on this thread */
-    let results = tokio::join!(arena_task, network_task, webui_task);
+    let results = tokio::join!(arena_task, journal_task, network_task, webui_task);
     log::info!("shutdown ({:?})", results);
 }
