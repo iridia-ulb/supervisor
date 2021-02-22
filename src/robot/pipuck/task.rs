@@ -1,7 +1,7 @@
 use futures::{Future, stream::FuturesUnordered};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use std::{net::Ipv4Addr, sync::Arc};
+use std::{net::{Ipv4Addr, SocketAddr}, sync::Arc};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
 use crate::network::fernbedienung;
@@ -17,7 +17,7 @@ pub enum Request {
     State,
     Execute(Action),
     Upload(crate::software::Software),
-    ExperimentStart(mpsc::UnboundedSender<journal::Request>),
+    ExperimentStart(SocketAddr, mpsc::UnboundedSender<journal::Request>),
     ExperimentStop,
 }
 
@@ -127,19 +127,23 @@ pub async fn new(uuid: Uuid, rx: Receiver, device: fernbedienung::Device) -> (Uu
                                 Err(error) => Response::Error(Error::FernbedienungError(error))
                             }
                         },
-                        // step 1, connect this method
+                        // step 1, connect this method (DONE)
                         // step 2, modify argos to take a controller and ip address to the router
-                        // step 3, set .argos file so that control terminates after X ticks
+                        // step 3, set .argos file so that control terminates after X ticks (DONE)
                         // step 4, add channel for issuing signal when experiment stop is requested
-                        // step 5, forward standard input and standard output to journal
-                        Request::ExperimentStart(journal_requests_tx) => {
+                        // step 5, forward standard input and standard output to journal (DONE)
+                        Request::ExperimentStart(message_router_addr, journal_requests_tx) => {
                             match argos_config.take() {
                                 Some(argos_config) => match argos_path.take() {
                                     Some(argos_path) => {
                                         let task = fernbedienung::process::Run {
                                             target: "argos3".into(),
                                             working_dir: argos_path.into(),
-                                            args: vec!["-c".into(), argos_config],
+                                            args: vec![
+                                                "--config".to_owned(), argos_config,
+                                                "--router".to_owned(), message_router_addr.to_string(),
+                                                "--id".to_owned(), uuid.to_string(),
+                                            ],
                                         };
                                         let (stdout_tx, stdout_rx) = mpsc::unbounded_channel();
                                         let (stderr_tx, stderr_rx) = mpsc::unbounded_channel();
@@ -147,7 +151,8 @@ pub async fn new(uuid: Uuid, rx: Receiver, device: fernbedienung::Device) -> (Uu
                                         let argos = device_interface
                                             .clone()
                                             .run(task, None, None, Some(stdout_tx), Some(stderr_tx));
-                                        processes.push(argos);                                            
+                                        processes.push(argos);
+                                        // the following could be refactored under the device interface
                                         forward.push(async move {
                                             let mut stdout_stream = UnboundedReceiverStream::new(stdout_rx);
                                             let mut stderr_stream = UnboundedReceiverStream::new(stderr_rx);
@@ -156,7 +161,7 @@ pub async fn new(uuid: Uuid, rx: Receiver, device: fernbedienung::Device) -> (Uu
                                                     Some(data) = stdout_stream.next() => {
                                                         let message = journal::Robot::StandardOutput(data);
                                                         let event = journal::Event::Robot(uuid, message);
-                                                        let request = journal::Request::Event(event);
+                                                        let request = journal::Request::Record(event);
                                                         if let Err(error) = journal_requests_tx.send(request) {
                                                             log::warn!("Could not forward standard output of {} to journal: {}", uuid, error);
                                                         }
@@ -164,7 +169,7 @@ pub async fn new(uuid: Uuid, rx: Receiver, device: fernbedienung::Device) -> (Uu
                                                     Some(data) = stderr_stream.next() => {
                                                         let message = journal::Robot::StandardError(data);
                                                         let event = journal::Event::Robot(uuid, message);
-                                                        let request = journal::Request::Event(event);
+                                                        let request = journal::Request::Record(event);
                                                         if let Err(error) = journal_requests_tx.send(request) {
                                                             log::warn!("Could not forward standard error of {} to journal: {}", uuid, error);
                                                         }
@@ -190,6 +195,8 @@ pub async fn new(uuid: Uuid, rx: Receiver, device: fernbedienung::Device) -> (Uu
                 },
                 Some(exit_success) = processes.next() => {
                     // remember to revert sysfstrig changes when done
+                    /* TODO, send exit_success to arena so that experiment is automatically ended
+                       when ARGoS terminates? */
                     log::info!("ARGoS terminated with {:?}", exit_success);
                 },
                 Some(_) = forward.next() => {
@@ -198,8 +205,7 @@ pub async fn new(uuid: Uuid, rx: Receiver, device: fernbedienung::Device) -> (Uu
             }
         }
     };
-    /* select here instead of join since if one future completes the
-       other should be dropped */
+    /* select here instead of join since if one future completes the other should be dropped */
     tokio::select! {
         _ = device_task => {},
         _ = request_task => {},

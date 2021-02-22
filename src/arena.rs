@@ -1,7 +1,7 @@
 
 use serde::{Deserialize, Serialize};
 use software::Software;
-use std::{collections::HashMap, net::Ipv4Addr};
+use std::{collections::HashMap, net::{Ipv4Addr, SocketAddr}};
 use futures::{StreamExt, TryStreamExt, stream::FuturesUnordered};
 use log;
 use tokio::sync::{mpsc, oneshot};
@@ -66,9 +66,10 @@ pub enum Request {
     GetPiPucks(oneshot::Sender<HashMap<Uuid, pipuck::State>>),
 }
 
-pub async fn new(arena_request_rx: mpsc::UnboundedReceiver<Request>,
-                 network_addr_tx: mpsc::UnboundedSender<Ipv4Addr>,
-                 journal_requests_tx: mpsc::UnboundedSender<journal::Request>) {
+pub async fn new(message_router_addr: SocketAddr,
+                 arena_request_rx: mpsc::UnboundedReceiver<Request>,
+                 network_addr_tx: &mpsc::UnboundedSender<Ipv4Addr>,
+                 journal_requests_tx: &mpsc::UnboundedSender<journal::Request>) {
     let mut state = State::Standby;
 
     let mut requests = UnboundedReceiverStream::new(arena_request_rx);
@@ -102,6 +103,7 @@ pub async fn new(arena_request_rx: mpsc::UnboundedReceiver<Request>,
                                              &pipuck_software,
                                              &drone_tx_map,
                                              &drone_software,
+                                             &message_router_addr,
                                              &journal_requests_tx).await;
                         match start_experiment_result {
                             Ok(_) => state = State::Active,
@@ -217,6 +219,7 @@ async fn start_experiment(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>,
                           pipuck_software: &Software,
                           drone_tx_map: &HashMap<Uuid, drone::Sender>,
                           drone_software: &Software,
+                          message_router_addr: &SocketAddr,
                           journal_requests_tx: &mpsc::UnboundedSender<journal::Request>) -> Result<()> {
     if let Err(error) = pipuck_software.check_config() {
         if pipuck_tx_map.len() > 0 {
@@ -267,7 +270,8 @@ async fn start_experiment(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>,
         .map(|(uuid, tx)| {
             let uuid = uuid.clone();
             let (response_tx, response_rx) = oneshot::channel();
-            let request = (pipuck::Request::ExperimentStart(journal_requests_tx.clone()), response_tx);
+            let request = (pipuck::Request::ExperimentStart(message_router_addr.clone(),
+                                                            journal_requests_tx.clone()), response_tx);
             tx.send(request)
                 .map_err(|_| Error::PiPuckError(uuid, pipuck::Error::RequestError))
                 .map(|_| async move {

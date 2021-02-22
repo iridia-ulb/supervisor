@@ -11,6 +11,7 @@ mod webui;
 mod optitrack;
 mod software;
 mod journal;
+mod router;
 
 /// TODO:
 /// 1. Clean up this code so that it compiles again [DONE]
@@ -40,12 +41,24 @@ async fn main() {
     for network_addr in "192.168.1.0/24".parse::<Ipv4Net>().unwrap().hosts() {
         network_addr_tx.send(network_addr).unwrap();
     }
-    
-    let journal_task = journal::new(journal_requests_rx);
-    let arena_task = arena::new(arena_requests_rx, network_addr_tx, journal_requests_tx);
-    let network_task = network::new(network_addr_rx, arena_requests_tx.clone());
+    let message_router_addr : SocketAddr = ([127, 0, 0, 1], 4950).into();
 
-    /* create a task for the webui */
+    /* create journal task */
+    let journal_task = journal::new(journal_requests_rx);
+
+    /* create arena task */
+    let arena_task = arena::new(message_router_addr, arena_requests_rx, &network_addr_tx, &journal_requests_tx);
+
+    /* create network task */
+    let network_task = network::new(network_addr_rx, &arena_requests_tx);
+    
+    /* create message router task */
+    let router_socket_addr : SocketAddr = ([127, 0, 0, 1], 4950).into();
+    let router_task = router::new(router_socket_addr, &journal_requests_tx);
+
+    /* create webui task */
+    /* clone arena requests tx for moving into the closure */
+    let arena_requests_tx = arena_requests_tx.clone();
     let arena_filter = warp::any().map(move || arena_requests_tx.clone());
     let socket_route = warp::path("socket")
         .and(warp::ws())
@@ -60,6 +73,6 @@ async fn main() {
     let webui_task = warp::serve(socket_route.or(static_route)).run(server_addr);
 
     /* run tasks to completion on this thread */
-    let results = tokio::join!(arena_task, journal_task, network_task, webui_task);
+    let results = tokio::join!(arena_task, journal_task, network_task, router_task, webui_task);
     log::info!("shutdown ({:?})", results);
 }

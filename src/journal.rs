@@ -1,7 +1,7 @@
-use std::time::{Instant, Duration};
+use std::{net::SocketAddr, time::{Instant, Duration}};
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
@@ -25,18 +25,18 @@ type Result<T> = std::result::Result<T, Error>;
 pub enum Request {
     Start(oneshot::Sender<Result<()>>),
     Stop,
-    Event(Event),   
+    Record(Event),
 }
 
 #[derive(Debug, Serialize)]
 pub enum Event {
     Optitrack {},
     Robot(Uuid, Robot),
+    Broadcast(SocketAddr, crate::router::LuaType),
 }
 
 #[derive(Debug, Serialize)]
 pub enum Robot {
-    Message,
     StandardOutput(BytesMut),
     StandardError(BytesMut),
 }
@@ -81,7 +81,7 @@ pub async fn new(rx: mpsc::UnboundedReceiver<Request>) -> Result<()> {
                 start.take();
                 writer.take();
             },
-            Request::Event(event) => if let Some(start) = start.as_ref() {
+            Request::Record(event) => if let Some(start) = start.as_ref() {
                 if let Some(writer) = writer.as_mut() {
                     let entry = Entry { timestamp: start.elapsed(), event };
                     if let Err(error) = serde_pickle::ser::to_writer(writer, &entry, true) {

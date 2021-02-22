@@ -38,7 +38,7 @@ enum Error {
 type Result<T> = std::result::Result<T, Error>;
 
 pub async fn new(network_addr_rx: mpsc::UnboundedReceiver<Ipv4Addr>,
-                 arena_request_tx: mpsc::UnboundedSender<arena::Request>) {
+                 arena_request_tx: &mpsc::UnboundedSender<arena::Request>) {
     let mut probe_queue : FuturesUnordered<_> = Default::default();
     let mut addresses = UnboundedReceiverStream::new(network_addr_rx);
 
