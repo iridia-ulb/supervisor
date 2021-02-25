@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, time::{Instant, Duration}};
 use std::fs::File;
-use std::io::{BufWriter, Write};
-use bytes::{Bytes, BytesMut};
+use std::io::BufWriter;
+use bytes::BytesMut;
 use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;

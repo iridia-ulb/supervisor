@@ -26,8 +26,7 @@ pub enum Error {
     
     #[error(transparent)]
     SoftwareError(#[from] software::Error),
-
- }
+}
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum Action {

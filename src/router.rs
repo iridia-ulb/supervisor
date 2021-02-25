@@ -26,6 +26,7 @@ const LUA_TUSERDATA_QUATERNION: u8 = 3;
 const MAX_MANTISSA: f64 = 9223372036854775806.0;
 
 #[derive(Debug, Serialize)]
+#[serde(untagged)]
 pub enum LuaType {
     String(String),
     Number(f64),
@@ -45,7 +46,7 @@ enum Error {
     IoError(#[from] io::Error),
 }
 
-fn decode_lua_usertype(buf: &impl Buf) -> Result<LuaType, Error> {
+fn decode_lua_usertype(buf: &mut impl Buf) -> Result<LuaType, Error> {
     if buf.has_remaining() {
         match buf.get_u8() {
             LUA_TUSERDATA_VECTOR2 => decode_lua_vector2(buf),
@@ -59,7 +60,7 @@ fn decode_lua_usertype(buf: &impl Buf) -> Result<LuaType, Error> {
     }
 }
 
-fn decode_lua_vector2(buf: &impl Buf) -> Result<LuaType, Error> {
+fn decode_lua_vector2(buf: &mut impl Buf) -> Result<LuaType, Error> {
     let x = decode_lua_number(buf)?;
     let y = decode_lua_number(buf)?;
     match (x, y) {
@@ -69,7 +70,7 @@ fn decode_lua_vector2(buf: &impl Buf) -> Result<LuaType, Error> {
     }
 }
 
-fn decode_lua_vector3(buf: &impl Buf) -> Result<LuaType, Error> {
+fn decode_lua_vector3(buf: &mut impl Buf) -> Result<LuaType, Error> {
     let x = decode_lua_number(buf)?;
     let y = decode_lua_number(buf)?;
     let z = decode_lua_number(buf)?;
@@ -81,7 +82,7 @@ fn decode_lua_vector3(buf: &impl Buf) -> Result<LuaType, Error> {
     }
 }
 
-fn decode_lua_quaternion(buf: &impl Buf) -> Result<LuaType, Error> {
+fn decode_lua_quaternion(buf: &mut impl Buf) -> Result<LuaType, Error> {
     let w = decode_lua_number(buf)?;
     let x = decode_lua_number(buf)?;
     let y = decode_lua_number(buf)?;
@@ -95,7 +96,7 @@ fn decode_lua_quaternion(buf: &impl Buf) -> Result<LuaType, Error> {
     }
 }
 
-fn decode_lua_number(buf: &impl Buf) -> Result<LuaType, Error> {
+fn decode_lua_number(buf: &mut impl Buf) -> Result<LuaType, Error> {
     /* handle Carlo's unusual double encoding */
     if buf.remaining() > size_of::<u64>() + size_of::<u32>() {
         let mantissa = buf.get_i64();
@@ -119,7 +120,7 @@ fn decode_lua_number(buf: &impl Buf) -> Result<LuaType, Error> {
     }
 }
 
-fn decode_lua_string(buf: &impl Buf) -> Result<LuaType, Error> {
+fn decode_lua_string(buf: &mut impl Buf) -> Result<LuaType, Error> {
     /* extract C string */
     let mut data = Vec::new();
     while buf.has_remaining() {
@@ -133,7 +134,7 @@ fn decode_lua_string(buf: &impl Buf) -> Result<LuaType, Error> {
         .map(|content| LuaType::String(content))
 }
 
-fn decode_lua_boolean(buf: &impl Buf) -> Result<LuaType, Error> {
+fn decode_lua_boolean(buf: &mut impl Buf) -> Result<LuaType, Error> {
     if buf.has_remaining() {
         match buf.get_i8() {
             0 => Ok(LuaType::Boolean(false)),
@@ -145,7 +146,7 @@ fn decode_lua_boolean(buf: &impl Buf) -> Result<LuaType, Error> {
     }
 }
 
-fn decode_lua_table(buf: &impl Buf) -> Result<LuaType, Error> {
+fn decode_lua_table(buf: &mut impl Buf) -> Result<LuaType, Error> {
     let mut table = Vec::new();
     while buf.has_remaining() {
         /* parse the key */
@@ -249,14 +250,14 @@ pub async fn new(bind_to_addr: SocketAddr,
                         peers.write().await.insert(addr, tx);
                         while let Some(message) = stream.next().await {
                             match message {
-                                Ok(message) => {
+                                Ok(mut message) => {
                                     for (peer_addr, tx) in peers.read().await.iter() {
                                         /* do not send messages to the sending robot */   
                                         if peer_addr != &addr {
                                             let _ = tx.send(message.clone());
                                         }
                                     }
-                                    if let Ok(decoded) = decode_lua_table(&message) {
+                                    if let Ok(decoded) = decode_lua_table(&mut message) {
                                         let event = journal::Event::Broadcast(addr, decoded);
                                         if let Err(error) = journal_requests_tx.send(journal::Request::Record(event)) {
                                             log::error!("Could not record event in journal: {}", error);
