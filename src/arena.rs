@@ -11,6 +11,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use crate::robot::{pipuck::{self, PiPuck}, drone::{self, Drone}};
 use crate::software;
 use crate::journal;
+use crate::network;
 
 
 #[derive(thiserror::Error, Debug)]
@@ -48,15 +49,16 @@ pub enum Request {
     GetActions(oneshot::Sender<Vec<Action>>),
     Execute(Action),
     /* Drone requests */
-    AddDrone(Uuid, drone::Sender, Drone),
+    AddDrone(network::xbee::Device),
     AddDroneSoftware(String, Vec<u8>),
     ClearDroneSoftware,
     CheckDroneSoftware(oneshot::Sender<(software::Checksums, software::Result<()>)>),
     ForwardDroneAction(Uuid, drone::Action),
+    PairWithDrone(network::fernbedienung::Device),
     //ForwardDroneActionAll(drone::Action),
     GetDrones(oneshot::Sender<HashMap<Uuid, drone::State>>),
     /* Pi-Puck requests */
-    AddPiPuck(Uuid, pipuck::Sender, PiPuck),
+    AddPiPuck(network::fernbedienung::Device),
     AddPiPuckSoftware(String, Vec<u8>),
     ClearPiPuckSoftware,
     CheckPiPuckSoftware(oneshot::Sender<(software::Checksums, software::Result<()>)>),
@@ -117,12 +119,15 @@ pub async fn new(message_router_addr: SocketAddr,
                     }
                 }
                 /* Drone requests */
-                Request::AddDrone(uuid, tx, task) => {
+                Request::AddDrone(device) => {
+                    let (uuid, tx, task) = Drone::new(device);
                     drone_tx_map.insert(uuid, tx);
                     drone_tasks.push(task)
                 }
-                Request::AddDroneSoftware(path, contents) => drone_software.add(path, contents),
-                Request::ClearDroneSoftware => drone_software.clear(),
+                Request::AddDroneSoftware(path, contents) =>
+                    drone_software.add(path, contents),
+                Request::ClearDroneSoftware =>
+                    drone_software.clear(),
                 Request::CheckDroneSoftware(callback) => {
                     let checksums = drone_software.checksums();
                     let check = drone_software.check_config();
@@ -131,7 +136,7 @@ pub async fn new(message_router_addr: SocketAddr,
                     }
                 },
                 Request::ForwardDroneAction(uuid, action) => 
-                    handle_forward_drone_action(uuid, action, &drone_tx_map),
+                    handle_forward_drone_action_request(&drone_tx_map, uuid, action).await,
                 /*
                 Request::ForwardDroneActionAll(action) => {
                     for (uuid, tx) in drone_tx_map.iter() {
@@ -144,13 +149,18 @@ pub async fn new(message_router_addr: SocketAddr,
                 */
                 Request::GetDrones(callback) => 
                     handle_get_drones_request(&drone_tx_map, callback).await,
+                Request::PairWithDrone(device) =>
+                    handle_pair_with_drone_request(&drone_tx_map, device).await,
                 /* Pi-Puck requests */
-                Request::AddPiPuck(uuid, tx, task) => {
+                Request::AddPiPuck(device) => {
+                    let (uuid, tx, task) = PiPuck::new(device);
                     pipuck_tx_map.insert(uuid, tx);
                     pipuck_tasks.push(task)
                 },
-                Request::AddPiPuckSoftware(path, contents) => pipuck_software.add(path, contents),
-                Request::ClearPiPuckSoftware => pipuck_software.clear(),
+                Request::AddPiPuckSoftware(path, contents) =>
+                    pipuck_software.add(path, contents),
+                Request::ClearPiPuckSoftware =>
+                    pipuck_software.clear(),
                 Request::CheckPiPuckSoftware(callback) => {
                     let checksums = pipuck_software.checksums();
                     let check = pipuck_software.check_config();
@@ -159,7 +169,7 @@ pub async fn new(message_router_addr: SocketAddr,
                     }
                 },
                 Request::ForwardPiPuckAction(uuid, action) => 
-                    handle_forward_pipuck_action(uuid, action, &pipuck_tx_map).await,
+                    handle_forward_pipuck_action_request(&pipuck_tx_map, uuid, action).await,
                 /*
                 Request::ForwardPiPuckActionAll(action) => {
                     for (uuid, tx) in pipuck_tx_map.iter() {
@@ -206,6 +216,27 @@ pub async fn new(message_router_addr: SocketAddr,
     }
     log::info!("arena task is complete");
 }
+
+async fn handle_pair_with_drone_request(drone_tx_map: &HashMap<Uuid, drone::Sender>,
+                                        device: network::fernbedienung::Device) {
+    // split the device into usable components
+    let (mut task, interface, addr) = device.split();
+
+
+    let tasklet = network::fernbedienung::process::Run {
+        target: "hostname".into(),
+        working_dir: "/tmp".into(),
+        args: vec![],
+    };
+    
+    tokio::select! {
+        _ = &mut task => {},
+        response = interface.clone().run(tasklet, None, None, None, None) => {}
+    }
+
+    let device = network::fernbedienung::Device::unite(task, interface, addr);
+}
+
 
 async fn stop_experiment(journal_requests_tx: &mpsc::UnboundedSender<journal::Request>) -> Result<()> {
     journal_requests_tx
@@ -294,7 +325,9 @@ async fn start_experiment(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>,
 }
 
 
-async fn handle_forward_pipuck_action(uuid: Uuid, action: pipuck::Action, pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>) {
+async fn handle_forward_pipuck_action_request(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>,
+                                              uuid: Uuid,
+                                              action: pipuck::Action) {
     match pipuck_tx_map.get(&uuid) {
         Some(tx) => {
             let request = pipuck::Request::Execute(action);
@@ -339,7 +372,9 @@ async fn handle_get_pipucks_request(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender
     }
 }
 
-fn handle_forward_drone_action(uuid: Uuid, action: drone::Action, drone_tx_map: &HashMap<Uuid, drone::Sender>) {
+async fn handle_forward_drone_action_request(drone_tx_map: &HashMap<Uuid, drone::Sender>,
+                                             uuid: Uuid,
+                                             action: drone::Action) {
     match drone_tx_map.get(&uuid) {
         Some(tx) => {
             let request = drone::Request::Execute(action);

@@ -8,7 +8,7 @@ use crate::network::{fernbedienung, xbee};
 pub struct State {
     pub xbee: Ipv4Addr,
     pub linux: Option<Ipv4Addr>,
-    pub actions: Vec<Action>,    
+    pub actions: Vec<Action>,
 }
 
 pub enum Request {
@@ -16,20 +16,16 @@ pub enum Request {
     Pair(fernbedienung::Device),
     Execute(Action),
     //Upload(crate::software::Software),
+    GetId,
 }
 
 pub enum Response {
     State(State),
-    ToBeRemoved,
+    Id(u8)
 }
 
 pub type Sender = mpsc::UnboundedSender<(Request, Option<oneshot::Sender<Response>>)>;
 pub type Receiver = mpsc::UnboundedReceiver<(Request, Option<oneshot::Sender<Response>>)>;
-
-const UPCORE_POWER_BIT_INDEX: u8 = 11;
-const PIXHAWK_POWER_BIT_INDEX: u8 = 12;
-const MUX_CONTROL_BIT_INDEX: u8 = 4;
-
 
 // Note: the power off, shutdown, reboot up core actions
 // should change the state to standby which, in turn,
@@ -63,11 +59,25 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub async fn new(uuid: Uuid, rx: Receiver, mut xbee: xbee::Device) -> (Uuid, Ipv4Addr, Option<Ipv4Addr>) {
-    /* initialize the xbee */
-    init(&mut xbee).await;
+    /* initialize the xbee pin and mux */
+    init(&mut xbee);
     /* wait for requests */
     let mut requests = UnboundedReceiverStream::new(rx);
     while let Some((request, callback)) = requests.next().await {
+        match request {
+            Request::GetState => {}
+            Request::Pair(fernbedienung) => {
+
+            }
+            Request::Execute(_) => {}
+            Request::GetId => {
+                if let Some(callback) = callback {
+                    if let Ok(id) = get_id(&mut xbee).await {
+                        let _ = callback.send(Response::Id(id));
+                    }
+                }
+            }
+        }
 
     }
     
@@ -76,60 +86,51 @@ pub async fn new(uuid: Uuid, rx: Receiver, mut xbee: xbee::Device) -> (Uuid, Ipv
     // if Fernbedienung exits, we should go into emergency mode and take control over the drone using the Xbee
 }
 
-async fn init(xbee: &mut xbee::Device) -> Result<()> {
-    /* pin configuration */
-    let pin_disable_output = 0u8.to_be_bytes();
-    let pin_digital_output = 4u8.to_be_bytes();
-    /* mux configuration */
-    let mut dio_config: u16 = 0b0000_0000_0000_0000;
-    let mut dio_set: u16 = 0b0000_0000_0000_0000;
-    dio_config |= 1 << MUX_CONTROL_BIT_INDEX;
-    dio_set |= 1 << MUX_CONTROL_BIT_INDEX;
-    /* prepare commands to be sent */
-    // TODO this could all be placed into a futures ordered
-    let init_commands = vec![
-        /* The UART pins need to be disabled for the moment */
-        /* D7 -> CTS, D6 -> RTS, P3 -> DOUT, P4 -> DIN */
-        /* disabled pins */
-        xbee::Command::new("D7", &pin_disable_output),
-        xbee::Command::new("D6", &pin_disable_output),
-        xbee::Command::new("P3", &pin_disable_output),
-        xbee::Command::new("P4", &pin_disable_output),
-        /* digital output pins */
-        xbee::Command::new("D4", &pin_digital_output),
-        xbee::Command::new("D1", &pin_digital_output),
-        xbee::Command::new("D2", &pin_digital_output),
-        /* mux configuration */
-        xbee::Command::new("OM", &dio_config.to_be_bytes()),
-        xbee::Command::new("IO", &dio_set.to_be_bytes()),
-    ];   
-    /* send commands */
-    for command in init_commands.into_iter() {
-        xbee.send(command).await?;
+async fn get_id(xbee: &mut xbee::Device) -> Result<u8> {
+    let mut id: u8 = 0;
+    for (pin, value) in xbee.read_inputs().await? {
+        let bit_index = pin as usize;
+        /* extract identifier from bit indices 0-3 inclusive */
+        if bit_index < 4 {
+            id |= (value as u8) << bit_index;
+        }
     }
+    Ok(id)
+}
+
+fn init(xbee: &mut xbee::Device) -> Result<()> {
+    /* set pin modes */
+    let pin_modes = vec![
+        /* The UART pins need to be disabled for the moment */
+        /* CTS: DIO7, RTS: DIO6, TX: DOUT, RX: DIN */
+        (xbee::Pin::DIO7, xbee::PinMode::Disable),
+        (xbee::Pin::DIO6, xbee::PinMode::Disable),
+        (xbee::Pin::DOUT, xbee::PinMode::Disable),
+        (xbee::Pin::DIN,  xbee::PinMode::Disable),
+        /* Input pins for reading an identifer */
+        (xbee::Pin::DIO0, xbee::PinMode::Input),
+        (xbee::Pin::DIO1, xbee::PinMode::Input),
+        (xbee::Pin::DIO2, xbee::PinMode::Input),
+        (xbee::Pin::DIO3, xbee::PinMode::Input),
+        /* Output pins for controlling power and mux */
+        (xbee::Pin::DIO4, xbee::PinMode::OutputDefaultLow),
+        (xbee::Pin::DIO11, xbee::PinMode::OutputDefaultLow),
+        (xbee::Pin::DIO12, xbee::PinMode::OutputDefaultLow),
+    ];
+    xbee.set_pin_modes(pin_modes)?;
+    /* configure mux */
+    xbee.write_outputs(vec![(xbee::Pin::DIO4, true)])?;
     Ok(())
 }
 
-pub async fn set_power(xbee: &mut xbee::Device, upcore: Option<bool>, pixhawk: Option<bool>) -> Result<()> {
-    let mut dio_config: u16 = 0b0000_0000_0000_0000;
-    let mut dio_set: u16 = 0b0000_0000_0000_0000;
-    /* enable upcore power? */
-    if let Some(enable_upcore_power) = upcore {
-        dio_config |= 1 << UPCORE_POWER_BIT_INDEX;
-        if enable_upcore_power {
-            dio_set |= 1 << UPCORE_POWER_BIT_INDEX;
-        }
+pub fn set_power(xbee: &mut xbee::Device, upcore: Option<bool>, pixhawk: Option<bool>) -> Result<()> {
+    let mut outputs = Vec::new();
+    if let Some(enable) = upcore {
+        outputs.push((xbee::Pin::DIO11, enable));
     }
-    /* enable pixhawk power? */
-    if let Some(enable_pixhawk_power) = pixhawk {
-        dio_config |= 1 << PIXHAWK_POWER_BIT_INDEX;
-        if enable_pixhawk_power {
-            dio_set |= 1 << PIXHAWK_POWER_BIT_INDEX;
-        }
+    if let Some(enable) = pixhawk {
+        outputs.push((xbee::Pin::DIO12, enable));
     }
-    let cmd_om = xbee::Command::new("OM", &dio_config.to_be_bytes());
-    let cmd_io = xbee::Command::new("IO", &dio_set.to_be_bytes());
-    xbee.send(cmd_om).await?;
-    xbee.send(cmd_io).await?;
+    xbee.write_outputs(outputs)?;
     Ok(())
 }

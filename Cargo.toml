@@ -29,13 +29,14 @@ lazy_static = { version = "1.4" }
 base64 = { version = "0.13" }
 md5 = { version = "0.7" }
 itertools = { version = "0.9" }
-async-trait = { version = "0.1" }
+bitvec = { version = "0.21" }
 
 semver = { version = "0.4"}
 log = { version = "0.4" }
 env_logger = { version = "0.8" }
 anyhow = "1.0"
 thiserror = { version = "1.0" }
+
 
 
 
