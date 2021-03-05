@@ -9,9 +9,9 @@ use std::sync::Arc;
 use bytes::BytesMut;
 use mpsc::UnboundedSender;
 use tokio_stream::wrappers::UnboundedReceiverStream;
-use tokio::sync::mpsc::{self, UnboundedReceiver};
+use tokio::sync::{mpsc::{self, UnboundedReceiver}, oneshot};
 use uuid::Uuid;
-use futures::{self, FutureExt, SinkExt, StreamExt};
+use futures::{self, FutureExt, SinkExt, StreamExt, stream::FuturesUnordered};
 
 
 use tokio::{sync::Mutex, net::TcpStream};
@@ -20,7 +20,7 @@ use tokio_serde::{SymmetricallyFramed, formats::SymmetricalJson};
 
 mod protocol;
 
-pub use protocol::{Response, ResponseKind, Request, RequestKind, Upload, process};
+pub use protocol::{Upload, process::Run};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -37,150 +37,228 @@ pub enum Error {
     Timeout,
 
     #[error("Could not send request")]
-    SendError,
+    RequestError,
+
+    #[error("Did not receive response")]
+    ResponseError,
 
     #[error("Process stream terminated")]
     TerminationError,
 
     #[error("Could not convert data to UTF-8")]
     ConversionError,
-
-
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-type Responses = SymmetricallyFramed<
+type RemoteResponses = SymmetricallyFramed<
     FramedRead<tokio::io::ReadHalf<TcpStream>, LengthDelimitedCodec>,
-    Response,
-    SymmetricalJson<Response>>;
+    protocol::Response,
+    SymmetricalJson<protocol::Response>>;
 
-pub type Requests = SymmetricallyFramed<
+pub type RemoteRequests = SymmetricallyFramed<
     FramedWrite<tokio::io::WriteHalf<TcpStream>, LengthDelimitedCodec>,
-    Request,
-    SymmetricalJson<Request>>;
-    
+    protocol::Request,
+    SymmetricalJson<protocol::Request>>;
 
-pub type Callbacks = HashMap<Uuid, mpsc::UnboundedSender<ResponseKind>>;
+pub type Callbacks = HashMap<Uuid, mpsc::UnboundedSender<protocol::ResponseKind>>;
 
-pub struct Interface(Mutex<Requests>, Mutex<Callbacks>);
+pub struct Device {
+    request_tx: mpsc::UnboundedSender<Request>,
+    pub addr: Ipv4Addr
+}
 
-impl Interface {
-    pub async fn upload(self: Arc<Self>, path: PathBuf, filename: PathBuf, contents: Vec<u8>) -> Result<()> {
-        let uuid = Uuid::new_v4();
-        let request = Request(uuid, RequestKind::Upload(Upload {
-            filename, path, contents,
-        }));
+enum Request {
+    Upload {
+        upload: Upload,
+        result: oneshot::Sender<bool>
+    },
+    Run {
+        task: Run,
+        signal_rx: Option<UnboundedReceiver<u32>>,
+        stdin_rx: Option<UnboundedReceiver<BytesMut>>,
+        stdout_tx: Option<UnboundedSender<BytesMut>>,
+        stderr_tx: Option<UnboundedSender<BytesMut>>,
+        exit_status_tx: oneshot::Sender<bool>,
+    }
+}
 
-        let (tx, rx) = mpsc::unbounded_channel::<ResponseKind>();
-        self.1.lock().await.insert(uuid, tx);
-        self.0.lock().await.send(request).await.map_err(|_| Error::SendError)?;
+impl Device {
+    pub async fn new(addr: Ipv4Addr) -> Result<Self> {
+        let stream = TcpStream::connect((addr, 17653)).await
+            .map_err(|error| Error::IoError(error))?;
+        let (local_request_tx, mut local_request_rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            /* requests and responses from remote */
+            let (read, write) = tokio::io::split(stream);
+            let remote_requests: RemoteRequests = SymmetricallyFramed::new(
+                FramedWrite::new(write, LengthDelimitedCodec::new()),
+                SymmetricalJson::<protocol::Request>::default(),
+            );
+            let mut remote_responses: RemoteResponses = SymmetricallyFramed::new(
+                FramedRead::new(read, LengthDelimitedCodec::new()),
+                SymmetricalJson::<protocol::Response>::default(),
+            );
+            /* create an mpsc channel to share for remote_requests */
+            let (remote_requests_tx, remote_requests_rx) = mpsc::unbounded_channel();           
+            let mut forward_remote_requests = UnboundedReceiverStream::new(remote_requests_rx)
+                .map(|request| Ok(request))
+                .forward(remote_requests);
+            /* collections for tracking state */
+            let mut status_txs: HashMap<Uuid, UnboundedSender<protocol::ResponseKind>> = Default::default();
+            let mut uploads: FuturesUnordered<_> = Default::default();
+            let mut runs: FuturesUnordered<_> = Default::default();
+            /* event loop */
+            loop {
+                tokio::select! {
+                    Some(response) = remote_responses.next() => match response {
+                        Ok(protocol::Response(uuid, response)) => {
+                            if let Some(uuid) = uuid {
+                                if let Some(status_tx) = status_txs.get(&uuid) {
+                                    let _ = status_tx.send(response);
+                                }
+                            }
+                            else {
+                                log::warn!("Received message without identifier: {:?}", response);
+                            }
+                        },
+                        Err(error) => {
+                            log::error!("{}", error.to_string());
+                        }
+                    },
+                    request = local_request_rx.recv() => match request {
+                        Some(request) => match request {
+                            Request::Upload { upload, result } => {
+                                let uuid = Uuid::new_v4();
+                                let request = protocol::RequestKind::Upload(upload);
+                                /* subscribe to updates */
+                                let (upload_status_tx, mut upload_status_rx) = mpsc::unbounded_channel();
+                                status_txs.insert(uuid, upload_status_tx);
+                                /* send the request */
+                                remote_requests_tx.send(protocol::Request(uuid, request));
+                                /* process responses */
+                                uploads.push(async move {
+                                    if let Some(status) = upload_status_rx.recv().await {
+                                        let _ = result.send(matches!(status, protocol::ResponseKind::Ok));
+                                    }
+                                    uuid
+                                });
+                            }
+                            Request::Run { task, signal_rx, stdin_rx, stdout_tx, stderr_tx, exit_status_tx } => {
+                                let uuid = Uuid::new_v4();
+                                let request = protocol::RequestKind::Process(protocol::process::Request::Run(task));
+                                /* subscribe to updates */
+                                let (run_status_tx, run_status_rx) = mpsc::unbounded_channel();
+                                status_txs.insert(uuid, run_status_tx);
+                                /* send the request */
+                                remote_requests_tx.send(protocol::Request(uuid, request));
+                                /* process responses */
+                                runs.push(Device::handle_run_input_output(
+                                    uuid, run_status_rx, remote_requests_tx.clone(), 
+                                    signal_rx, stdin_rx, stdout_tx, stderr_tx, exit_status_tx,
+                                ));
+                            }
+                        },
+                        None => {
+                            /* terminate this task when the struct is dropped */
+                            break
+                        },
+                    },
+                    Some(uuid) = uploads.next() => {
+                        status_txs.remove(&uuid);
+                    },
+                    Some(uuid) = runs.next() => {
+                        status_txs.remove(&uuid);
 
-        let mut response = UnboundedReceiverStream::new(rx);
-
-        let result = match response.next().await {
-            Some(response) => match response {
-                ResponseKind::Ok => Ok(()),
-                ResponseKind::Error(error) => Err(Error::RemoteError(error)),
-                _ => Err(Error::RemoteError("Invalid response".to_owned())),
+                    },
+                    _ = &mut forward_remote_requests => {}
+                }
             }
-            None => Err(Error::RemoteError("Disconnected".to_owned())),
-        };
-        self.1.lock().await.remove(&uuid);
-        result
+        });
+        Ok(Device { request_tx: local_request_tx, addr })
     }
 
-    // the problem here is holding a &mut to self while this future is completing, is not
-    // not necessary and would actually prevent response_task from making progress since
-    // it needs Pin<&mut Self> for poll
-
-    // regardless of what I do in this function, &mut self will be held until the future
-    // completes, which means I can not take &mut self (or &self) as an argument since this
-    // will prevent the future from making progress
-
-    // this appears to be a common challenge with embedding a future in a struct
-    //
-
-    pub async fn run(self: Arc<Self>,
-                     task: process::Run,
-                     signal_rx: Option<UnboundedReceiver<u32>>,
-                     stdin_rx: Option<UnboundedReceiver<BytesMut>>,
-                     stdout_tx: Option<UnboundedSender<BytesMut>>,
-                     stderr_tx: Option<UnboundedSender<BytesMut>>) -> Result<bool> {
-        let uuid = Uuid::new_v4();
-        let request = Request(uuid, RequestKind::Process(
-            process::Request::Run(task))
-        );
-
-        /* insert callback */
-        let (tx, rx) = mpsc::unbounded_channel::<ResponseKind>();
-        self.1.lock().await.insert(uuid, tx);
-        
-        /* send request */
-        self.0.lock().await
-            .send(request).await
-            .map_err(|_| Error::SendError)?;
-
-        /* process response */
-        let mut responses = UnboundedReceiverStream::new(rx);
-
+    async fn handle_run_input_output(uuid: Uuid,
+                                     mut run_status_rx: mpsc::UnboundedReceiver<protocol::ResponseKind>,
+                                     remote_requests_tx: mpsc::UnboundedSender<protocol::Request>,
+                                     signal_rx: Option<mpsc::UnboundedReceiver<u32>>,
+                                     stdin_rx: Option<mpsc::UnboundedReceiver<BytesMut>>,
+                                     stdout_tx: Option<mpsc::UnboundedSender<BytesMut>>,
+                                     stderr_tx: Option<mpsc::UnboundedSender<BytesMut>>,
+                                     exit_status_tx: oneshot::Sender<bool>) -> Uuid {
         let mut signal_rx = match signal_rx {
             Some(signal_rx) => UnboundedReceiverStream::new(signal_rx).left_stream(),
             None => futures::stream::pending().right_stream(),
         };
-
         let mut stdin_rx = match stdin_rx {
             Some(stdin_rx) => UnboundedReceiverStream::new(stdin_rx).left_stream(),
             None => futures::stream::pending().right_stream(),
         };
-        
         loop {
             tokio::select! {
                 Some(signal) = signal_rx.next() => {
-                    let request = Request(uuid, RequestKind::Process(
-                        process::Request::Signal(signal))
+                    let request = protocol::Request(uuid, protocol::RequestKind::Process(
+                        protocol::process::Request::Signal(signal))
                     );
-                    self.0.lock().await
-                        .send(request).await
-                        .map_err(|_| Error::SendError)?;
+                    let _ = remote_requests_tx.send(request);
                 },
                 Some(stdin) = stdin_rx.next() => {
-                    let request = Request(uuid, RequestKind::Process(
-                        process::Request::StandardInput(stdin))
+                    let request = protocol::Request(uuid, protocol::RequestKind::Process(
+                        protocol::process::Request::StandardInput(stdin))
                     );
-                    self.0.lock().await
-                        .send(request).await
-                        .map_err(|_| Error::SendError)?;
+                    let _ = remote_requests_tx.send(request);
 
                 },
-                Some(response) = responses.next() => match response {
-                    ResponseKind::Process(response) => match response {
-                        process::Response::Started => {},
-                        process::Response::Terminated(result) => {
-                            self.1.lock().await.remove(&uuid);
-                            return Ok(result);
+                Some(response) = run_status_rx.recv() => match response {
+                    protocol::ResponseKind::Process(response) => match response {
+                        protocol::process::Response::Started => {},
+                        protocol::process::Response::Terminated(result) => {
+                            let _ = exit_status_tx.send(result);
+                            break;
                         },
-                        process::Response::StandardOutput(data) => if let Some(stdout_tx) = &stdout_tx {
-                            if let Err(error) = stdout_tx.send(data) {
-                                log::error!("Could not forward standard output to channel: {}", error);
+                        protocol::process::Response::StandardOutput(data) => {
+                            if let Some(stdout_tx) = &stdout_tx {
+                                let _ = stdout_tx.send(data);
                             }
                         },
-                        process::Response::StandardError(data) => if let Some(stderr_tx) = &stderr_tx {
-                            if let Err(error) = stderr_tx.send(data) {
-                                log::error!("Could not forward standard error to channel: {}", error);
+                        protocol::process::Response::StandardError(data) => {
+                            if let Some(stderr_tx) = &stderr_tx {
+                                let _ = stderr_tx.send(data);
                             }
                         },
                     },
-                    _ => {}
+                    unhandled_response => log::warn!("unhandled response: {:?}", unhandled_response)
                 },
                 else => break
             }
         }
-        Err(Error::TerminationError)
+        /* return the uuid so it can be removed from the hashmap */
+        uuid
     }
 
-    pub async fn create_temp_dir(self: Arc<Self>) -> Result<String> {
-        let task = process::Run {
+    pub async fn upload(&self, path: PathBuf, filename: PathBuf, contents: Vec<u8>) -> Result<()> {
+        let upload = protocol::Upload {
+            path, filename, contents,
+        };
+        let (result_tx, result_rx) = oneshot::channel();
+        self.request_tx.send(Request::Upload { upload, result: result_tx });
+        Ok(())
+    }
+
+    pub async fn run(&self,
+                     task: protocol::process::Run,
+                     signal_rx: Option<mpsc::UnboundedReceiver<u32>>,
+                     stdin_rx: Option<mpsc::UnboundedReceiver<BytesMut>>,
+                     stdout_tx: Option<mpsc::UnboundedSender<BytesMut>>,
+                     stderr_tx: Option<mpsc::UnboundedSender<BytesMut>>) -> Result<bool> {
+        let (exit_status_tx, exit_status_rx) = oneshot::channel();
+        let request = Request::Run{ task, signal_rx, stdin_rx, stdout_tx, stderr_tx, exit_status_tx };
+        self.request_tx.send(request).map_err(|_ | Error::RequestError)?;
+        exit_status_rx.await.map_err(|_| Error::ResponseError)
+    }
+
+    pub async fn create_temp_dir(&self) -> Result<String> {
+        let task = protocol::process::Run {
             target: "mktemp".into(),
             working_dir: "/tmp".into(),
             args: vec!["-d".to_owned()],
@@ -194,8 +272,8 @@ impl Interface {
         Ok(temp_dir.trim().to_owned())
     }
 
-    pub async fn hostname(self: Arc<Self>) -> Result<String> {
-        let task = process::Run {
+    pub async fn hostname(&self) -> Result<String> {
+        let task = protocol::process::Run {
             target: "hostname".into(),
             working_dir: "/tmp".into(),
             args: vec![],
@@ -209,8 +287,8 @@ impl Interface {
         Ok(hostname.trim().to_owned())
     }
 
-    pub async fn shutdown(self: Arc<Self>) -> Result<bool> {
-        let task = process::Run {
+    pub async fn shutdown(&self) -> Result<bool> {
+        let task = protocol::process::Run {
             target: "echo".into(),
             working_dir: "/tmp".into(),
             args: vec!["shutdown".to_owned()],
@@ -218,75 +296,15 @@ impl Interface {
         self.run(task, None, None, None, None).await
     }
 
-    pub async fn reboot(self: Arc<Self>) -> Result<bool> {
-        let task = process::Run {
+    pub async fn reboot(&self) -> Result<bool> {
+        let task = protocol::process::Run {
             target: "echo".into(),
             working_dir: "/tmp".into(),
             args: vec!["reboot".to_owned()],
         };
         self.run(task, None, None, None, None).await
     }
+
+ 
 }
 
-pub type Task = Pin<Box<dyn Future<Output = ()> + Send>>;
-
-pub struct Device(Task, Arc<Interface>, Ipv4Addr);
-
-impl Device {
-    pub async fn new(addr: Ipv4Addr) -> Result<Self> {
-        let stream = TcpStream::connect((addr, 17653)).await
-            .map_err(|error| Error::IoError(error))?;
-        let (read, write) = tokio::io::split(stream);
-        let requests: Requests = SymmetricallyFramed::new(
-            FramedWrite::new(write, LengthDelimitedCodec::new()),
-            SymmetricalJson::<Request>::default(),
-        );
-        let responses : Responses = SymmetricallyFramed::new(
-            FramedRead::new(read, LengthDelimitedCodec::new()),
-            SymmetricalJson::<Response>::default(),
-        );
-        let callbacks : Callbacks = Default::default();
-        let interface = Arc::new(Interface(Mutex::new(requests), Mutex::new(callbacks)));
-        let task = Device::task(responses, interface.clone()).boxed();
-        Ok(Device(task, interface, addr))
-    }
-
-    pub fn split(self) -> (Task, Arc<Interface>, Ipv4Addr) {
-        (self.0, self.1, self.2)
-    }
-
-    pub fn unite(task: Task, interface: Arc<Interface>, addr: Ipv4Addr) -> Self {
-        Self(task, interface, addr)
-    }
-
-    async fn task(mut responses: Responses, interface: Arc<Interface>) {
-        while let Some(response) = responses.next().await {
-            match response {
-                Ok(Response(uuid, response)) => {
-                    if let Some(uuid) = uuid {
-                        if let Some(tx) = interface.1.lock().await.get_mut(&uuid) {
-                            if let Err(error)= tx.send(response) {
-                                log::error!("could not forward message: {}", error);
-                            }
-                        }
-                    }
-                    else {
-                        log::warn!("received message without uuid: {:?}", response);
-                    }
-                },
-                Err(error) => {
-                    log::error!("{}", error.to_string());
-                }
-            }
-        }
-    }
-
-}
-
-impl std::fmt::Debug for Device {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Device")
-         .field("addr", &self.2)
-         .finish()
-    }
-}

@@ -120,7 +120,6 @@ pub async fn new(message_router_addr: SocketAddr,
                 }
                 /* Drone requests */
                 Request::AddDrone(device) => {
-                    eprintln!("adding drone");
                     let (uuid, tx, task) = Drone::new(device);
                     drone_tx_map.insert(uuid, tx);
                     drone_tasks.push(task)
@@ -220,22 +219,33 @@ pub async fn new(message_router_addr: SocketAddr,
 
 async fn handle_pair_with_drone_request(drone_tx_map: &HashMap<Uuid, drone::Sender>,
                                         device: network::fernbedienung::Device) {
-    // split the device into usable components
-    let (mut task, interface, addr) = device.split();
-
-
-    let tasklet = network::fernbedienung::process::Run {
-        target: "hostname".into(),
-        working_dir: "/tmp".into(),
-        args: vec![],
-    };
     
-    tokio::select! {
-        _ = &mut task => {},
-        response = interface.clone().run(tasklet, None, None, None, None) => {}
-    }
+    // 1. write an id to the GPIO expander
+    let task = network::fernbedienung::Run {
+        target: "echo".into(),
+        working_dir: "/tmp".into(),
+        args: vec!["".to_owned()],
+    };
+    //device.run(task, None, None, stdout_tx, None)
+        // 2. query all drones to see if they have a matching id
+    // let drone_ids = drone_tx_map
+    //     .into_iter()
+    //     .filter_map(|(uuid, tx)| {
+    //         let uuid = uuid.clone();
+    //         let (response_tx, response_rx) = oneshot::channel();
+    //         let request = drone::Request::GetId(response_tx);
+    //         tx.send(request).map(|_| async move {
+    //             (uuid, response_rx.await)
+    //         }).ok()
+    //     })
+    //     .collect::<FuturesUnordered<_>>()
+    //     .filter_map(|(uuid, result)| async move {
+    //         result.ok().map(|state| (uuid, state))
+    //     })
+    //     .collect::<Vec<_>>().await;
+    
 
-    let device = network::fernbedienung::Device::unite(task, interface, addr);
+    // 3. set the 
 }
 
 

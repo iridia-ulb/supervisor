@@ -58,37 +58,29 @@ pub async fn new(network_addr_rx: mpsc::UnboundedReceiver<Ipv4Addr>,
     
 async fn associate(device: Device, arena_request_tx: &mpsc::UnboundedSender<arena::Request>) {
     match device {
-        Device::Fernbedienung(device) => {
-            /* the task of the device needs to be run in order for hostname to resolve */
-            let (mut task, interface, addr) = device.split();
-            tokio::select! {
-                _ = &mut task => {},
-                hostname = interface.clone().hostname() => match hostname {
-                    Ok(hostname) => {
-                        let device = fernbedienung::Device::unite(task, interface, addr);
-                        match &hostname[..] {
-                            "ToshibaLaptop" => {
-                                if let Err(error) = arena_request_tx.send(arena::Request::AddPiPuck(device)) {
-                                    log::error!("Could not add Pi-Puck to the arena: {}", error);
-                                }
-                            },
-                            "raspberrypi0-wifi" => {
-                                if let Err(error) = arena_request_tx.send(arena::Request::AddPiPuck(device)) {
-                                    log::error!("Could not add Pi-Puck to the arena: {}", error);
-                                }
-                            },
-                            "upcore" => {
-                                if let Err(error) = arena_request_tx.send(arena::Request::PairWithDrone(device)) {
-                                    log::error!("Could not pair drone to it's Xbee: {}", error);
-                                }
-                            },
-                            _ => log::warn!("Unrecognized fernbedienung device {} detected", hostname),
+        Device::Fernbedienung(device) => match device.hostname().await {
+            Ok(hostname) => {
+                match &hostname[..] {
+                    "ToshibaLaptop" => {
+                        if let Err(error) = arena_request_tx.send(arena::Request::AddPiPuck(device)) {
+                            log::error!("Could not add Pi-Puck to the arena: {}", error);
                         }
                     },
-                    Err(error) => {
-                        // the IP address should be returned to our pool here
-                    }
+                    "raspberrypi0-wifi" => {
+                        if let Err(error) = arena_request_tx.send(arena::Request::AddPiPuck(device)) {
+                            log::error!("Could not add Pi-Puck to the arena: {}", error);
+                        }
+                    },
+                    "upcore" => {
+                        if let Err(error) = arena_request_tx.send(arena::Request::PairWithDrone(device)) {
+                            log::error!("Could not pair drone to it's Xbee: {}", error);
+                        }
+                    },
+                    _ => log::warn!("Unrecognized fernbedienung device {} detected", hostname),
                 }
+            },
+            Err(error) => {
+                // the IP address should be returned to our pool here
             }
         },
         Device::Xbee(device) => {
