@@ -66,13 +66,10 @@ pub type Callbacks = HashMap<Uuid, mpsc::UnboundedSender<ResponseKind>>;
 pub struct Interface(Mutex<Requests>, Mutex<Callbacks>);
 
 impl Interface {
-    pub async fn upload<P, F, C>(self: Arc<Self>, path: P, filename: F, contents: C) -> Result<()>
-        where P: Into<PathBuf>, F: Into<PathBuf>, C: Into<Vec<u8>> {
+    pub async fn upload(self: Arc<Self>, path: PathBuf, filename: PathBuf, contents: Vec<u8>) -> Result<()> {
         let uuid = Uuid::new_v4();
         let request = Request(uuid, RequestKind::Upload(Upload {
-            filename: filename.into(),
-            path: path.into(),
-            contents: contents.into()
+            filename, path, contents,
         }));
 
         let (tx, rx) = mpsc::unbounded_channel::<ResponseKind>();

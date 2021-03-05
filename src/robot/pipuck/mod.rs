@@ -7,7 +7,7 @@ use crate::network::fernbedienung;
 mod task;
 
 pub use task::{
-    Action, Error, Receiver, Request, Response, Sender, State
+    Action, Error, Receiver, Request, Sender, State
 };
 
 pub struct PiPuck(JoinHandle<(Uuid, Ipv4Addr)>);

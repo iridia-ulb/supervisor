@@ -12,20 +12,15 @@ pub struct State {
 }
 
 pub enum Request {
-    GetState,
+    GetState(oneshot::Sender<State>),
     Pair(fernbedienung::Device),
     Execute(Action),
     //Upload(crate::software::Software),
-    GetId,
+    GetId(oneshot::Sender<Result<u8>>),
 }
 
-pub enum Response {
-    State(State),
-    Id(u8)
-}
-
-pub type Sender = mpsc::UnboundedSender<(Request, Option<oneshot::Sender<Response>>)>;
-pub type Receiver = mpsc::UnboundedReceiver<(Request, Option<oneshot::Sender<Response>>)>;
+pub type Sender = mpsc::UnboundedSender<Request>;
+pub type Receiver = mpsc::UnboundedReceiver<Request>;
 
 // Note: the power off, shutdown, reboot up core actions
 // should change the state to standby which, in turn,
@@ -63,20 +58,23 @@ pub async fn new(uuid: Uuid, rx: Receiver, mut xbee: xbee::Device) -> (Uuid, Ipv
     init(&mut xbee);
     /* wait for requests */
     let mut requests = UnboundedReceiverStream::new(rx);
-    while let Some((request, callback)) = requests.next().await {
+    while let Some(request) = requests.next().await {
         match request {
-            Request::GetState => {}
+            Request::GetState(callback) => {
+                let state = State {
+                    xbee: xbee.addr,
+                    linux: None,
+                    actions: vec![],
+                };
+                let _ = callback.send(state);
+            }
             Request::Pair(fernbedienung) => {
 
             }
             Request::Execute(_) => {}
-            Request::GetId => {
-                if let Some(callback) = callback {
-                    if let Ok(id) = get_id(&mut xbee).await {
-                        let _ = callback.send(Response::Id(id));
-                    }
-                }
-            }
+            Request::GetId(callback) => {
+                let _ = callback.send(get_id(&mut xbee).await);
+            },
         }
 
     }

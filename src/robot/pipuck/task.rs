@@ -1,7 +1,7 @@
-use futures::{Future, stream::FuturesUnordered};
+use futures::{Future, TryFutureExt, TryStreamExt, stream::FuturesUnordered};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use std::{net::{Ipv4Addr, SocketAddr}, sync::Arc};
+use std::{net::{Ipv4Addr, SocketAddr}, path::PathBuf, sync::Arc};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
 use crate::network::fernbedienung;
@@ -14,27 +14,15 @@ pub struct State {
 }
 
 pub enum Request {
-    State,
+    State(oneshot::Sender<State>),
     Execute(Action),
-    Upload(crate::software::Software),
-    ExperimentStart(SocketAddr, mpsc::UnboundedSender<journal::Request>),
+    Upload(crate::software::Software, oneshot::Sender<Result<()>>),
+    ExperimentStart(SocketAddr, mpsc::UnboundedSender<journal::Request>, oneshot::Sender<Result<()>>),
     ExperimentStop,
 }
 
-/*
- note: this has similar semantics to a result
- although the implications of the monomorphization could make the code
-  complicated or even incorrect
-*/
-#[derive(Debug)]
-pub enum Response {
-    State(State),
-    Ok,
-    Error(Error),
-}
-
-pub type Sender = mpsc::UnboundedSender<(Request, oneshot::Sender<Response>)>;
-pub type Receiver = mpsc::UnboundedReceiver<(Request, oneshot::Sender<Response>)>;
+pub type Sender = mpsc::UnboundedSender<Request>;
+pub type Receiver = mpsc::UnboundedReceiver<Request>;
 
 #[derive(Copy, Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub enum Action {
@@ -66,6 +54,8 @@ pub enum Error {
     InvalidControlSoftware,
 }
 
+pub type Result<T> = std::result::Result<T, Error>;
+
 pub async fn new(uuid: Uuid, rx: Receiver, device: fernbedienung::Device) -> (Uuid, Ipv4Addr) {
     let mut argos_path: Option<String> = Default::default();
     let mut argos_config: Option<String> = Default::default();
@@ -76,65 +66,58 @@ pub async fn new(uuid: Uuid, rx: Receiver, device: fernbedienung::Device) -> (Uu
         
         let mut processes : FuturesUnordered<_> = Default::default();
         let mut forward : FuturesUnordered<_> = Default::default();
-        
+
         loop {
             tokio::select! {
-                Some((request, callback)) = requests.next() => {
-                    let response = match request {
-                        Request::State => {
+                Some(request) = requests.next() => {
+                    match request {
+                        Request::State(callback) => {
                             let state = State {
                                 linux: device_addr,
                                 actions: vec![Action::RpiShutdown, Action::RpiReboot]
                             };
-                            Response::State(state)
+                            let _ = callback.send(state);
                         }
                         Request::Execute(action) => match action {
                             Action::RpiReboot => {
                                 if let Err(error) = device_interface.clone().reboot().await {
                                     log::error!("Reboot failed: {}", error);
                                 }
-                                Response::Ok
-                                //break;
+                                break;
                             },
                             Action::RpiShutdown => {
                                 if let Err(error) = device_interface.clone().shutdown().await {
-                                    log::error!("Shut down failed: {}", error);
+                                    log::error!("Shutdown failed: {}", error);
                                 }
-                                Response::Ok
-                                //break;
+                                break;
                             }
                         },
-                        Request::Upload(software) => {
+                        Request::Upload(software, callback) => {
                             argos_config = software.argos_config()
                                 .map(|(argos_config, _)| argos_config.to_owned())
                                 .ok();
-                            match device_interface.clone().create_temp_dir().await {
-                                Ok(path) => {
-                                    let upload_result = software.0.into_iter()
-                                        .map(|(filename, contents)| {
-                                            device_interface.clone().upload(&path, filename, contents)
-                                        })
-                                        .collect::<FuturesUnordered<_>>()
-                                        .collect::<Result<Vec<_>, _>>().await;
-                                    match upload_result {
-                                        Ok(_) => {
-                                            argos_path.get_or_insert(path);
-                                            Response::Ok
-                                        },
-                                        Err(error) => Response::Error(Error::FernbedienungError(error))
-                                    }
-                                }
-                                Err(error) => Response::Error(Error::FernbedienungError(error))
-                            }
+                            let upload_result = device_interface.clone().create_temp_dir()
+                                .map_err(|error| Error::FernbedienungError(error))
+                                .and_then(|path: String| software.0.into_iter()
+                                    .map(|(filename, contents)| {
+                                        let path = PathBuf::from(&path);
+                                        let filename = PathBuf::from(&filename);
+                                        device_interface.clone().upload(path, filename, contents)
+                                    })
+                                    .collect::<FuturesUnordered<_>>()
+                                    .map_err(|error| Error::FernbedienungError(error))
+                                    .collect::<Result<Vec<_>>>()
+                                    .map_ok(|vec| path)
+                                ).await;
+                            callback.send(upload_result.map(|path| {
+                                argos_path.get_or_insert(path);
+                            }));
                         },
-                        // step 1, connect this method (DONE)
-                        // step 2, modify argos to take a controller and ip address to the router
-                        // step 3, set .argos file so that control terminates after X ticks (DONE)
-                        // step 4, add channel for issuing signal when experiment stop is requested
-                        // step 5, forward standard input and standard output to journal (DONE)
-                        Request::ExperimentStart(message_router_addr, journal_requests_tx) => {
-                            match argos_config.take() {
+                        Request::ExperimentStart(message_router_addr, journal_requests_tx, callback) => {
+                            let response = match argos_config.take() {
+                                None => Err(Error::InvalidControlSoftware),
                                 Some(argos_config) => match argos_path.take() {
+                                    None => Err(Error::InvalidControlSoftware),
                                     Some(argos_path) => {
                                         let task = fernbedienung::process::Run {
                                             target: "argos3".into(),
@@ -178,19 +161,13 @@ pub async fn new(uuid: Uuid, rx: Receiver, device: fernbedienung::Device) -> (Uu
                                                 }
                                             }
                                         });
-                                        Response::Ok
+                                        Ok(())
                                     }
-                                    None => Response::Error(Error::InvalidControlSoftware),
                                 },
-                                None => Response::Error(Error::InvalidControlSoftware),
-                            }
+                            };
+                            let _ = callback.send(response);
                         },
-                        Request::ExperimentStop => {
-                            Response::Ok
-                        }
-                    };
-                    if let Err(response) = callback.send(response) {
-                        log::error!("Could not respond with {:?}", response);
+                        Request::ExperimentStop => {}
                     }
                 },
                 Some(exit_success) = processes.next() => {

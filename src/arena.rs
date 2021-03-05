@@ -120,6 +120,7 @@ pub async fn new(message_router_addr: SocketAddr,
                 }
                 /* Drone requests */
                 Request::AddDrone(device) => {
+                    eprintln!("adding drone");
                     let (uuid, tx, task) = Drone::new(device);
                     drone_tx_map.insert(uuid, tx);
                     drone_tasks.push(task)
@@ -169,7 +170,7 @@ pub async fn new(message_router_addr: SocketAddr,
                     }
                 },
                 Request::ForwardPiPuckAction(uuid, action) => 
-                    handle_forward_pipuck_action_request(&pipuck_tx_map, uuid, action).await,
+                    handle_forward_pipuck_action_request(&pipuck_tx_map, uuid, action),
                 /*
                 Request::ForwardPiPuckActionAll(action) => {
                     for (uuid, tx) in pipuck_tx_map.iter() {
@@ -267,7 +268,7 @@ async fn start_experiment(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>,
             let uuid = uuid.clone();
             let (response_tx, response_rx) = oneshot::channel();
             let software = pipuck_software.clone();
-            let request = (pipuck::Request::Upload(software), response_tx);
+            let request = pipuck::Request::Upload(software, response_tx);
             tx.send(request)
                 .map_err(|_| Error::PiPuckError(uuid, pipuck::Error::RequestError))
                 .map(|_| async move {
@@ -277,14 +278,10 @@ async fn start_experiment(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>,
         .collect::<Result<FuturesUnordered<_>>>()?
         .map(|(uuid, result)| result
             .map_err(|_| Error::PiPuckError(uuid, pipuck::Error::ResponseError))
-            .and_then(|response| match response {
-                pipuck::Response::Ok => Ok(()),
-                pipuck::Response::Error(error) => Err(Error::PiPuckError(uuid, error)),
-                _ => Err(Error::PiPuckError(uuid, pipuck::Error::ResponseError))
-            })          
-        )   
-        .try_collect::<Vec<_>>().await?;
-
+            .and_then(|response| {
+                response.map_err(|error| Error::PiPuckError(uuid, error))
+            })
+        ).try_collect::<Vec<_>>().await?;
     let (callback_tx, callback_rx) = oneshot::channel();
     journal_requests_tx
         .send(journal::Request::Start(callback_tx))
@@ -299,9 +296,11 @@ async fn start_experiment(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>,
     let pipuck_start = pipuck_tx_map.into_iter()
         .map(|(uuid, tx)| {
             let uuid = uuid.clone();
+            let message_router_addr = message_router_addr.clone();
+            let journal_requests_tx = journal_requests_tx.clone();
             let (response_tx, response_rx) = oneshot::channel();
-            let request = (pipuck::Request::ExperimentStart(message_router_addr.clone(),
-                                                            journal_requests_tx.clone()), response_tx);
+            let request = pipuck::Request::ExperimentStart(
+                message_router_addr, journal_requests_tx, response_tx);
             tx.send(request)
                 .map_err(|_| Error::PiPuckError(uuid, pipuck::Error::RequestError))
                 .map(|_| async move {
@@ -311,12 +310,10 @@ async fn start_experiment(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>,
         .collect::<Result<FuturesUnordered<_>>>()?
         .map(|(uuid, result)| result
             .map_err(|_| Error::PiPuckError(uuid, pipuck::Error::ResponseError))
-            .and_then(|response| match response {
-                pipuck::Response::Ok => Ok(()),
-                pipuck::Response::Error(error) => Err(Error::PiPuckError(uuid, error)),
-                _ => Err(Error::PiPuckError(uuid, pipuck::Error::ResponseError))
-            }))
-        .try_collect::<Vec<_>>().await;
+            .and_then(|response| {
+                response.map_err(|error| Error::PiPuckError(uuid, error))
+            })
+        ).try_collect::<Vec<_>>().await;
     if let Err(error) = pipuck_start {
         log::error!("Failed to start experiment: {}", error);
     }
@@ -325,22 +322,14 @@ async fn start_experiment(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>,
 }
 
 
-async fn handle_forward_pipuck_action_request(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>,
-                                              uuid: Uuid,
-                                              action: pipuck::Action) {
+fn handle_forward_pipuck_action_request(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>,
+                                        uuid: Uuid,
+                                        action: pipuck::Action) {
     match pipuck_tx_map.get(&uuid) {
         Some(tx) => {
             let request = pipuck::Request::Execute(action);
-            let (response_tx, response_rx) = oneshot::channel();
-            if let Err(error) = tx.send((request, response_tx)) {
+            if let Err(error) = tx.send(request) {
                 log::warn!("Could not send action {:?} to Pi-Puck {}: {}", action, uuid, error);
-            }
-            match response_rx.await {
-                Ok(response) => match response {
-                    pipuck::Response::Ok => {}
-                    _ => log::warn!("Unexpected response from Pi-Puck {}", uuid)
-                }
-                Err(_) => log::warn!("No response from Pi-Puck {}", uuid)
             }
         }
         None => log::warn!("Could not find Pi-Puck {}", uuid)
@@ -354,17 +343,14 @@ async fn handle_get_pipucks_request(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender
         .filter_map(|(uuid, tx)| {
             let uuid = uuid.clone();
             let (response_tx, response_rx) = oneshot::channel();
-            let request = (pipuck::Request::State, response_tx);
+            let request = pipuck::Request::State(response_tx);
             tx.send(request).map(|_| async move {
                 (uuid, response_rx.await)
             }).ok()
         })
         .collect::<FuturesUnordered<_>>()
         .filter_map(|(uuid, result)| async move {
-            result.ok().and_then(|response| match response {
-                pipuck::Response::State(state) => Some((uuid, state)),
-                _ => None
-            })
+            result.ok().map(|state| (uuid, state))
         })
         .collect::<HashMap<_,_>>().await;
     if let Err(_) = callback.send(pipuck_states) {
@@ -378,7 +364,7 @@ async fn handle_forward_drone_action_request(drone_tx_map: &HashMap<Uuid, drone:
     match drone_tx_map.get(&uuid) {
         Some(tx) => {
             let request = drone::Request::Execute(action);
-            if let Err(error) = tx.send((request, None)) {
+            if let Err(error) = tx.send(request) {
                 log::warn!("Could not send action {:?} to drone {}: {}", action, uuid, error);
             }
         }
@@ -393,17 +379,14 @@ async fn handle_get_drones_request(drone_tx_map: &HashMap<Uuid, drone::Sender>,
         .filter_map(|(uuid, tx)| {
             let uuid = uuid.clone();
             let (response_tx, response_rx) = oneshot::channel();
-            let request = (drone::Request::GetState, Some(response_tx));
+            let request = drone::Request::GetState(response_tx);
             tx.send(request).map(|_| async move {
                 (uuid, response_rx.await)
             }).ok()
         })
         .collect::<FuturesUnordered<_>>()
         .filter_map(|(uuid, result)| async move {
-            result.ok().and_then(|response| match response {
-                drone::Response::State(state) => Some((uuid, state)),
-                _ => None
-            })
+            result.ok().map(|state| (uuid, state))
         })
         .collect::<HashMap<_,_>>().await;
     if let Err(_) = callback.send(drone_states) {

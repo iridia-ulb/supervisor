@@ -7,7 +7,7 @@ use crate::network::xbee;
 mod task;
 
 pub use task::{
-    Action, Error, Receiver, Request, Response, Sender, State
+    Action, Error, Receiver, Request, Sender, State
 };
 
 pub struct Drone(JoinHandle<(Uuid, Ipv4Addr, Option<Ipv4Addr>)>);

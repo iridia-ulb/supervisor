@@ -1,6 +1,5 @@
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Action {

@@ -20,14 +20,14 @@ pub enum Device {
 
 #[derive(thiserror::Error, Debug)]
 enum Error {
-    /*
-    #[error("Error communicating with Xbee")]
-    XbeeConnectionError {
-        source: xbee::Error,
-    },
-    */
     #[error("Association timed out")]
     Timeout,
+
+    #[error("Non-matching IP address")]
+    IpMismatch,
+
+    #[error(transparent)]
+    XbeeError(#[from] xbee::Error),
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -107,8 +107,17 @@ async fn probe(addr: Ipv4Addr, delay: Option<Duration>) -> (Ipv4Addr, Result<Dev
         tokio::time::sleep(delay).await;
     }
     /* attempt to connect to Xbee for 500 ms */
-    let assoc_xbee_attempt =
-        timeout(Duration::from_millis(500), xbee::Device::new(addr));
+    let assoc_xbee_attempt = timeout(Duration::from_millis(500), async {
+        let device = xbee::Device::new(addr).await?;
+        /* validate the connection by checking if the remote IP address matches
+           the IP address that we connected to */
+        if addr == device.ip().await? {
+            Ok(device)
+        }
+        else {
+            Err(Error::IpMismatch)
+        }
+    });
     if let Ok(assoc_xbee_result) = assoc_xbee_attempt.await {
         /* TODO consider the Xbee error variant? */
         if let Ok(device) = assoc_xbee_result {
