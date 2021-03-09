@@ -43,6 +43,9 @@ async fn main() {
     }
     let message_router_addr : SocketAddr = ([127, 0, 0, 1], 4950).into();
 
+    /* listen for the ctrl-c shutdown signal */
+    let sigint_task = tokio::signal::ctrl_c();
+
     /* create journal task */
     let journal_task = journal::new(journal_requests_rx);
 
@@ -72,7 +75,26 @@ async fn main() {
     let server_addr : SocketAddr = ([127, 0, 0, 1], 3030).into();
     let webui_task = warp::serve(socket_route.or(static_route)).run(server_addr);
 
-    /* run tasks to completion on this thread */
-    let results = tokio::join!(arena_task, journal_task, network_task, router_task, webui_task);
-    log::info!("shutdown ({:?})", results);
+    /* pin the futures so that they can be polled */
+    tokio::pin!(arena_task);
+    tokio::pin!(journal_task);
+    tokio::pin!(network_task);
+    tokio::pin!(router_task);
+    tokio::pin!(webui_task);
+    tokio::pin!(sigint_task);
+
+    /* attempt to complete the futures */
+    tokio::select! {
+        _ = &mut arena_task => {},
+        _ = &mut journal_task => {},
+        _ = &mut network_task => {},
+        _ = &mut router_task => {},
+        _ = &mut webui_task => {},
+        _ = &mut sigint_task => {
+            /* TODO: is it safe to do this? should messages be broadcast to robots */
+            /* what happens if ARGoS is running on the robots, does breaking the
+               connection to fernbedienung kill ARGoS? How does the Pixhawk respond */
+            log::info!("Shutting down");
+        }
+    }
 }

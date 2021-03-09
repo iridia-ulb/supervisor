@@ -170,7 +170,8 @@ pub async fn new(uuid: Uuid, mut arena_rx: Receiver, device: fernbedienung::Devi
             },
             Some(_) = forward.next() => {
                 log::info!("Forwarding of standard output/error completed");
-            }
+            },
+            else => break,
         }
     }
     (uuid, device.addr)
