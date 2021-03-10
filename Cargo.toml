@@ -37,6 +37,7 @@ env_logger = { version = "0.8" }
 anyhow = "1.0"
 thiserror = { version = "1.0" }
 
+webbrowser = { version = "0.5" }
 
 
 
