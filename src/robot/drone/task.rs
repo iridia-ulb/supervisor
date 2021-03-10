@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use std::net::Ipv4Addr;
-use tokio::sync::{mpsc, oneshot};
+use std::{net::Ipv4Addr, time::Duration};
+use tokio::{sync::{Mutex, mpsc, oneshot}, time::timeout};
 use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
 use crate::network::{fernbedienung, xbee};
 
@@ -47,44 +47,131 @@ pub enum Action {
 pub enum Error {
     #[error(transparent)]
     XbeeError(#[from] xbee::Error),
+
     #[error(transparent)]
     FernbedienungError(#[from] fernbedienung::Error),
+
+    #[error("Could not communicate with Xbee")]
+    XbeeTimeout,
+
+    #[error("{0:?} has not been implemented")]
+    UnimplementedAction(Action),
+
+    #[error("{0:?} is not currently valid")]
+    InvalidAction(Action),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-pub async fn new(uuid: Uuid, rx: Receiver, mut xbee: xbee::Device) -> (Uuid, Ipv4Addr, Option<Ipv4Addr>) {
+pub async fn new(uuid: Uuid, mut rx: Receiver, mut xbee: xbee::Device) -> (Uuid, Ipv4Addr, Option<Ipv4Addr>) {
     /* initialize the xbee pin and mux */
     init(&mut xbee);
-    /* wait for requests */
-    let mut requests = UnboundedReceiverStream::new(rx);
-    while let Some(request) = requests.next().await {
-        match request {
-            Request::GetState(callback) => {
-                let state = State {
-                    xbee: xbee.addr,
-                    linux: None,
-                    actions: vec![],
-                };
-                let _ = callback.send(state);
-            }
-            Request::Pair(fernbedienung) => {
-
-            }
-            Request::Execute(_) => {}
-            Request::GetId(callback) => {
-                let _ = callback.send(get_id(&mut xbee).await);
-            },
-        }
-
-    }
+    /* connection to the fernbedienung service */
+    let mut fernbedienung : Option<fernbedienung::Device> = None;
     
-    (uuid, xbee.addr, None)
-
-    // if Fernbedienung exits, we should go into emergency mode and take control over the drone using the Xbee
+    /* vector for holding the current pin states of the xbee */
+    let xbee_pin_states : Mutex<Vec<(xbee::Pin, bool)>> = Default::default();
+    let poll_pin_states_task = poll_xbee_pin_states(&xbee, &xbee_pin_states);
+    tokio::pin!(poll_pin_states_task);
+    /* task main loop */
+    loop {
+        tokio::select! {
+            /* update pin states */
+            task_result = &mut poll_pin_states_task => {
+                /* this future can only complete with an error */
+                /* TODO is there anything more meaningful we can do here? */
+                if let Err(error) = task_result {
+                    log::warn!("Could not poll pin states: {}", error);
+                }
+                break;
+            },
+            /* wait for requests */
+            request = rx.recv() => match request {
+                None => break,
+                Some(request) => match request {
+                    Request::GetState(callback) => {
+                        let state = State {
+                            xbee: xbee.addr,
+                            linux: fernbedienung.as_ref().map(|dev| dev.addr),
+                            actions: actions(&xbee_pin_states).await,
+                        };
+                        let _ = callback.send(state);
+                    }
+                    Request::Pair(device) => {
+                        fernbedienung = Some(device);
+                    }
+                    Request::Execute(requested_action) => {
+                        /* prevent the execution of invalid actions */
+                        let result = actions(&xbee_pin_states).await
+                            .into_iter().find(|action| action == &requested_action)
+                            .ok_or(Error::InvalidAction(requested_action))
+                            .and_then(|action| match action {
+                                Action::UpCorePowerOn => set_upcore_power(&xbee, true),
+                                Action::UpCorePowerOff => set_upcore_power(&xbee, false),
+                                Action::PixhawkPowerOn => set_pixhawk_power(&xbee, true),
+                                Action::PixhawkPowerOff => set_pixhawk_power(&xbee, false),
+                                _ => Err(Error::UnimplementedAction(action)),
+                            });
+                        if let Err(error) = result {
+                            log::warn!("Could not execute {:?}: {}", requested_action, error);
+                        }
+                    },
+                    Request::GetId(callback) => {
+                        let _ = callback.send(get_id(&xbee).await);
+                    },
+                },
+            }
+        }
+    }
+    /* if paired with a fernbedienung service, map it to just its ip address. This causes
+       the structure to drop (including the tx channel) which should then shutdown the
+       internal task that was created with tokio::spawn */
+    let fernbedienung_addr = fernbedienung.map(|dev| dev.addr);
+    /* return the uuid and ip addresses for clean up/reuse */
+    (uuid, xbee.addr, fernbedienung_addr)
 }
 
-async fn get_id(xbee: &mut xbee::Device) -> Result<u8> {
+async fn poll_xbee_pin_states(xbee: &xbee::Device, pin_states: &Mutex<Vec<(xbee::Pin, bool)>>) -> Result<()> {
+    let mut remaining_timeouts = 3u32;
+    loop {
+        match tokio::time::timeout(Duration::from_millis(500), xbee.read_inputs()).await {
+            Ok(read_inputs_result) => {
+                *pin_states.lock().await = read_inputs_result?;
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                remaining_timeouts = 3;
+            }
+            Err(_) => match remaining_timeouts {
+                0 => break Err(Error::XbeeTimeout),
+                _ => remaining_timeouts -= 1,
+            }
+        }
+        
+    }
+}
+
+async fn actions(pin_states: &Mutex<Vec<(xbee::Pin, bool)>>) -> Vec<Action> {
+    let mut actions = Vec::new();
+    let pin_states = pin_states.lock().await;
+    if let Some((_, state)) = pin_states.iter().find(|(pin, _)| pin == &xbee::Pin::DIO11) {
+        match state {
+            true => actions.push(Action::UpCorePowerOff),
+            false => actions.push(Action::UpCorePowerOn),
+        }
+    }
+    if let Some((_, state)) = pin_states.iter().find(|(pin, _)| pin == &xbee::Pin::DIO12) {
+        match state {
+            true => actions.push(Action::PixhawkPowerOff),
+            false => actions.push(Action::PixhawkPowerOn),
+        }
+    }
+    actions
+}
+
+
+// todo read inputs in a loop and use as a ping/means of tracking the 
+// state of the xbee
+// if no response in X ms, disconnect (?)
+async fn get_id(xbee: &xbee::Device) -> Result<u8> {
     let mut id: u8 = 0;
     for (pin, value) in xbee.read_inputs().await? {
         let bit_index = pin as usize;
@@ -96,7 +183,7 @@ async fn get_id(xbee: &mut xbee::Device) -> Result<u8> {
     Ok(id)
 }
 
-fn init(xbee: &mut xbee::Device) -> Result<()> {
+fn init(xbee: &xbee::Device) -> Result<()> {
     /* set pin modes */
     let pin_modes = vec![
         /* The UART pins need to be disabled for the moment */
@@ -121,14 +208,12 @@ fn init(xbee: &mut xbee::Device) -> Result<()> {
     Ok(())
 }
 
-pub fn set_power(xbee: &mut xbee::Device, upcore: Option<bool>, pixhawk: Option<bool>) -> Result<()> {
-    let mut outputs = Vec::new();
-    if let Some(enable) = upcore {
-        outputs.push((xbee::Pin::DIO11, enable));
-    }
-    if let Some(enable) = pixhawk {
-        outputs.push((xbee::Pin::DIO12, enable));
-    }
-    xbee.write_outputs(outputs)?;
+pub fn set_upcore_power(xbee: &xbee::Device, enable: bool) -> Result<()> {
+    xbee.write_outputs(vec![(xbee::Pin::DIO11, enable)])?;
+    Ok(())
+}
+
+pub fn set_pixhawk_power(xbee: &xbee::Device, enable: bool) -> Result<()> {
+    xbee.write_outputs(vec![(xbee::Pin::DIO12, enable)])?;
     Ok(())
 }
