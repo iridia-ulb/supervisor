@@ -57,8 +57,6 @@ async fn associate(arena_request_tx: &mpsc::UnboundedSender<arena::Request>,
     /* inspect result */
     if let Ok(xbee_result) = xbee_attempt {
         if let Ok((xbee_addr, xbee_device)) = xbee_result {
-            /* check if the remote address is the same as the address we are
-               attempting to connect to */
             if xbee_addr == addr {
                 return arena_request_tx.send(arena::Request::AddDrone(xbee_device))
                     .map_err(|_| Error::AssociateError(addr));
@@ -79,7 +77,7 @@ async fn associate(arena_request_tx: &mpsc::UnboundedSender<arena::Request>,
                 "raspberrypi0-wifi" | "ToshibaLaptop" =>
                     arena_request_tx.send(arena::Request::AddPiPuck(device))
                         .map_err(|_| Error::AssociateError(addr)),
-                "upcore" =>
+                "up-core" =>
                     arena_request_tx.send(arena::Request::PairWithDrone(device))
                         .map_err(|_| Error::AssociateError(addr)),
                 _ => Err(Error::AssociateError(addr)),

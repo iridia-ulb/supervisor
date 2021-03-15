@@ -3,11 +3,6 @@ pub mod process {
     use bytes::BytesMut;
     use serde::{Deserialize, Serialize};
 
-    #[derive(Clone, Copy, Debug, Deserialize)]
-    pub enum Source {
-        Stdout, Stderr
-    }
-
     #[derive(Debug, Serialize)]
     pub struct Run {
         pub target: PathBuf,

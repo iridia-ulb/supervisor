@@ -49,7 +49,7 @@ pub enum PinMode {
     OutputDefaultHigh = 5,
 }
 
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Pin {
     DIO0 = 0,
     DIO1 = 1,

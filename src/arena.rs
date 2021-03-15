@@ -1,12 +1,13 @@
 
 use serde::{Deserialize, Serialize};
 use software::Software;
-use std::{collections::HashMap, net::{Ipv4Addr, SocketAddr}};
+use std::{collections::HashMap, net::{Ipv4Addr, SocketAddr}, time::Duration};
 use futures::{StreamExt, TryStreamExt, stream::FuturesUnordered};
 use log;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 use tokio_stream::wrappers::UnboundedReceiverStream;
+use rand::Rng;
 
 use crate::robot::{pipuck::{self, PiPuck}, drone::{self, Drone}};
 use crate::software;
@@ -27,6 +28,9 @@ pub enum Error {
     
     #[error(transparent)]
     SoftwareError(#[from] software::Error),
+
+    #[error(transparent)]
+    FernbedienungError(#[from] network::fernbedienung::Error),
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -75,7 +79,6 @@ pub async fn new(message_router_addr: SocketAddr,
 
     let mut requests = UnboundedReceiverStream::new(arena_request_rx);
     
-    // does my inception of an active object allow me to put this together?
     let mut drone_software : crate::software::Software = Default::default();
     let mut drone_tasks : FuturesUnordered<Drone> = Default::default();
     let mut drone_tx_map : HashMap<Uuid, drone::Sender> = Default::default();
@@ -150,7 +153,7 @@ pub async fn new(message_router_addr: SocketAddr,
                 Request::GetDrones(callback) => 
                     handle_get_drones_request(&drone_tx_map, callback).await,
                 Request::PairWithDrone(device) =>
-                    handle_pair_with_drone_request(&drone_tx_map, device).await,
+                    { handle_pair_with_drone_request(&drone_tx_map, device).await; },
                 /* Pi-Puck requests */
                 Request::AddPiPuck(device) => {
                     let (uuid, tx, task) = PiPuck::new(device);
@@ -217,35 +220,73 @@ pub async fn new(message_router_addr: SocketAddr,
     log::info!("arena task is complete");
 }
 
+// TODO send the ip address back if pairing unsucessful
 async fn handle_pair_with_drone_request(drone_tx_map: &HashMap<Uuid, drone::Sender>,
-                                        device: network::fernbedienung::Device) {
-    
-    // 1. write an id to the GPIO expander
-    let task = network::fernbedienung::Run {
-        target: "echo".into(),
+                                        device: network::fernbedienung::Device) -> Result<()> {
+    /* upload the set id script */
+    let set_id_script = include_bytes!("scripts/write_upcore_id.sh");
+    device.upload("/tmp".into(), "write_upcore_id.sh".into(), set_id_script.to_vec()).await
+        .map_err(|error| Error::FernbedienungError(error))?;
+    /* get a random id from between 0 and 15 (15 is intentionally not included) */
+    let mut rng = rand::thread_rng();
+    let random_id : u8 = rng.gen_range(0..15);
+    /* run the script with the random id */
+    let script = network::fernbedienung::Run {
+        target: "exec".into(),
         working_dir: "/tmp".into(),
-        args: vec!["".to_owned()],
+        args: vec!["./write_upcore_id.sh".into(), random_id.to_string()],
     };
-    //device.run(task, None, None, stdout_tx, None)
-        // 2. query all drones to see if they have a matching id
-    // let drone_ids = drone_tx_map
-    //     .into_iter()
-    //     .filter_map(|(uuid, tx)| {
-    //         let uuid = uuid.clone();
-    //         let (response_tx, response_rx) = oneshot::channel();
-    //         let request = drone::Request::GetId(response_tx);
-    //         tx.send(request).map(|_| async move {
-    //             (uuid, response_rx.await)
-    //         }).ok()
-    //     })
-    //     .collect::<FuturesUnordered<_>>()
-    //     .filter_map(|(uuid, result)| async move {
-    //         result.ok().map(|state| (uuid, state))
-    //     })
-    //     .collect::<Vec<_>>().await;
-    
+    let (signal_tx, signal_rx) = mpsc::unbounded_channel();
 
-    // 3. set the 
+    let write_upcore_id = device.run(script, Some(signal_rx), None, None, None);
+    let (write_id_result, mut read_ids) = tokio::join!(write_upcore_id, async {
+        /* give time for the script to start */
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        /* read the ids */
+        let xbee_ids = drone_tx_map
+        .into_iter()
+        .filter_map(|(uuid, tx)| {
+            let uuid = uuid.clone();
+            let (response_tx, response_rx) = oneshot::channel();
+            let request = drone::Request::GetId(response_tx);
+            tx.send(request).map(|_| async move {
+                (uuid, response_rx.await)
+            }).ok()
+        })
+        .collect::<FuturesUnordered<_>>()
+        .filter_map(|(uuid, result)| async move {
+            result.ok().map(|id| (uuid, id))
+        })
+        .collect::<HashMap<_,_>>().await;
+        /* send SIGINT to the script to restore pin states */
+        log::info!("sending signal");
+        let _ = signal_tx.send(2);
+        xbee_ids
+    });
+    /* if write id fails, do not attempt to pair */
+    write_id_result?;
+    log::info!("random_id = {}", random_id);
+    log::info!("{:?}", read_ids);
+
+    read_ids.retain(|_, id| &random_id == id);
+    match read_ids.len() {
+        0 => log::warn!("Could not pair fernbedinung client with drone"),
+        1 => {
+            let (uuid, _) = read_ids.iter().next().unwrap();
+            log::info!("Success");
+            match drone_tx_map.get(&uuid) {
+                Some(tx) => {
+                    let request = drone::Request::Pair(device);
+                    if let Err(error) = tx.send(request) {
+                        log::warn!("Could not pair fernbedienung instance with drone {}: {}", uuid, error);
+                    }
+                }
+                None => log::warn!("Could not find drone {}", uuid)
+            }
+        }
+        _ => log::error!("Multiple candidates for pairing")
+    }
+    Ok(())
 }
 
 

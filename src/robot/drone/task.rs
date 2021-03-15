@@ -16,7 +16,7 @@ pub enum Request {
     Pair(fernbedienung::Device),
     Execute(Action),
     //Upload(crate::software::Software),
-    GetId(oneshot::Sender<Result<u8>>),
+    GetId(oneshot::Sender<u8>),
 }
 
 pub type Sender = mpsc::UnboundedSender<Request>;
@@ -117,7 +117,7 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, mut xbee: xbee::Device) -> (Uuid,
                         }
                     },
                     Request::GetId(callback) => {
-                        let _ = callback.send(get_id(&xbee).await);
+                        let _ = callback.send(get_id(&xbee_pin_states).await);
                     },
                 },
             }
@@ -167,20 +167,17 @@ async fn actions(pin_states: &Mutex<Vec<(xbee::Pin, bool)>>) -> Vec<Action> {
     actions
 }
 
-
-// todo read inputs in a loop and use as a ping/means of tracking the 
-// state of the xbee
-// if no response in X ms, disconnect (?)
-async fn get_id(xbee: &xbee::Device) -> Result<u8> {
+async fn get_id(pin_states: &Mutex<Vec<(xbee::Pin, bool)>>) -> u8 {
+    let pin_states = pin_states.lock().await;
     let mut id: u8 = 0;
-    for (pin, value) in xbee.read_inputs().await? {
+    for (pin, value) in pin_states.clone() {
         let bit_index = pin as usize;
         /* extract identifier from bit indices 0-3 inclusive */
         if bit_index < 4 {
             id |= (value as u8) << bit_index;
         }
     }
-    Ok(id)
+    id
 }
 
 fn init(xbee: &xbee::Device) -> Result<()> {
