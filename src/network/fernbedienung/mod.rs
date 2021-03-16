@@ -75,7 +75,7 @@ enum Request {
     },
     Run {
         task: Run,
-        signal_rx: Option<UnboundedReceiver<u32>>,
+        terminate_rx: Option<oneshot::Receiver<()>>,
         stdin_rx: Option<UnboundedReceiver<BytesMut>>,
         stdout_tx: Option<UnboundedSender<BytesMut>>,
         stderr_tx: Option<UnboundedSender<BytesMut>>,
@@ -144,7 +144,7 @@ impl Device {
                                     uuid
                                 });
                             }
-                            Request::Run { task, signal_rx, stdin_rx, stdout_tx, stderr_tx, exit_status_tx } => {
+                            Request::Run { task, terminate_rx, stdin_rx, stdout_tx, stderr_tx, exit_status_tx } => {
                                 let uuid = Uuid::new_v4();
                                 let request = protocol::RequestKind::Process(protocol::process::Request::Run(task));
                                 /* subscribe to updates */
@@ -155,7 +155,7 @@ impl Device {
                                 /* process responses */
                                 runs.push(Device::handle_run_input_output(
                                     uuid, run_status_rx, remote_requests_tx.clone(), 
-                                    signal_rx, stdin_rx, stdout_tx, stderr_tx, exit_status_tx,
+                                    terminate_rx, stdin_rx, stdout_tx, stderr_tx, exit_status_tx,
                                 ));
                             }
                         },
@@ -181,24 +181,25 @@ impl Device {
     async fn handle_run_input_output(uuid: Uuid,
                                      mut run_status_rx: mpsc::UnboundedReceiver<protocol::ResponseKind>,
                                      remote_requests_tx: mpsc::UnboundedSender<protocol::Request>,
-                                     signal_rx: Option<mpsc::UnboundedReceiver<u32>>,
+                                     terminate_rx: Option<oneshot::Receiver<()>>,
                                      stdin_rx: Option<mpsc::UnboundedReceiver<BytesMut>>,
                                      stdout_tx: Option<mpsc::UnboundedSender<BytesMut>>,
                                      stderr_tx: Option<mpsc::UnboundedSender<BytesMut>>,
                                      exit_status_tx: oneshot::Sender<bool>) -> Uuid {
-        let mut signal_rx = match signal_rx {
-            Some(signal_rx) => UnboundedReceiverStream::new(signal_rx).left_stream(),
+        let mut terminate_rx = match terminate_rx {
+            Some(terminate_rx) => terminate_rx.into_stream().left_stream(),
             None => futures::stream::pending().right_stream(),
         };
         let mut stdin_rx = match stdin_rx {
             Some(stdin_rx) => UnboundedReceiverStream::new(stdin_rx).left_stream(),
             None => futures::stream::pending().right_stream(),
         };
+
         loop {
             tokio::select! {
-                Some(signal) = signal_rx.next() => {
+                Some(_) = terminate_rx.next() => {
                     let request = protocol::Request(uuid, protocol::RequestKind::Process(
-                        protocol::process::Request::Signal(signal))
+                        protocol::process::Request::Terminate)
                     );
                     let _ = remote_requests_tx.send(request);
                 },
@@ -210,8 +211,10 @@ impl Device {
 
                 },
                 Some(response) = run_status_rx.recv() => match response {
+                    protocol::ResponseKind::Ok => {},
+                    protocol::ResponseKind::Error(error) => 
+                        log::error!("Run request {}: {}", uuid, error),
                     protocol::ResponseKind::Process(response) => match response {
-                        protocol::process::Response::Started => {},
                         protocol::process::Response::Terminated(result) => {
                             let _ = exit_status_tx.send(result);
                             break;
@@ -227,7 +230,6 @@ impl Device {
                             }
                         },
                     },
-                    unhandled_response => log::warn!("unhandled response: {:?}", unhandled_response)
                 },
                 else => break
             }
@@ -247,12 +249,12 @@ impl Device {
 
     pub async fn run(&self,
                      task: protocol::process::Run,
-                     signal_rx: Option<mpsc::UnboundedReceiver<u32>>,
+                     terminate_rx: Option<oneshot::Receiver<()>>,
                      stdin_rx: Option<mpsc::UnboundedReceiver<BytesMut>>,
                      stdout_tx: Option<mpsc::UnboundedSender<BytesMut>>,
                      stderr_tx: Option<mpsc::UnboundedSender<BytesMut>>) -> Result<bool> {
         let (exit_status_tx, exit_status_rx) = oneshot::channel();
-        let request = Request::Run{ task, signal_rx, stdin_rx, stdout_tx, stderr_tx, exit_status_tx };
+        let request = Request::Run{ task, terminate_rx, stdin_rx, stdout_tx, stderr_tx, exit_status_tx };
         self.request_tx.send(request).map_err(|_ | Error::RequestError)?;
         exit_status_rx.await.map_err(|_| Error::ResponseError)
     }

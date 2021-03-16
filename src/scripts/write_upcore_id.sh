@@ -9,6 +9,7 @@ function release_gpios() {
       # export the gpios
       echo $(($gpiobase + $index)) > /sys/class/gpio/unexport
    done
+   kill -TERM $(jobs -p)
    exit 0
 }
 
@@ -31,8 +32,9 @@ if ((${id} >= 0 && ${id} < 15)); then
          echo "0" > /sys/class/gpio/gpio$(($gpiobase + $index))/value
       fi
    done
-   trap release_gpios SIGINT SIGTERM
-   sleep infinity
+   trap release_gpios SIGTERM
+   sleep infinity &
+   wait
 else
   exit 1
 fi

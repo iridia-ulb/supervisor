@@ -14,12 +14,11 @@ pub mod process {
     pub enum Request {
         Run(Run),
         StandardInput(BytesMut),
-        Signal(u32),
+        Terminate,
     }
 
     #[derive(Debug, Deserialize)]
     pub enum Response {
-        Started,
         Terminated(bool),
         StandardOutput(BytesMut),
         StandardError(BytesMut),

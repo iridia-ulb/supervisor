@@ -232,13 +232,13 @@ async fn handle_pair_with_drone_request(drone_tx_map: &HashMap<Uuid, drone::Send
     let random_id : u8 = rng.gen_range(0..15);
     /* run the script with the random id */
     let script = network::fernbedienung::Run {
-        target: "exec".into(),
+        target: "sh".into(),
         working_dir: "/tmp".into(),
-        args: vec!["./write_upcore_id.sh".into(), random_id.to_string()],
+        args: vec!["write_upcore_id.sh".into(), random_id.to_string()],
     };
-    let (signal_tx, signal_rx) = mpsc::unbounded_channel();
+    let (terminate_tx, terminate_rx) = oneshot::channel();
 
-    let write_upcore_id = device.run(script, Some(signal_rx), None, None, None);
+    let write_upcore_id = device.run(script, Some(terminate_rx), None, None, None);
     let (write_id_result, mut read_ids) = tokio::join!(write_upcore_id, async {
         /* give time for the script to start */
         tokio::time::sleep(Duration::from_millis(1000)).await;
@@ -258,22 +258,18 @@ async fn handle_pair_with_drone_request(drone_tx_map: &HashMap<Uuid, drone::Send
             result.ok().map(|id| (uuid, id))
         })
         .collect::<HashMap<_,_>>().await;
-        /* send SIGINT to the script to restore pin states */
-        log::info!("sending signal");
-        let _ = signal_tx.send(2);
+        /* send SIGTERM to the script to restore pin states */
+        let _ = terminate_tx.send(());
         xbee_ids
     });
     /* if write id fails, do not attempt to pair */
     write_id_result?;
-    log::info!("random_id = {}", random_id);
-    log::info!("{:?}", read_ids);
-
     read_ids.retain(|_, id| &random_id == id);
     match read_ids.len() {
         0 => log::warn!("Could not pair fernbedinung client with drone"),
         1 => {
             let (uuid, _) = read_ids.iter().next().unwrap();
-            log::info!("Success");
+            log::info!("Pairing upcore at {} with drone {}", device.addr, uuid);
             match drone_tx_map.get(&uuid) {
                 Some(tx) => {
                     let request = drone::Request::Pair(device);
