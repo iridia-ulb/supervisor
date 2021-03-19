@@ -1,6 +1,6 @@
 use futures::FutureExt;
 use uuid::Uuid;
-use std::{future::Future, net::Ipv4Addr, pin::Pin, task::{Context, Poll}};
+use std::{future::Future, pin::Pin, task::{Context, Poll}};
 use tokio::{sync::mpsc, task::JoinHandle};
 use crate::network::fernbedienung;
 
@@ -10,7 +10,7 @@ pub use task::{
     Action, Error, Receiver, Request, Sender, State
 };
 
-pub struct PiPuck(JoinHandle<(Uuid, Ipv4Addr)>);
+pub struct PiPuck(JoinHandle<Uuid>);
 
 impl PiPuck {
     pub fn new(device: fernbedienung::Device) -> (Uuid, Sender, Self) {
@@ -22,7 +22,7 @@ impl PiPuck {
 }
 
 impl Future for PiPuck {
-    type Output = Result<(Uuid, Ipv4Addr), tokio::task::JoinError>;
+    type Output = Result<Uuid, tokio::task::JoinError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.get_mut().0.poll_unpin(cx)

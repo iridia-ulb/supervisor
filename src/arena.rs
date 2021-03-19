@@ -1,7 +1,7 @@
 
 use serde::{Deserialize, Serialize};
 use software::Software;
-use std::{collections::HashMap, net::{Ipv4Addr, SocketAddr}, time::Duration};
+use std::{collections::HashMap, time::Duration};
 use futures::{StreamExt, TryStreamExt, stream::FuturesUnordered};
 use log;
 use tokio::sync::{mpsc, oneshot};
@@ -71,9 +71,7 @@ pub enum Request {
     GetPiPucks(oneshot::Sender<HashMap<Uuid, pipuck::State>>),
 }
 
-pub async fn new(message_router_addr: SocketAddr,
-                 arena_request_rx: mpsc::UnboundedReceiver<Request>,
-                 network_addr_tx: &mpsc::UnboundedSender<Ipv4Addr>,
+pub async fn new(arena_request_rx: mpsc::UnboundedReceiver<Request>,
                  journal_requests_tx: &mpsc::UnboundedSender<journal::Request>) {
     let mut state = State::Standby;
 
@@ -107,7 +105,6 @@ pub async fn new(message_router_addr: SocketAddr,
                                              &pipuck_software,
                                              &drone_tx_map,
                                              &drone_software,
-                                             &message_router_addr,
                                              &journal_requests_tx).await;
                         match start_experiment_result {
                             Ok(_) => state = State::Active,
@@ -115,10 +112,14 @@ pub async fn new(message_router_addr: SocketAddr,
                         };
                     },
                     Action::StopExperiment => {
-                        if let Err(error) = stop_experiment(&journal_requests_tx).await {
-                            log::warn!("Could not stop experiment: {}", error);
+                        let stop_experiment_result =
+                            stop_experiment(&pipuck_tx_map,
+                                            &drone_tx_map,
+                                            &journal_requests_tx).await;
+                        match stop_experiment_result {
+                            Ok(_) => state = State::Standby,
+                            Err(error) => log::error!("Could not stop experiment: {}", error)
                         }
-                        state = State::Standby;
                     }
                 }
                 /* Drone requests */
@@ -152,8 +153,9 @@ pub async fn new(message_router_addr: SocketAddr,
                 */
                 Request::GetDrones(callback) => 
                     handle_get_drones_request(&drone_tx_map, callback).await,
-                Request::PairWithDrone(device) =>
-                    { handle_pair_with_drone_request(&drone_tx_map, device).await; },
+                Request::PairWithDrone(device) => {
+                    handle_pair_with_drone_request(&drone_tx_map, device).await;
+                },
                 /* Pi-Puck requests */
                 Request::AddPiPuck(device) => {
                     let (uuid, tx, task) = PiPuck::new(device);
@@ -187,25 +189,14 @@ pub async fn new(message_router_addr: SocketAddr,
                     handle_get_pipucks_request(&pipuck_tx_map, callback).await,
             },
             Some(result) = drone_tasks.next() => match result {
-                Ok((uuid, xbee_addr, linux_addr)) => {
+                Ok(uuid) => {
                     drone_tx_map.remove(&uuid);
-                    if let Err(error) = network_addr_tx.send(xbee_addr) {
-                        log::error!("Could not return the Xbee address of drone {} to the network module: {}", uuid, error);
-                    }
-                    if let Some(linux_addr) = linux_addr {
-                        if let Err(error) = network_addr_tx.send(linux_addr) {
-                            log::error!("Could not return the Linux address of drone {} to the network module: {}", uuid, error);
-                        }
-                    }
                 },
                 Err(error) => log::error!("Drone task panicked: {}", error),
             },
             Some(result) = pipuck_tasks.next() => match result {
-                Ok((uuid, linux_addr)) => {
+                Ok(uuid) => {
                     pipuck_tx_map.remove(&uuid);
-                    if let Err(error) = network_addr_tx.send(linux_addr) {
-                        log::error!("Could not return the Linux address of Pi-Puck {} to the network module: {}", uuid, error);
-                    }
                 },
                 Err(error) => log::error!("Pi-Puck task panicked: {}", error),
             },
@@ -224,8 +215,8 @@ pub async fn new(message_router_addr: SocketAddr,
 async fn handle_pair_with_drone_request(drone_tx_map: &HashMap<Uuid, drone::Sender>,
                                         device: network::fernbedienung::Device) -> Result<()> {
     /* upload the set id script */
-    let set_id_script = include_bytes!("scripts/write_upcore_id.sh");
-    device.upload("/tmp".into(), "write_upcore_id.sh".into(), set_id_script.to_vec()).await
+    let write_upcore_id_script = include_bytes!("scripts/write_upcore_id.sh");
+    device.upload("/tmp".into(), "write_upcore_id.sh".into(), write_upcore_id_script.to_vec()).await
         .map_err(|error| Error::FernbedienungError(error))?;
     /* get a random id from between 0 and 15 (15 is intentionally not included) */
     let mut rng = rand::thread_rng();
@@ -286,10 +277,15 @@ async fn handle_pair_with_drone_request(drone_tx_map: &HashMap<Uuid, drone::Send
 }
 
 
-async fn stop_experiment(journal_requests_tx: &mpsc::UnboundedSender<journal::Request>) -> Result<()> {
+async fn stop_experiment(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>,
+                         drone_tx_map: &HashMap<Uuid, drone::Sender>,
+                         journal_requests_tx: &mpsc::UnboundedSender<journal::Request>) -> Result<()> {
     journal_requests_tx
         .send(journal::Request::Stop)
         .map_err(|_| journal::Error::RequestError)?;
+    for (_, tx) in pipuck_tx_map.into_iter() {
+        tx.send(pipuck::Request::ExperimentStop);
+    }
     Ok(())
 }
 
@@ -297,7 +293,6 @@ async fn start_experiment(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>,
                           pipuck_software: &Software,
                           drone_tx_map: &HashMap<Uuid, drone::Sender>,
                           drone_software: &Software,
-                          message_router_addr: &SocketAddr,
                           journal_requests_tx: &mpsc::UnboundedSender<journal::Request>) -> Result<()> {
     if let Err(error) = pipuck_software.check_config() {
         if pipuck_tx_map.len() > 0 {
@@ -343,11 +338,9 @@ async fn start_experiment(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>,
     let pipuck_start = pipuck_tx_map.into_iter()
         .map(|(uuid, tx)| {
             let uuid = uuid.clone();
-            let message_router_addr = message_router_addr.clone();
             let journal_requests_tx = journal_requests_tx.clone();
             let (response_tx, response_rx) = oneshot::channel();
-            let request = pipuck::Request::ExperimentStart(
-                message_router_addr, journal_requests_tx, response_tx);
+            let request = pipuck::Request::ExperimentStart(journal_requests_tx, response_tx);
             tx.send(request)
                 .map_err(|_| Error::PiPuckError(uuid, pipuck::Error::RequestError))
                 .map(|_| async move {

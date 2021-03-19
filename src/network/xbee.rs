@@ -211,7 +211,7 @@ impl Decoder for Codec {
 }
 
 impl Device {
-    pub async fn new(addr: Ipv4Addr) -> Result<Device> {
+    pub async fn new(addr: Ipv4Addr, return_addr_tx: mpsc::UnboundedSender<Ipv4Addr>) -> Result<Device> {
         /* bind to a random port on any interface */
         let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
         let (request_tx, request_rx) = mpsc::unbounded_channel();
@@ -280,7 +280,10 @@ impl Device {
                             }
                         },
                         /* this should cause this task to shutdown as soon as Device is dropped */
-                        None => break,
+                        None => {
+                            let _ = return_addr_tx.send(addr);
+                            break
+                        },
                     }
                 }
             }

@@ -69,9 +69,8 @@ pub struct Device {
 }
 
 enum Request {
-    Upload {
-        upload: Upload,
-        result: oneshot::Sender<bool>
+    Ping {
+        reply: oneshot::Sender<bool>
     },
     Run {
         task: Run,
@@ -80,11 +79,15 @@ enum Request {
         stdout_tx: Option<UnboundedSender<BytesMut>>,
         stderr_tx: Option<UnboundedSender<BytesMut>>,
         exit_status_tx: oneshot::Sender<bool>,
-    }
+    },
+    Upload {
+        upload: Upload,
+        result: oneshot::Sender<bool>
+    },
 }
 
 impl Device {
-    pub async fn new(addr: Ipv4Addr) -> Result<Self> {
+    pub async fn new(addr: Ipv4Addr, return_addr_tx: mpsc::UnboundedSender<Ipv4Addr>) -> Result<Self> {
         let stream = TcpStream::connect((addr, 17653)).await
             .map_err(|error| Error::IoError(error))?;
         let (local_request_tx, mut local_request_rx) = mpsc::unbounded_channel();
@@ -106,8 +109,7 @@ impl Device {
                 .forward(remote_requests);
             /* collections for tracking state */
             let mut status_txs: HashMap<Uuid, UnboundedSender<protocol::ResponseKind>> = Default::default();
-            let mut uploads: FuturesUnordered<_> = Default::default();
-            let mut runs: FuturesUnordered<_> = Default::default();
+            let mut tasks: FuturesUnordered<_> = Default::default();
             /* event loop */
             loop {
                 tokio::select! {
@@ -127,49 +129,65 @@ impl Device {
                         }
                     },
                     request = local_request_rx.recv() => match request {
-                        Some(request) => match request {
-                            Request::Upload { upload, result } => {
-                                let uuid = Uuid::new_v4();
-                                let request = protocol::RequestKind::Upload(upload);
-                                /* subscribe to updates */
-                                let (upload_status_tx, mut upload_status_rx) = mpsc::unbounded_channel();
-                                status_txs.insert(uuid, upload_status_tx);
-                                /* send the request */
-                                remote_requests_tx.send(protocol::Request(uuid, request));
-                                /* process responses */
-                                uploads.push(async move {
-                                    if let Some(status) = upload_status_rx.recv().await {
-                                        let _ = result.send(matches!(status, protocol::ResponseKind::Ok));
-                                    }
-                                    uuid
-                                });
-                            }
-                            Request::Run { task, terminate_rx, stdin_rx, stdout_tx, stderr_tx, exit_status_tx } => {
-                                let uuid = Uuid::new_v4();
-                                let request = protocol::RequestKind::Process(protocol::process::Request::Run(task));
-                                /* subscribe to updates */
-                                let (run_status_tx, run_status_rx) = mpsc::unbounded_channel();
-                                status_txs.insert(uuid, run_status_tx);
-                                /* send the request */
-                                remote_requests_tx.send(protocol::Request(uuid, request));
-                                /* process responses */
-                                runs.push(Device::handle_run_input_output(
-                                    uuid, run_status_rx, remote_requests_tx.clone(), 
-                                    terminate_rx, stdin_rx, stdout_tx, stderr_tx, exit_status_tx,
-                                ));
-                            }
+                        Some(request) => {
+                            let task = match request {
+                                Request::Ping { reply } => {
+                                    let uuid = Uuid::new_v4();
+                                    let request = protocol::RequestKind::Ping;
+                                    /* subscribe to updates */
+                                    let (ping_status_tx, mut ping_status_rx) = mpsc::unbounded_channel();
+                                    status_txs.insert(uuid, ping_status_tx);
+                                    /* send request to remote */
+                                    remote_requests_tx.send(protocol::Request(uuid, request));
+                                    /* */
+                                    async move {
+                                        if let Some(status) = ping_status_rx.recv().await {
+                                            let _ = reply.send(matches!(status, protocol::ResponseKind::Ok));
+                                        }
+                                        uuid
+                                    }.left_future()
+                                }
+                                Request::Run { task, terminate_rx, stdin_rx, stdout_tx, stderr_tx, exit_status_tx } => {
+                                    let uuid = Uuid::new_v4();
+                                    let request = protocol::RequestKind::Process(protocol::process::Request::Run(task));
+                                    /* subscribe to updates */
+                                    let (run_status_tx, run_status_rx) = mpsc::unbounded_channel();
+                                    status_txs.insert(uuid, run_status_tx);
+                                    /* send the request */
+                                    remote_requests_tx.send(protocol::Request(uuid, request));
+                                    /* process responses */
+                                    Device::handle_run_input_output(
+                                        uuid, run_status_rx, remote_requests_tx.clone(), 
+                                        terminate_rx, stdin_rx, stdout_tx, stderr_tx, exit_status_tx,
+                                    ).left_future().right_future()
+                                }
+                                Request::Upload { upload, result } => {
+                                    let uuid = Uuid::new_v4();
+                                    let request = protocol::RequestKind::Upload(upload);
+                                    /* subscribe to updates */
+                                    let (upload_status_tx, mut upload_status_rx) = mpsc::unbounded_channel();
+                                    status_txs.insert(uuid, upload_status_tx);
+                                    /* send the request */
+                                    remote_requests_tx.send(protocol::Request(uuid, request));
+                                    /* process responses */
+                                    async move {
+                                        if let Some(status) = upload_status_rx.recv().await {
+                                            let _ = result.send(matches!(status, protocol::ResponseKind::Ok));
+                                        }
+                                        uuid
+                                    }.right_future().right_future()
+                                }
+                            };
+                            tasks.push(task);
                         },
                         None => {
                             /* terminate this task when the struct is dropped */
+                            let _ = return_addr_tx.send(addr);
                             break
                         },
                     },
-                    Some(uuid) = uploads.next() => {
+                    Some(uuid) = tasks.next() => {
                         status_txs.remove(&uuid);
-                    },
-                    Some(uuid) = runs.next() => {
-                        status_txs.remove(&uuid);
-
                     },
                     _ = &mut forward_remote_requests => {}
                 }
@@ -238,13 +256,23 @@ impl Device {
         uuid
     }
 
-    pub async fn upload(&self, path: PathBuf, filename: PathBuf, contents: Vec<u8>) -> Result<()> {
+    pub async fn ping(&self) -> Result<bool> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.request_tx
+            .send(Request::Ping { reply: reply_tx})
+            .map_err(|_ | Error::RequestError)?;
+        reply_rx.await.map_err(|_| Error::ResponseError)
+    }
+
+    pub async fn upload(&self, path: PathBuf, filename: PathBuf, contents: Vec<u8>) -> Result<bool> {
         let upload = protocol::Upload {
             path, filename, contents,
         };
         let (result_tx, result_rx) = oneshot::channel();
-        self.request_tx.send(Request::Upload { upload, result: result_tx });
-        Ok(())
+        self.request_tx
+            .send(Request::Upload { upload, result: result_tx })
+            .map_err(|_ | Error::RequestError)?;
+        result_rx.await.map_err(|_| Error::ResponseError)
     }
 
     pub async fn run(&self,

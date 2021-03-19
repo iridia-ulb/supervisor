@@ -1,12 +1,6 @@
 // https://getmdl.io/started/index.html#dynamic (call upgrade on dynamic components)
 
-
 const uri = 'ws://' + location.host + '/socket';
-const ws = new WebSocket(uri);
-
-// TODO
-emergency = document.getElementById('emergency-stop');
-emergency.onclick = function() {}
 
 var uiCurrentView = 'Connections';
 var uiTimer = null;
@@ -15,7 +9,10 @@ function setView(uiView) {
    uiCurrentView = uiView;
 }
 
+let ws = new WebSocket(uri);
+
 ws.onopen = function() {
+   document.getElementById('offline').style.display = 'None'
    uiTimer = setInterval(function() {
       var message = JSON.stringify({
          type: 'update',
@@ -26,6 +23,7 @@ ws.onopen = function() {
 };
 
 ws.onclose = function() {
+   document.getElementById('offline').style.display = ''
    clearInterval(uiTimer);
 };
 
@@ -68,6 +66,10 @@ ws.onmessage = function(message) {
       }
    }
 };
+
+// TODO
+emergency = document.getElementById('emergency-stop');
+emergency.onclick = function() {}
 
 // This function returns HTMLDivElement's
 function contentToHTML(content) {
@@ -204,5 +206,6 @@ function newCard(uuid, title, span, content, controls) {
    return card;
 }
 
-
+/* connect to the backend */
+connect()
 
