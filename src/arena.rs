@@ -112,14 +112,8 @@ pub async fn new(arena_request_rx: mpsc::UnboundedReceiver<Request>,
                         };
                     },
                     Action::StopExperiment => {
-                        let stop_experiment_result =
-                            stop_experiment(&pipuck_tx_map,
-                                            &drone_tx_map,
-                                            &journal_requests_tx).await;
-                        match stop_experiment_result {
-                            Ok(_) => state = State::Standby,
-                            Err(error) => log::error!("Could not stop experiment: {}", error)
-                        }
+                        stop_experiment(&pipuck_tx_map, &drone_tx_map, &journal_requests_tx).await;
+                        state = State::Standby;
                     }
                 }
                 /* Drone requests */
@@ -260,7 +254,7 @@ async fn handle_pair_with_drone_request(drone_tx_map: &HashMap<Uuid, drone::Send
         0 => log::warn!("Could not pair fernbedinung client with drone"),
         1 => {
             let (uuid, _) = read_ids.iter().next().unwrap();
-            log::info!("Pairing upcore at {} with drone {}", device.addr, uuid);
+            log::info!("Pairing up-core device at {} with drone {}", device.addr, uuid);
             match drone_tx_map.get(&uuid) {
                 Some(tx) => {
                     let request = drone::Request::Pair(device);
@@ -279,14 +273,14 @@ async fn handle_pair_with_drone_request(drone_tx_map: &HashMap<Uuid, drone::Send
 
 async fn stop_experiment(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>,
                          drone_tx_map: &HashMap<Uuid, drone::Sender>,
-                         journal_requests_tx: &mpsc::UnboundedSender<journal::Request>) -> Result<()> {
-    journal_requests_tx
-        .send(journal::Request::Stop)
-        .map_err(|_| journal::Error::RequestError)?;
+                         journal_requests_tx: &mpsc::UnboundedSender<journal::Request>) {
+    let _ = journal_requests_tx.send(journal::Request::Stop);
+    // for (_, tx) in drone_tx_map.into_iter() {
+    //     tx.send(drone::Request::ExperimentStop);
+    // }
     for (_, tx) in pipuck_tx_map.into_iter() {
-        tx.send(pipuck::Request::ExperimentStop);
+        let _ = tx.send(pipuck::Request::ExperimentStop);
     }
-    Ok(())
 }
 
 async fn start_experiment(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>,
@@ -294,53 +288,35 @@ async fn start_experiment(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>,
                           drone_tx_map: &HashMap<Uuid, drone::Sender>,
                           drone_software: &Software,
                           journal_requests_tx: &mpsc::UnboundedSender<journal::Request>) -> Result<()> {
-    if let Err(error) = pipuck_software.check_config() {
-        if pipuck_tx_map.len() > 0 {
-            return Err(Error::SoftwareError(error));
-        }
+    /* check software validity before starting */
+    if pipuck_tx_map.len() > 0 {
+        pipuck_software.check_config()?;
     }
-    if let Err(error) = drone_software.check_config() {
-        if drone_tx_map.len() > 0 {
-            return Err(Error::SoftwareError(error));
-        }
-    }
-    /* upload software to Pi-Pucks */
-    pipuck_tx_map.into_iter()
-        .map(|(uuid, tx)| {
-            let uuid = uuid.clone();
-            let (response_tx, response_rx) = oneshot::channel();
-            let software = pipuck_software.clone();
-            let request = pipuck::Request::Upload(software, response_tx);
-            tx.send(request)
-                .map_err(|_| Error::PiPuckError(uuid, pipuck::Error::RequestError))
-                .map(|_| async move {
-                    (uuid, response_rx.await)
-                })
-        })
-        .collect::<Result<FuturesUnordered<_>>>()?
-        .map(|(uuid, result)| result
-            .map_err(|_| Error::PiPuckError(uuid, pipuck::Error::ResponseError))
-            .and_then(|response| {
-                response.map_err(|error| Error::PiPuckError(uuid, error))
-            })
-        ).try_collect::<Vec<_>>().await?;
+    if drone_tx_map.len() > 0 {
+        drone_software.check_config()?;
+    }   
+
+    /* start an experiment journal to record events during the experiment */
     let (callback_tx, callback_rx) = oneshot::channel();
     journal_requests_tx
         .send(journal::Request::Start(callback_tx))
         .map_err(|_| journal::Error::RequestError)?;
     callback_rx.await
         .map_err(|_| journal::Error::ResponseError)
-        .and_then(|error| error)?; // flatten available in nightly
+        .and_then(|error| error)?;
 
-    /* if an error occurs from this point onwards, there is not much that can be done
-       from this function. Experiment started should be set if any robots are running */
-    
+    /* start the experiment */
+    /* start pi-pucks first since they are less dangerous */
     let pipuck_start = pipuck_tx_map.into_iter()
         .map(|(uuid, tx)| {
             let uuid = uuid.clone();
             let journal_requests_tx = journal_requests_tx.clone();
             let (response_tx, response_rx) = oneshot::channel();
-            let request = pipuck::Request::ExperimentStart(journal_requests_tx, response_tx);
+            let request = pipuck::Request::ExperimentStart {
+                software: pipuck_software.clone(),
+                journal: journal_requests_tx,
+                callback: response_tx
+            };
             tx.send(request)
                 .map_err(|_| Error::PiPuckError(uuid, pipuck::Error::RequestError))
                 .map(|_| async move {
@@ -354,9 +330,48 @@ async fn start_experiment(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>,
                 response.map_err(|error| Error::PiPuckError(uuid, error))
             })
         ).try_collect::<Vec<_>>().await;
+    
+    // TODO, here it would be useful to watch for the Terminated response from ARGoS to determine
+    // if any robot failed (e.g., errors in the Lua script)
+
+    /* abort experiment if there was a problem starting the pipucks */
     if let Err(error) = pipuck_start {
-        log::error!("Failed to start experiment: {}", error);
+        log::error!("Failed to start Pi-Pucks: {}", error);
+        stop_experiment(pipuck_tx_map, drone_tx_map, journal_requests_tx).await;
+        return Err(error);
     }
+
+    /* now start the drones */
+    // let drone_start = drone_tx_map.into_iter()
+    //     .map(|(uuid, tx)| {
+    //         let uuid = uuid.clone();
+    //         let journal_requests_tx = journal_requests_tx.clone();
+    //         let (response_tx, response_rx) = oneshot::channel();
+    //         let request = drone::Request::ExperimentStart {
+    //             software: drone_software.clone(),
+    //             journal: journal_requests_tx,
+    //             callback: response_tx
+    //         };
+    //         tx.send(request)
+    //             .map_err(|_| Error::DroneError(uuid, drone::Error::RequestError))
+    //             .map(|_| async move {
+    //                 (uuid, response_rx.await)
+    //             })
+    //     })
+    //     .collect::<Result<FuturesUnordered<_>>>()?
+    //     .map(|(uuid, result)| result
+    //         .map_err(|_| Error::DroneError(uuid, drone::Error::ResponseError))
+    //         .and_then(|response| {
+    //             response.map_err(|error| Error::DroneError(uuid, error))
+    //         })
+    //     ).try_collect::<Vec<_>>().await;
+
+    // /* abort experiment if there was a problem starting the drones */
+    // if let Err(error) = drone_start {
+    //     log::error!("Failed to start drones: {}", error);
+    //     stop_experiment(pipuck_tx_map, drone_tx_map, journal_requests_tx).await;
+    //     return Err(error);
+    // }
 
     Ok(())
 }

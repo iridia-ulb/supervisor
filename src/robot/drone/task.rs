@@ -5,6 +5,7 @@ use uuid::Uuid;
 use std::{net::Ipv4Addr, path::PathBuf, time::Duration};
 use tokio::{sync::{Mutex, mpsc, oneshot}};
 use crate::network::{fernbedienung, xbee};
+use crate::journal;
 
 pub struct State {
     pub xbee: Ipv4Addr,
@@ -14,10 +15,12 @@ pub struct State {
 
 pub enum Request {
     GetState(oneshot::Sender<State>),
+    GetId(oneshot::Sender<u8>),
     Pair(fernbedienung::Device),
     Execute(Action),
-    //Upload(crate::software::Software),
-    GetId(oneshot::Sender<u8>),
+    // Upload(crate::software::Software),
+    // ExperimentStart(mpsc::UnboundedSender<journal::Request>, oneshot::Sender<Result<()>>),
+    // ExperimentStop,
 }
 
 pub type Sender = mpsc::UnboundedSender<Request>;
@@ -125,9 +128,6 @@ async fn fernbedienung(device: fernbedienung::Device,
     
 }
 
-// fernbedienung dies -> just let it go out of scope
-// handle returning ip address separately
-
 pub async fn new(uuid: Uuid, mut rx: Receiver, mut xbee: xbee::Device) -> Uuid {
     /* initialize the xbee pin and mux */
     init(&mut xbee);
@@ -139,6 +139,7 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, mut xbee: xbee::Device) -> Uuid {
     // this is a pinned box over an either future. Either future allows holding one of two future
     // variants, either Pending or the Poll function
     let mut fernbedienung_tx = None;
+    let mut fernbedienung_ip = None;
     let fernbedienung_task = futures::future::pending().left_future();
     tokio::pin!(fernbedienung_task);
 
@@ -157,6 +158,7 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, mut xbee: xbee::Device) -> Uuid {
             },
             _ = &mut fernbedienung_task => {
                 fernbedienung_tx = None;
+                fernbedienung_ip = None;
                 fernbedienung_task.set(futures::future::pending().left_future());
             }
             /* wait for requests */
@@ -173,7 +175,7 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, mut xbee: xbee::Device) -> Uuid {
                         /* send back the state */
                         let state = State {
                             xbee: xbee.addr,
-                            linux: None, //fernbedienung.as_ref().map(|dev| dev.addr),
+                            linux: fernbedienung_ip, //fernbedienung.as_ref().map(|dev| dev.addr),
                             actions,
                         };
                         let _ = callback.send(state);
@@ -181,6 +183,7 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, mut xbee: xbee::Device) -> Uuid {
                     Request::Pair(device) => {
                         let (tx, rx) = mpsc::unbounded_channel();
                         fernbedienung_tx = Some(tx);
+                        fernbedienung_ip = Some(device.addr);
                         fernbedienung_task.set(fernbedienung(device, rx).right_future());
                     }
                     Request::Execute(requested_action) => {

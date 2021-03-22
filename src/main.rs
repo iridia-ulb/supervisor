@@ -1,5 +1,4 @@
 use std::net::{Ipv4Addr, SocketAddr};
-
 use ipnet::Ipv4Net;
 use tokio::sync::mpsc;
 use warp::Filter;
@@ -20,6 +19,13 @@ struct Options {
     #[structopt(long)]
     network: Ipv4Net,
 }
+
+// stream video only while connections tab is open, close when we move to the experiment tab (avoids conflicts with ARGoS)
+// I want to send simple JPEG frames using intra-frame compression only, i.e., raw frames from device
+// fswebcam will send images to stdout
+// update fernbedienung to use base64 on stdin,out,err
+// loop on device vs. continually reissue command? reissuing command means no latency build up + clear boundaries on images
+// https://github.com/linux4sam/meta-atmel/blob/master/recipes-multimedia/fswebcam/fswebcam_git.bb
 
 #[tokio::main]
 async fn main() {
@@ -54,7 +60,7 @@ async fn main() {
     let static_route = warp::get()
     //    .and(static_dir::static_dir!("static"));
         .and(warp::fs::dir("/home/mallwright/Workspace/mns-supervisor/static"));
-    let server_addr : SocketAddr = (Ipv4Addr::UNSPECIFIED, 3030).into();
+    let server_addr : SocketAddr = (Ipv4Addr::LOCALHOST, 3030).into();
     let webui_task = warp::serve(socket_route.or(static_route)).run(server_addr);
     /* pin the futures so that they can be polled via &mut */
     tokio::pin!(arena_task);
