@@ -124,8 +124,8 @@ impl Device {
                                 log::warn!("Received message without identifier: {:?}", response);
                             }
                         },
-                        Err(error) => {
-                            log::error!("{}", error.to_string());
+                        Err(_) => {
+                            log::warn!("Could not deserialize response from remote");
                         }
                     },
                     request = local_request_rx.recv() => match request {
@@ -319,18 +319,18 @@ impl Device {
 
     pub async fn halt(&self) -> Result<bool> {
         let task = protocol::process::Run {
-            target: "halt".into(),
+            target: "echo".into(),
             working_dir: "/tmp".into(),
-            args: vec![],
+            args: vec!["halt".to_owned()],
         };
         self.run(task, None, None, None, None).await
     }
 
     pub async fn reboot(&self) -> Result<bool> {
         let task = protocol::process::Run {
-            target: "reboot".into(),
+            target: "echo".into(),
             working_dir: "/tmp".into(),
-            args: vec![],
+            args: vec!["reboot".to_owned()],
         };
         self.run(task, None, None, None, None).await
     }

@@ -1,7 +1,8 @@
 pub mod process {
     use std::path::PathBuf;
     use bytes::BytesMut;
-    use serde::{Deserialize, Serialize};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use base64;
 
     #[derive(Debug, Serialize)]
     pub struct Run {
@@ -13,6 +14,7 @@ pub mod process {
     #[derive(Debug, Serialize)]
     pub enum Request {
         Run(Run),
+        #[serde(serialize_with = "bytesmut_serialize")]
         StandardInput(BytesMut),
         Terminate,
     }
@@ -20,8 +22,22 @@ pub mod process {
     #[derive(Debug, Deserialize)]
     pub enum Response {
         Terminated(bool),
+        #[serde(deserialize_with = "bytesmut_deserialize")]
         StandardOutput(BytesMut),
+        #[serde(deserialize_with = "bytesmut_deserialize")]
         StandardError(BytesMut),
+    }
+
+    fn bytesmut_serialize<S: Serializer>(bytes: &BytesMut, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&base64::encode(bytes))
+    }
+
+    fn bytesmut_deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<BytesMut, D::Error> {
+        use serde::de::Error;
+        let input: String = Deserialize::deserialize(deserializer)?;
+        base64::decode(input)
+            .map(|vec| BytesMut::from(&vec[..]))
+            .map_err(D::Error::custom)
     }
 }
 
