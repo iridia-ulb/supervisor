@@ -254,7 +254,7 @@ async fn handle_pair_with_drone_request(drone_tx_map: &HashMap<Uuid, drone::Send
         0 => log::warn!("Could not pair fernbedinung client with drone"),
         1 => {
             let (uuid, _) = read_ids.iter().next().unwrap();
-            log::info!("Pairing up-core device at {} with drone {}", device.addr, uuid);
+            log::info!("Pairing UP Core device at {} with drone {}", device.addr, uuid);
             match drone_tx_map.get(&uuid) {
                 Some(tx) => {
                     let request = drone::Request::Pair(device);
@@ -275,9 +275,9 @@ async fn stop_experiment(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>,
                          drone_tx_map: &HashMap<Uuid, drone::Sender>,
                          journal_requests_tx: &mpsc::UnboundedSender<journal::Request>) {
     let _ = journal_requests_tx.send(journal::Request::Stop);
-    // for (_, tx) in drone_tx_map.into_iter() {
-    //     tx.send(drone::Request::ExperimentStop);
-    // }
+    for (_, tx) in drone_tx_map.into_iter() {
+        let _ = tx.send(drone::Request::ExperimentStop);
+    }
     for (_, tx) in pipuck_tx_map.into_iter() {
         let _ = tx.send(pipuck::Request::ExperimentStop);
     }
@@ -288,6 +288,8 @@ async fn start_experiment(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>,
                           drone_tx_map: &HashMap<Uuid, drone::Sender>,
                           drone_software: &Software,
                           journal_requests_tx: &mpsc::UnboundedSender<journal::Request>) -> Result<()> {
+    // TODO call luac on each robot and validate the control software
+
     /* check software validity before starting */
     if pipuck_tx_map.len() > 0 {
         pipuck_software.check_config()?;
@@ -342,36 +344,36 @@ async fn start_experiment(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>,
     }
 
     /* now start the drones */
-    // let drone_start = drone_tx_map.into_iter()
-    //     .map(|(uuid, tx)| {
-    //         let uuid = uuid.clone();
-    //         let journal_requests_tx = journal_requests_tx.clone();
-    //         let (response_tx, response_rx) = oneshot::channel();
-    //         let request = drone::Request::ExperimentStart {
-    //             software: drone_software.clone(),
-    //             journal: journal_requests_tx,
-    //             callback: response_tx
-    //         };
-    //         tx.send(request)
-    //             .map_err(|_| Error::DroneError(uuid, drone::Error::RequestError))
-    //             .map(|_| async move {
-    //                 (uuid, response_rx.await)
-    //             })
-    //     })
-    //     .collect::<Result<FuturesUnordered<_>>>()?
-    //     .map(|(uuid, result)| result
-    //         .map_err(|_| Error::DroneError(uuid, drone::Error::ResponseError))
-    //         .and_then(|response| {
-    //             response.map_err(|error| Error::DroneError(uuid, error))
-    //         })
-    //     ).try_collect::<Vec<_>>().await;
+    let drone_start = drone_tx_map.into_iter()
+        .map(|(uuid, tx)| {
+            let uuid = uuid.clone();
+            let journal_requests_tx = journal_requests_tx.clone();
+            let (response_tx, response_rx) = oneshot::channel();
+            let request = drone::Request::ExperimentStart {
+                software: drone_software.clone(),
+                journal: journal_requests_tx,
+                callback: response_tx
+            };
+            tx.send(request)
+                .map_err(|_| Error::DroneError(uuid, drone::Error::RequestError))
+                .map(|_| async move {
+                    (uuid, response_rx.await)
+                })
+        })
+        .collect::<Result<FuturesUnordered<_>>>()?
+        .map(|(uuid, result)| result
+            .map_err(|_| Error::DroneError(uuid, drone::Error::ResponseError))
+            .and_then(|response| {
+                response.map_err(|error| Error::DroneError(uuid, error))
+            })
+        ).try_collect::<Vec<_>>().await;
 
-    // /* abort experiment if there was a problem starting the drones */
-    // if let Err(error) = drone_start {
-    //     log::error!("Failed to start drones: {}", error);
-    //     stop_experiment(pipuck_tx_map, drone_tx_map, journal_requests_tx).await;
-    //     return Err(error);
-    // }
+    /* abort experiment if there was a problem starting the drones */
+    if let Err(error) = drone_start {
+        log::error!("Failed to start drones: {}", error);
+        stop_experiment(pipuck_tx_map, drone_tx_map, journal_requests_tx).await;
+        return Err(error);
+    }
 
     Ok(())
 }

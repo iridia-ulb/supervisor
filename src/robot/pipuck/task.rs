@@ -30,9 +30,9 @@ pub type Receiver = mpsc::UnboundedReceiver<Request>;
 
 #[derive(Copy, Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub enum Action {
-    #[serde(rename = "Shutdown RPi")]
-    RpiShutdown,
-    #[serde(rename = "Reboot RPi")]
+    #[serde(rename = "Halt Raspberry Pi")]
+    RpiHalt,
+    #[serde(rename = "Reboot Raspberry Pi")]
     RpiReboot,
 }
 
@@ -69,15 +69,25 @@ pub async fn new(uuid: Uuid, mut arena_rx: Receiver, device: fernbedienung::Devi
 
     loop {
         tokio::select! {
-            /* poll the fernbedienung, breaking the loop if we don't get a response */
-            _ = &mut poll_fernbedienung_task => break,
-            /* handle requests */
-            Some(request) = arena_rx.recv() => {
-                match request {
+            /* poll the fernbedienung, exiting the main loop if we don't get a response */
+            _ = &mut poll_fernbedienung_task => {
+                log::warn!("Fernbedienung stopped responding");
+                break
+            },
+            /* if ARGoS is running, keep forwarding stdout/stderr  */
+            argos_result = &mut argos_task => {
+                terminate = None;
+                argos_task.set(futures::future::pending().left_future());
+                log::info!("ARGoS terminated with {:?}", argos_result);
+            },
+            /* handle incoming requests */
+            recv_request = arena_rx.recv() => match recv_request {
+                None => break, /* tx handle dropped, exit the loop */
+                Some(request) => match request {
                     Request::State(callback) => {
                         let state = State {
                             linux: device.addr,
-                            actions: vec![Action::RpiShutdown, Action::RpiReboot]
+                            actions: vec![Action::RpiHalt, Action::RpiReboot]
                         };
                         let _ = callback.send(state);
                     }
@@ -88,9 +98,9 @@ pub async fn new(uuid: Uuid, mut arena_rx: Receiver, device: fernbedienung::Devi
                             }
                             break;
                         },
-                        Action::RpiShutdown => {
-                            if let Err(error) = device.shutdown().await {
-                                log::error!("Shutdown failed: {}", error);
+                        Action::RpiHalt => {
+                            if let Err(error) = device.halt().await {
+                                log::error!("Halt failed: {}", error);
                             }
                             break;
                         }
@@ -117,14 +127,10 @@ pub async fn new(uuid: Uuid, mut arena_rx: Receiver, device: fernbedienung::Devi
                         argos_task.set(futures::future::pending().left_future());
                     }
                 }
-            },
-            argos_result = &mut argos_task => {
-                log::info!("ARGoS terminated with {:?}", argos_result);
-                argos_task.set(futures::future::pending().left_future());
             }
-            else => break,
         }
     }
+    /* return the uuid so that arena knows which robot terminated */
     uuid
 }
 
@@ -171,14 +177,17 @@ async fn handle_experiment_start<'d>(uuid: Uuid,
             "--id".to_owned(), uuid.to_string(),
         ],
     };
-    /* create channels for communicating with ARGoS */
+
+    /* channel for terminating ARGoS */
     let (terminate_tx, terminate_rx) = oneshot::channel();
-    let (stdout_tx, mut stdout_rx) = mpsc::unbounded_channel();
-    let (stderr_tx, mut stderr_rx) = mpsc::unbounded_channel();
-    let argos = device.run(task, Some(terminate_rx), None, Some(stdout_tx), Some(stderr_tx));
 
     /* create future for running ARGoS */
     let argos_task_future = async move {
+        /* channels for routing stdout and stderr to the journal */
+        let (stdout_tx, mut stdout_rx) = mpsc::unbounded_channel();
+        let (stderr_tx, mut stderr_rx) = mpsc::unbounded_channel();
+        /* run argos remotely */
+        let argos = device.run(task, Some(terminate_rx), None, Some(stdout_tx), Some(stderr_tx));
         tokio::pin!(argos);
         loop {
             tokio::select! {

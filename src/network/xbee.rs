@@ -1,12 +1,12 @@
 use bytes::{BytesMut, Buf, BufMut};
 use bitvec::view::BitView;
 
-use futures::SinkExt;
-use tokio::{net::UdpSocket, sync::{oneshot, mpsc}};
+use futures::{FutureExt, SinkExt, future};
+use tokio::{net::UdpSocket, sync::{oneshot, mpsc}, time::Instant};
 use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
 use tokio_util::{codec::{Decoder, Encoder}, udp::UdpFramed};
 
-use std::{collections::HashMap, convert::TryFrom, net::SocketAddr, ops::BitXor};
+use std::{collections::HashMap, convert::TryFrom, net::SocketAddr, ops::BitXor, time::Duration};
 use std::net::Ipv4Addr;
 
 const CONFIG_CMD_LEN: usize = 12;
@@ -214,18 +214,25 @@ impl Device {
     pub async fn new(addr: Ipv4Addr, return_addr_tx: mpsc::UnboundedSender<Ipv4Addr>) -> Result<Device> {
         /* bind to a random port on any interface */
         let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
-        let (request_tx, request_rx) = mpsc::unbounded_channel();
+        let (request_tx, mut request_rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
-            let socket_addr = SocketAddr::new(addr.into(), 3054);
-            let mut requests = UnboundedReceiverStream::new(request_rx);
+            let socket_addr = SocketAddr::new(addr.into(), 0xBEE);
             let mut framed = UdpFramed::new(socket, Codec);
-            let mut callbacks: HashMap<u8, oneshot::Sender<Result<BytesMut>>> = HashMap::new();
+            let mut callbacks: HashMap<u8, (Instant, oneshot::Sender<Result<BytesMut>>)> = HashMap::new();
+            let delay_task = future::ready(()).left_future();
+            tokio::pin!(delay_task);
             loop {
                 tokio::select!{
+                    _ = &mut delay_task => {
+                        callbacks.retain(|_, (timestamp, callback)| {
+                            !(callback.is_closed() || timestamp.elapsed().as_millis() > 500)
+                        });
+                        delay_task.set(tokio::time::sleep(Duration::from_millis(500)).right_future());
+                    },
                     Some(frame) = framed.next() => match frame {
                         Ok((CommandResponse { frame_id, data, .. }, recv_addr)) => {
                             if recv_addr == socket_addr {
-                                if let Some(callback) = callbacks.remove(&frame_id) {
+                                if let Some((_, callback)) = callbacks.remove(&frame_id) {
                                     if let Some(data) = data {
                                         let _ = callback.send(Ok(data));
                                     }
@@ -233,12 +240,12 @@ impl Device {
                             }
                         }
                         Err(error) => if let Error::RemoteError{frame_id, status} = error {
-                            if let Some(callback) = callbacks.remove(&frame_id) {
+                            if let Some((_, callback)) = callbacks.remove(&frame_id) {
                                 let _ = callback.send(Err(Error::RemoteError{frame_id, status}));
                             }
                         }
                     },
-                    request = requests.next() => match request {
+                    request = request_rx.recv() => match request {
                         Some(request) => match request {
                             Request::ApplyChanges => {
                                 let command = Command {
@@ -259,13 +266,11 @@ impl Device {
                                 let _ = framed.send((command, socket_addr)).await;
                             },
                             Request::GetParameter(parameter, callback) => {
-                                /* remove closed callback channels */
-                                callbacks.retain(|_, callback| !callback.is_closed());
                                 /* find an unused key */
                                 let unused_id = (1..u8::MAX).into_iter()
                                     .find(|id| !callbacks.contains_key(id));
                                 if let Some(unused_id) = unused_id {
-                                    callbacks.insert(unused_id, callback);
+                                    callbacks.insert(unused_id, (Instant::now(), callback));
                                     let command = Command {
                                         frame_id: unused_id,
                                         queue: false,
@@ -309,7 +314,15 @@ impl Device {
         String::from_utf8(value.to_vec()).map_err(|_| Error::DecodeError)
     }
 
-    pub async fn read_inputs(&self) -> Result<Vec<(Pin, bool)>> {
+    pub async fn link_state(&self) -> Result<u8> {
+        let (response_tx, response_rx) = oneshot::channel();
+        let request = Request::GetParameter([b'L',b'M'], response_tx);
+        self.request_tx.send(request).map_err(|_| Error::RequestFailed)?;
+        let value = response_rx.await.map_err(|_| Error::CallbackDropped)??;
+        value.first().cloned().ok_or(Error::DecodeError)
+    }
+
+    pub async fn pin_states(&self) -> Result<Vec<(Pin, bool)>> {
         let (response_tx, response_rx) = oneshot::channel();
         let request = Request::GetParameter([b'I',b'S'], response_tx);
         self.request_tx.send(request).map_err(|_| Error::RequestFailed)?;

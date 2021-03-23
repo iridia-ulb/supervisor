@@ -317,20 +317,20 @@ impl Device {
         Ok(hostname.trim().to_owned())
     }
 
-    pub async fn shutdown(&self) -> Result<bool> {
+    pub async fn halt(&self) -> Result<bool> {
         let task = protocol::process::Run {
-            target: "echo".into(),
+            target: "halt".into(),
             working_dir: "/tmp".into(),
-            args: vec!["shutdown".to_owned()],
+            args: vec![],
         };
         self.run(task, None, None, None, None).await
     }
 
     pub async fn reboot(&self) -> Result<bool> {
         let task = protocol::process::Run {
-            target: "echo".into(),
+            target: "reboot".into(),
             working_dir: "/tmp".into(),
-            args: vec!["reboot".to_owned()],
+            args: vec![],
         };
         self.run(task, None, None, None, None).await
     }

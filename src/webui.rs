@@ -450,7 +450,7 @@ async fn connections_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request
             span: 4,
             title: String::from("Pi-Puck"),
             content: vec![Content::Table {
-                header: vec!["Unique Identifier".to_owned(), "Linux Address".to_owned()],
+                header: vec!["Unique Identifier".to_owned(), "Raspberry Pi".to_owned()],
                 rows: vec![vec![uuid.to_string(), state.linux.to_string()]]
             }],
             actions: state.actions.into_iter().map(Action::PiPuck).collect(),
@@ -464,12 +464,12 @@ async fn connections_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request
             span: 4,
             title: String::from("Drone"),
             content: vec![Content::Table {
-                header: vec!["Unique Identifier".to_owned(), "Xbee".to_owned(), "Linux".to_owned()],
+                header: vec!["Unique Identifier".to_owned(), "Xbee".to_owned(), "UP Core".to_owned()],
                 rows: vec![
                     vec![
                         uuid.to_string(),
-                        state.xbee.to_string(),
-                        state.linux.map_or_else(|| "-".to_owned(), |ip| ip.to_string())
+                        format!("{} ({} dB)", state.xbee_addr, state.xbee_link_state ),
+                        state.upcore_addr.map_or_else(|| "-".to_owned(), |ip| ip.to_string())
                     ]
                 ]
             }],
