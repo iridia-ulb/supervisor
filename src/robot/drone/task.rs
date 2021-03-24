@@ -92,7 +92,7 @@ pub async fn poll_fernbedienung(device: Arc<fernbedienung::Device>) {
 
 pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
     /* attempt to initialize the xbee pins and mux */
-    if let Err(error) = init(&xbee) {
+    if let Err(error) = init(&xbee).await {
         log::error!("Failed to initialize Xbee for drone {}: {}", uuid, error);
         return uuid;
     }
@@ -159,10 +159,10 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
                     },
                     Request::Execute(action) => {
                         let result = match action {
-                            Action::UpCorePowerOn => set_upcore_power(&xbee, true),
-                            Action::UpCorePowerOff => set_upcore_power(&xbee, false),
-                            Action::PixhawkPowerOn => set_pixhawk_power(&xbee, true),
-                            Action::PixhawkPowerOff => set_pixhawk_power(&xbee, false),
+                            Action::UpCorePowerOn => set_upcore_power(&xbee, true).await,
+                            Action::UpCorePowerOff => set_upcore_power(&xbee, false).await,
+                            Action::PixhawkPowerOn => set_pixhawk_power(&xbee, true).await,
+                            Action::PixhawkPowerOff => set_pixhawk_power(&xbee, false).await,
                             Action::UpCoreReboot => match fernbedienung {
                                 Some(ref device) => device.reboot().await
                                     .map(|_| ())
@@ -272,7 +272,7 @@ async fn get_id(xbee: &xbee::Device) -> Result<u8> {
     Ok(id)
 }
 
-fn init(xbee: &xbee::Device) -> Result<()> {
+async fn init(xbee: &xbee::Device) -> Result<()> {
     /* set pin modes */
     let pin_modes = vec![
         /* The UART pins need to be disabled for the moment */
@@ -291,20 +291,20 @@ fn init(xbee: &xbee::Device) -> Result<()> {
         (xbee::Pin::DIO11, xbee::PinMode::OutputDefaultLow),
         (xbee::Pin::DIO12, xbee::PinMode::OutputDefaultLow),
     ];
-    xbee.set_pin_modes(pin_modes)?;
+    xbee.set_pin_modes(pin_modes).await?;
     /* configure mux */
-    xbee.write_outputs(vec![(xbee::Pin::DIO4, true)])?;
+    xbee.write_outputs(vec![(xbee::Pin::DIO4, true)]).await?;
     Ok(())
 }
 
-pub fn set_upcore_power(xbee: &xbee::Device, enable: bool) -> Result<()> {
-    xbee.write_outputs(vec![(xbee::Pin::DIO11, enable)])?;
-    Ok(())
+pub async fn set_upcore_power(xbee: &xbee::Device, enable: bool) -> Result<()> {
+    xbee.write_outputs(vec![(xbee::Pin::DIO11, enable)]).await
+        .map_err(|error| Error::XbeeError(error))
 }
 
-pub fn set_pixhawk_power(xbee: &xbee::Device, enable: bool) -> Result<()> {
-    xbee.write_outputs(vec![(xbee::Pin::DIO12, enable)])?;
-    Ok(())
+pub async fn set_pixhawk_power(xbee: &xbee::Device, enable: bool) -> Result<()> {
+    xbee.write_outputs(vec![(xbee::Pin::DIO12, enable)]).await
+        .map_err(|error| Error::XbeeError(error))
 }
 
 async fn handle_experiment_start(uuid: Uuid,
