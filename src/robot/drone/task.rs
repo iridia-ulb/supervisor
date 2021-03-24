@@ -89,6 +89,11 @@ pub async fn poll_fernbedienung(device: Arc<fernbedienung::Device>) {
     }
 }
 
+async fn poll_xbee_link_state(device: &xbee::Device) -> Result<u8> {
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    device.link_state().await.map_err(|error| Error::XbeeError(error))
+}
+
 pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
     /* attempt to initialize the xbee pins and mux */
     if let Err(error) = init(&xbee).await {
@@ -104,20 +109,21 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
     let argos_task = futures::future::pending().left_future();
     tokio::pin!(argos_task);
 
-    let poll_xbee_link_state_task = tokio::time::sleep(Duration::from_secs(1));
+    let poll_xbee_link_state_task = poll_xbee_link_state(&xbee);
     tokio::pin!(poll_xbee_link_state_task);
     let mut xbee_link_state = 0u8;
 
     loop {
         tokio::select! {
-            _ = &mut poll_xbee_link_state_task => match xbee.link_state().await {
+            result = &mut poll_xbee_link_state_task => match result {
                 Ok(link_state) => {
                     xbee_link_state = link_state;
-                    let delay = tokio::time::sleep(Duration::from_secs(1));
-                    poll_xbee_link_state_task.set(delay);
+                    poll_xbee_link_state_task.set(poll_xbee_link_state(&xbee));
                 }
                 Err(error) => {
                     log::warn!("Xbee on drone {} failed to respond: {}", uuid, error);
+                    /* TODO consider this as a disconnection scenario */
+                    poll_xbee_link_state_task.set(poll_xbee_link_state(&xbee));
                 }
             },
             _ = &mut poll_ferbedienung_task => {
