@@ -76,7 +76,6 @@ pub enum Error {
     SoftwareError(#[from] software::Error),
     #[error(transparent)]
     IoError(#[from] std::io::Error),
-
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -97,10 +96,6 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
         return uuid;
     }
     
-    let poll_xbee_link_state_task = poll_xbee_link_state(&xbee);
-    tokio::pin!(poll_xbee_link_state_task);
-    let mut xbee_link_state = 0u8;
-
     let mut fernbedienung: Option<Arc<fernbedienung::Device>> = None;
     let poll_ferbedienung_task = future::pending().left_future();
     tokio::pin!(poll_ferbedienung_task);
@@ -109,18 +104,21 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
     let argos_task = futures::future::pending().left_future();
     tokio::pin!(argos_task);
 
+    let poll_xbee_link_state_task = tokio::time::sleep(Duration::from_secs(1));
+    tokio::pin!(poll_xbee_link_state_task);
+    let mut xbee_link_state = 0u8;
+
     loop {
         tokio::select! {
-            result = &mut poll_xbee_link_state_task => match result {
+            _ = &mut poll_xbee_link_state_task => match xbee.link_state().await {
                 Ok(link_state) => {
                     xbee_link_state = link_state;
-                    poll_xbee_link_state_task.set(poll_xbee_link_state(&xbee));
-                },
-                /* exit this loop if the xbee fails to respond */
-                Err(_) => {
-                    log::warn!("Xbee for drone {} failed to respond", uuid);
-                    break;
-                },
+                    let delay = tokio::time::sleep(Duration::from_secs(1));
+                    poll_xbee_link_state_task.set(delay);
+                }
+                Err(error) => {
+                    log::warn!("Xbee on drone {} failed to respond: {}", uuid, error);
+                }
             },
             _ = &mut poll_ferbedienung_task => {
                 /* handler if fernbedienung disconnects */
@@ -220,25 +218,6 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
     }
     uuid
 }
-
-async fn poll_xbee_link_state(xbee: &xbee::Device) -> Result<u8> {
-    let mut remaining_timeouts = 3usize;
-    /* sleep a bit */
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    
-    while remaining_timeouts > 0 {
-        let request_with_timeout = 
-            tokio::time::timeout(Duration::from_millis(500), xbee.link_state());
-        if let Ok(result) = request_with_timeout.await {
-            return result.map_err(|error| Error::XbeeError(error))
-        }
-        else {
-            remaining_timeouts -= 1;
-        }
-    }
-    Err(Error::XbeeTimeout)
-}
- 
 
 async fn xbee_actions(xbee: &xbee::Device) -> Vec<Action> {
     let mut actions = Vec::with_capacity(2);
