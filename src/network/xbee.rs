@@ -334,12 +334,12 @@ impl Device {
         String::from_utf8(value.to_vec()).map_err(|_| Error::DecodeError)
     }
 
-    pub async fn link_state(&self) -> Result<u8> {
+    pub async fn link_margin(&self) -> Result<i32> {
         let (response_tx, response_rx) = oneshot::channel();
         let request = Request::GetParameter([b'L',b'M'], response_tx);
         self.request_tx.send(request).map_err(|_| Error::RequestFailed)?;
         let value = response_rx.await.map_err(|_| Error::NoResponse)??;
-        value.first().cloned().ok_or(Error::DecodeError)
+        value.first().cloned().map(|state| state as i32).ok_or(Error::DecodeError)
     }
 
     pub async fn pin_states(&self) -> Result<Vec<(Pin, bool)>> {

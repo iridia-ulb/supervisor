@@ -24,7 +24,8 @@ struct Options {
 // I want to send simple JPEG frames using intra-frame compression only, i.e., raw frames from device
 // fswebcam will send images to stdout
 // update fernbedienung to use base64 on stdin,out,err
-// loop on device vs. continually reissue command? reissuing command means no latency build up + clear boundaries on images
+// loop on device vs. continually reissue command?
+// reissuing command means no latency build up + clear boundaries on images + easy to cancel when we stop requesting it (i.e., change tabs)
 // https://github.com/linux4sam/meta-atmel/blob/master/recipes-multimedia/fswebcam/fswebcam_git.bb
 
 #[tokio::main]

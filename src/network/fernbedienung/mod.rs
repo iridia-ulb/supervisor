@@ -1,10 +1,7 @@
-use std::{net::Ipv4Addr, pin::Pin, future::Future};
+use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
-//use protocol::Request;
-//use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use bytes::BytesMut;
 use mpsc::UnboundedSender;
@@ -13,40 +10,32 @@ use tokio::sync::{mpsc::{self, UnboundedReceiver}, oneshot};
 use uuid::Uuid;
 use futures::{self, FutureExt, SinkExt, StreamExt, stream::FuturesUnordered};
 
-
-use tokio::{sync::Mutex, net::TcpStream};
+use tokio::net::TcpStream;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tokio_serde::{SymmetricallyFramed, formats::SymmetricalJson};
+use regex::Regex;
 
 mod protocol;
 
 pub use protocol::{Upload, process::Run};
+
+lazy_static::lazy_static! {
+    static ref REGEX_LINK_STRENGTH: Regex = 
+        Regex::new(r"signal:\s+(-\d+)\s+dBm+").unwrap();
+}
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error(transparent)]
     IoError(#[from] std::io::Error),
 
-    // #[error(transparent)]
-    // SinkError(#[from] futures::sink::Sink::Error),
-    
-    #[error("Remote error: {0}")]
-    RemoteError(String),
-
-    #[error("Remote operation timed out")]
-    Timeout,
-
     #[error("Could not send request")]
     RequestError,
-
     #[error("Did not receive response")]
     ResponseError,
 
-    #[error("Process stream terminated")]
-    TerminationError,
-
-    #[error("Could not convert data to UTF-8")]
-    ConversionError,
+    #[error("Could not decode data")]
+    DecodeError,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -298,7 +287,7 @@ impl Device {
         let stdout_stream = UnboundedReceiverStream::new(stdout_rx);
         let stdout = stdout_stream.concat().await;
         let temp_dir = std::str::from_utf8(stdout.as_ref())
-            .map_err(|_| Error::ConversionError)?;
+            .map_err(|_| Error::DecodeError)?;
         Ok(temp_dir.trim().to_owned())
     }
 
@@ -313,7 +302,7 @@ impl Device {
         let stdout_stream = UnboundedReceiverStream::new(stdout_rx);
         let stdout = stdout_stream.concat().await;
         let hostname = std::str::from_utf8(stdout.as_ref())
-            .map_err(|_| Error::ConversionError)?;
+            .map_err(|_| Error::DecodeError)?;
         Ok(hostname.trim().to_owned())
     }
 
@@ -335,6 +324,23 @@ impl Device {
         self.run(task, None, None, None, None).await
     }
 
- 
+    pub async fn link_strength(&self) -> Result<i32> {
+        let task = protocol::process::Run {
+            target: "iw".into(),
+            working_dir: "/tmp".into(),
+            args: vec!["dev".to_owned(), "wlan0".to_owned(), "link".to_owned()],
+        };
+        let (stdout_tx, stdout_rx) = mpsc::unbounded_channel();
+        self.run(task, None, None, Some(stdout_tx), None).await?;
+        let stdout_stream = UnboundedReceiverStream::new(stdout_rx);
+        let stdout = stdout_stream.concat().await;
+        let link_info = std::str::from_utf8(stdout.as_ref())
+            .map_err(|_| Error::DecodeError)?;
+        REGEX_LINK_STRENGTH.captures(link_info)
+            .and_then(|captures| captures.get(1))
+            .map(|capture| capture.as_str())
+            .ok_or(Error::DecodeError)
+            .and_then(|strength| strength.parse().map_err(|_| Error::DecodeError))
+    }
 }
 

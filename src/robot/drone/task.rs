@@ -9,9 +9,8 @@ use crate::journal;
 use crate::software;
 
 pub struct State {
-    pub xbee_addr: Ipv4Addr,
-    pub upcore_addr: Option<Ipv4Addr>,
-    pub xbee_link_state: u8,
+    pub xbee: (Ipv4Addr, i32),
+    pub upcore: Option<(Ipv4Addr, i32)>,
     pub actions: Vec<Action>,
 }
 
@@ -56,10 +55,8 @@ pub enum Action {
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-
-    #[error("Could not communicate with Xbee")]
-    XbeeTimeout,
-
+    #[error("Operation timed out")]
+    Timeout,
     #[error("{0:?} is not currently valid")]
     InvalidAction(Action),
 
@@ -80,18 +77,16 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-pub async fn poll_fernbedienung(device: Arc<fernbedienung::Device>) {
-    while let Ok(response) = tokio::time::timeout(Duration::from_millis(500), device.ping()).await {
-        match response {
-            Ok(true) => tokio::time::sleep(Duration::from_millis(500)).await,
-            _ => break,
-        }
-    }
+pub async fn poll_upcore_link_strength(device: Arc<fernbedienung::Device>) -> Result<i32> {
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    tokio::time::timeout(Duration::from_secs(1), device.link_strength()).await
+        .map_err(|_| Error::Timeout)
+        .and_then(|inner| inner.map_err(|error| Error::FernbedienungError(error)))
 }
 
-async fn poll_xbee_link_state(device: &xbee::Device) -> Result<u8> {
+async fn poll_xbee_link_margin(device: &xbee::Device) -> Result<i32> {
     tokio::time::sleep(Duration::from_secs(1)).await;
-    device.link_state().await.map_err(|error| Error::XbeeError(error))
+    device.link_margin().await.map_err(|error| Error::XbeeError(error))
 }
 
 pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
@@ -102,34 +97,47 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
     }
     
     let mut fernbedienung: Option<Arc<fernbedienung::Device>> = None;
-    let poll_ferbedienung_task = future::pending().left_future();
-    tokio::pin!(poll_ferbedienung_task);
+    let poll_upcore_link_strength_task = future::pending().left_future();
+    tokio::pin!(poll_upcore_link_strength_task);
+    let mut upcore_link_strength = -100;
 
     let mut terminate: Option<oneshot::Sender<()>> = None;
-    let argos_task = futures::future::pending().left_future();
+    let argos_task = future::pending().left_future();
     tokio::pin!(argos_task);
 
-    let poll_xbee_link_state_task = poll_xbee_link_state(&xbee);
-    tokio::pin!(poll_xbee_link_state_task);
-    let mut xbee_link_state = 0u8;
+    let poll_xbee_link_margin_task = poll_xbee_link_margin(&xbee);
+    tokio::pin!(poll_xbee_link_margin_task);
+    let mut xbee_link_margin = 0;
 
     loop {
         tokio::select! {
-            result = &mut poll_xbee_link_state_task => match result {
-                Ok(link_state) => {
-                    xbee_link_state = link_state;
-                    poll_xbee_link_state_task.set(poll_xbee_link_state(&xbee));
+            result = &mut poll_xbee_link_margin_task => match result {
+                Ok(link_margin) => {
+                    xbee_link_margin = link_margin;
+                    poll_xbee_link_margin_task.set(poll_xbee_link_margin(&xbee));
                 }
                 Err(error) => {
-                    log::warn!("Xbee on drone {} failed to respond: {}", uuid, error);
-                    /* TODO consider this as a disconnection scenario */
-                    poll_xbee_link_state_task.set(poll_xbee_link_state(&xbee));
+                    log::warn!("Xbee on drone {}: {}", uuid, error);
+                    /* TODO consider this as a disconnection scenario? */
+                    /* disconnect here if the upcore is also offline? otherwise try to
+                       reestablish connection with xbee */
+                    poll_xbee_link_margin_task.set(poll_xbee_link_margin(&xbee));
                 }
             },
-            _ = &mut poll_ferbedienung_task => {
-                /* handler if fernbedienung disconnects */
-                fernbedienung = None;
-                poll_ferbedienung_task.set(future::pending().left_future());
+            result = &mut poll_upcore_link_strength_task => match result {
+                Ok(link_strength) => {
+                    upcore_link_strength = link_strength;
+                    poll_upcore_link_strength_task.set(match fernbedienung {
+                        Some(ref device) => poll_upcore_link_strength(device.clone()).right_future(),
+                        None => future::pending().left_future(),
+                    });
+                }
+                Err(error) => {
+                    log::warn!("UP Core on drone {}: {}", uuid, error);
+                    /* TODO consider this as a disconnection scenario */
+                    fernbedienung = None;
+                    poll_upcore_link_strength_task.set(future::pending().left_future());
+                }
             },
             /* if ARGoS is running, keep forwarding stdout/stderr  */
             argos_result = &mut argos_task => {
@@ -149,9 +157,8 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
                         }
                         /* send back the state */
                         let state = State {
-                            xbee_addr: xbee.addr,
-                            xbee_link_state: xbee_link_state,
-                            upcore_addr: fernbedienung.as_ref().map(|dev| dev.addr),
+                            xbee: (xbee.addr, xbee_link_margin),
+                            upcore: fernbedienung.as_ref().map(|dev| (dev.addr, upcore_link_strength)),
                             actions,
                         };
                         let _ = callback.send(state);
@@ -159,7 +166,7 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
                     Request::Pair(device) => {
                         let device = Arc::new(device);
                         fernbedienung = Some(device.clone());
-                        poll_ferbedienung_task.set(poll_fernbedienung(device).right_future());
+                        poll_upcore_link_strength_task.set(poll_upcore_link_strength(device).right_future());
                     },
                     Request::Execute(action) => {
                         let result = match action {

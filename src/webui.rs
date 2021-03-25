@@ -29,6 +29,11 @@ use itertools::Itertools;
 const OK_ICON: &str = "<i class=\"material-icons mdl-list__item-icon\" style=\"color:green; vertical-align: middle;\">check_circle</i>";
 const ERROR_ICON: &str = "<i class=\"material-icons mdl-list__item-icon\" style=\"color:red; vertical-align: middle;\">error</i>";
 
+const WIFI0_IMG: &str = "<img src=\"images/wifi0.svg\" style=\"height:2em;padding-right:10px\" />";
+const WIFI1_IMG: &str = "<img src=\"images/wifi1.svg\" style=\"height:2em;padding-right:10px\" />";
+const WIFI2_IMG: &str = "<img src=\"images/wifi2.svg\" style=\"height:2em;padding-right:10px\" />";
+const WIFI3_IMG: &str = "<img src=\"images/wifi3.svg\" style=\"height:2em;padding-right:10px\" />";
+const WIFI4_IMG: &str = "<img src=\"images/wifi4.svg\" style=\"height:2em;padding-right:10px\" />";
 
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "lowercase")]
@@ -451,7 +456,13 @@ async fn connections_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request
             title: String::from("Pi-Puck"),
             content: vec![Content::Table {
                 header: vec!["Unique Identifier".to_owned(), "Raspberry Pi".to_owned()],
-                rows: vec![vec![uuid.to_string(), state.linux.to_string()]]
+                rows: vec![vec![uuid.to_string(), format!("{} {}", match state.rpi.1 + 90 {
+                    15..=29  => WIFI1_IMG,
+                    30..=44  => WIFI2_IMG,
+                    45..=59  => WIFI3_IMG,
+                    60..=100 => WIFI4_IMG,
+                    _ => WIFI0_IMG,
+                }, state.rpi.0)]]
             }],
             actions: state.actions.into_iter().map(Action::PiPuck).collect(),
         };
@@ -468,8 +479,22 @@ async fn connections_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request
                 rows: vec![
                     vec![
                         uuid.to_string(),
-                        format!("{} ({} dB)", state.xbee_addr, state.xbee_link_state ),
-                        state.upcore_addr.map_or_else(|| "-".to_owned(), |ip| ip.to_string())
+                        format!("{} {}", match state.xbee.1 {
+                            15..=29  => WIFI1_IMG,
+                            30..=44  => WIFI2_IMG,
+                            45..=59  => WIFI3_IMG,
+                            60..=100 => WIFI4_IMG,
+                            _ => WIFI0_IMG,
+                        }, state.xbee.0),
+                        state.upcore.map_or_else(|| "-".to_owned(), |upcore| {
+                            format!("{} {}", match upcore.1 + 90 {
+                                15..=29  => WIFI1_IMG,
+                                30..=44  => WIFI2_IMG,
+                                45..=59  => WIFI3_IMG,
+                                60..=100 => WIFI4_IMG,
+                                _ => WIFI0_IMG,
+                            }, upcore.0)
+                        })
                     ]
                 ]
             }],

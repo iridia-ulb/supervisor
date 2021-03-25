@@ -1,4 +1,4 @@
-use futures::{Future, FutureExt, TryFutureExt, TryStreamExt, stream::FuturesUnordered};
+use futures::{Future, FutureExt, TryFutureExt, TryStreamExt, future, stream::FuturesUnordered};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use std::{net::Ipv4Addr, path::PathBuf, time::Duration};
@@ -10,7 +10,7 @@ use crate::software;
 
 #[derive(Debug)]
 pub struct State {
-    pub linux: Ipv4Addr, // rename to addr
+    pub rpi: (Ipv4Addr, i32),
     pub actions: Vec<Action>,
 }
 
@@ -38,6 +38,8 @@ pub enum Action {
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
+    #[error("Operation timed out")]
+    Timeout,
     #[error("Could not send request")]
     RequestError,
     #[error("Did not receive response")]
@@ -53,10 +55,11 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-pub async fn poll_fernbedienung(device: &fernbedienung::Device) {
-    while let Ok(Ok(true)) = tokio::time::timeout(Duration::from_millis(500),  device.ping()).await {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
+pub async fn poll_rpi_link_strength(device: &fernbedienung::Device) -> Result<i32> {
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    tokio::time::timeout(Duration::from_secs(1), device.link_strength()).await
+        .map_err(|_| Error::Timeout)
+        .and_then(|inner| inner.map_err(|error| Error::FernbedienungError(error)))
 }
 
 pub async fn new(uuid: Uuid, mut arena_rx: Receiver, device: fernbedienung::Device) -> Uuid {
@@ -64,15 +67,22 @@ pub async fn new(uuid: Uuid, mut arena_rx: Receiver, device: fernbedienung::Devi
     let argos_task = futures::future::pending().left_future();
     tokio::pin!(argos_task);
 
-    let poll_fernbedienung_task = poll_fernbedienung(&device);
-    tokio::pin!(poll_fernbedienung_task);
+    let poll_rpi_link_strength_task = poll_rpi_link_strength(&device);
+    tokio::pin!(poll_rpi_link_strength_task);
+    let mut rpi_link_strength = -100;
 
     loop {
         tokio::select! {
             /* poll the fernbedienung, exiting the main loop if we don't get a response */
-            _ = &mut poll_fernbedienung_task => {
-                log::warn!("Fernbedienung stopped responding");
-                break
+            result = &mut poll_rpi_link_strength_task => match result {
+                Ok(link_strength) => {
+                    rpi_link_strength = link_strength;
+                    poll_rpi_link_strength_task.set(poll_rpi_link_strength(&device));
+                }
+                Err(error) => {
+                    log::warn!("Raspberry Pi on Pi-Puck {}: {}", uuid, error);
+                    break;
+                }
             },
             /* if ARGoS is running, keep forwarding stdout/stderr  */
             argos_result = &mut argos_task => {
@@ -86,7 +96,7 @@ pub async fn new(uuid: Uuid, mut arena_rx: Receiver, device: fernbedienung::Devi
                 Some(request) => match request {
                     Request::State(callback) => {
                         let state = State {
-                            linux: device.addr,
+                            rpi: (device.addr, rpi_link_strength),
                             actions: vec![Action::RpiHalt, Action::RpiReboot]
                         };
                         let _ = callback.send(state);
