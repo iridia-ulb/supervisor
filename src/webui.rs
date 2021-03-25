@@ -35,6 +35,8 @@ const WIFI2_IMG: &str = "<img src=\"images/wifi2.svg\" style=\"height:2em;paddin
 const WIFI3_IMG: &str = "<img src=\"images/wifi3.svg\" style=\"height:2em;padding-right:10px\" />";
 const WIFI4_IMG: &str = "<img src=\"images/wifi4.svg\" style=\"height:2em;padding-right:10px\" />";
 
+const TEST_IMG: &str = "<img src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=\" style=\"width:calc(50% - 10px);padding:5px;\" />";
+
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "lowercase")]
 enum Content {
@@ -463,7 +465,7 @@ async fn connections_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request
                     60..=100 => WIFI4_IMG,
                     _ => WIFI0_IMG,
                 }, state.rpi.0)]]
-            }],
+            }, Content::Text(format!("{0}{0}{0}{0}", TEST_IMG))],
             actions: state.actions.into_iter().map(Action::PiPuck).collect(),
         };
         cards.push(card);       
