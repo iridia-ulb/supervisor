@@ -54,9 +54,6 @@ pub struct Device {
 }
 
 enum Request {
-    Ping {
-        reply: oneshot::Sender<bool>
-    },
     Run {
         task: Run,
         terminate_rx: Option<oneshot::Receiver<()>>,
@@ -116,26 +113,6 @@ impl Device {
                     request = local_request_rx.recv() => match request {
                         Some(request) => {
                             let task = match request {
-                                Request::Ping { reply } => {
-                                    let uuid = Uuid::new_v4();
-                                    let request = protocol::RequestKind::Ping;
-                                    /* subscribe to updates */
-                                    let (ping_status_tx, mut ping_status_rx) = mpsc::unbounded_channel();
-                                    status_txs.insert(uuid, ping_status_tx);
-                                    /* send request to remote */
-                                    let request_result = remote_requests_tx.send(protocol::Request(uuid, request));
-                                    /* process responses */
-                                    async move {
-                                        let _ = reply.send(match request_result {
-                                            Ok(_) => match ping_status_rx.recv().await {
-                                                Some(status) => matches!(status, protocol::ResponseKind::Ok),
-                                                _ => false,
-                                            }
-                                            _ => false,
-                                        });
-                                        uuid
-                                    }.left_future()
-                                }
                                 Request::Run { task, terminate_rx, stdin_rx, stdout_tx, stderr_tx, exit_status_tx } => {
                                     let uuid = Uuid::new_v4();
                                     let request = protocol::RequestKind::Process(protocol::process::Request::Run(task));
@@ -157,7 +134,7 @@ impl Device {
                                                 uuid
                                             }
                                         }
-                                    }.left_future().right_future()
+                                    }.left_future()
                                 }
                                 Request::Upload { upload, result } => {
                                     let uuid = Uuid::new_v4();
@@ -177,7 +154,7 @@ impl Device {
                                             _ => false,
                                         });
                                         uuid
-                                    }.right_future().right_future()
+                                    }.right_future()
                                 }
                             };
                             tasks.push(task);
@@ -256,14 +233,6 @@ impl Device {
         }
         /* return the uuid so it can be removed from the hashmap */
         uuid
-    }
-
-    pub async fn ping(&self) -> Result<bool> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.request_tx
-            .send(Request::Ping { reply: reply_tx})
-            .map_err(|_ | Error::RequestError)?;
-        reply_rx.await.map_err(|_| Error::ResponseError)
     }
 
     pub async fn upload(&self, path: PathBuf, filename: PathBuf, contents: Vec<u8>) -> Result<bool> {
