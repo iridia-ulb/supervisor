@@ -127,12 +127,16 @@ impl Device {
                                     let (ping_status_tx, mut ping_status_rx) = mpsc::unbounded_channel();
                                     status_txs.insert(uuid, ping_status_tx);
                                     /* send request to remote */
-                                    remote_requests_tx.send(protocol::Request(uuid, request));
-                                    /* */
+                                    let request_result = remote_requests_tx.send(protocol::Request(uuid, request));
+                                    /* process responses */
                                     async move {
-                                        if let Some(status) = ping_status_rx.recv().await {
-                                            let _ = reply.send(matches!(status, protocol::ResponseKind::Ok));
-                                        }
+                                        let _ = reply.send(match request_result {
+                                            Ok(_) => match ping_status_rx.recv().await {
+                                                Some(status) => matches!(status, protocol::ResponseKind::Ok),
+                                                _ => false,
+                                            }
+                                            _ => false,
+                                        });
                                         uuid
                                     }.left_future()
                                 }
@@ -143,12 +147,21 @@ impl Device {
                                     let (run_status_tx, run_status_rx) = mpsc::unbounded_channel();
                                     status_txs.insert(uuid, run_status_tx);
                                     /* send the request */
-                                    remote_requests_tx.send(protocol::Request(uuid, request));
+                                    let request_result = remote_requests_tx.send(protocol::Request(uuid, request));
                                     /* process responses */
-                                    Device::handle_run_input_output(
-                                        uuid, run_status_rx, remote_requests_tx.clone(), 
-                                        terminate_rx, stdin_rx, stdout_tx, stderr_tx, exit_status_tx,
-                                    ).left_future().right_future()
+                                    let remote_requests_tx = remote_requests_tx.clone();
+                                    async move {
+                                        match request_result {
+                                            Ok(_) => Device::handle_run_input_output(
+                                                uuid, run_status_rx, remote_requests_tx, terminate_rx,
+                                                stdin_rx, stdout_tx, stderr_tx, exit_status_tx
+                                            ).await,
+                                            _ => {
+                                                let _ = exit_status_tx.send(false);
+                                                uuid
+                                            }
+                                        }
+                                    }.left_future().right_future()
                                 }
                                 Request::Upload { upload, result } => {
                                     let uuid = Uuid::new_v4();
@@ -157,12 +170,16 @@ impl Device {
                                     let (upload_status_tx, mut upload_status_rx) = mpsc::unbounded_channel();
                                     status_txs.insert(uuid, upload_status_tx);
                                     /* send the request */
-                                    remote_requests_tx.send(protocol::Request(uuid, request));
+                                    let request_result = remote_requests_tx.send(protocol::Request(uuid, request));
                                     /* process responses */
                                     async move {
-                                        if let Some(status) = upload_status_rx.recv().await {
-                                            let _ = result.send(matches!(status, protocol::ResponseKind::Ok));
-                                        }
+                                        let _ = result.send(match request_result {
+                                            Ok(_) => match upload_status_rx.recv().await {
+                                                Some(status) => matches!(status, protocol::ResponseKind::Ok),
+                                                _ => false,
+                                            }
+                                            _ => false,
+                                        });
                                         uuid
                                     }.right_future().right_future()
                                 }
