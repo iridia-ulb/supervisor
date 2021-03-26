@@ -1,3 +1,4 @@
+use base64::encode;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use warp::ws;
 
@@ -37,7 +38,12 @@ const WIFI4_IMG: &str = "<img src=\"images/wifi4.svg\" style=\"height:2em;paddin
 
 // This doesn't work since it changes the current URL, disconnecting the websocket
 // onclick=\"window.location.href=this.src.replace('image/png', 'image/octet-stream')\"
-const TEST_IMG: &str = "<img src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=\" style=\"width:calc(50% - 10px);padding:5px;\" />";
+const TEST_IMG: &str = "<img src=\"data:image/jpg;base64,\" style=\"width:calc(50% - 10px);padding:5px;\" />";
+
+fn generate_img_node(mime: &str, data: &[u8], style: &str) -> String {
+    let data = base64::encode(data);
+    format!("<img src=\"data:{};base64,{}\" style=\"{}\" />", mime, data, style)
+}
 
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "lowercase")]
@@ -444,7 +450,7 @@ async fn connections_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request
     let mut cards = Cards::default();
     /* generate Pi-Puck cards */
     for (uuid, state) in pipucks.into_iter() {
-        let card = Card {
+        let mut card = Card {
             uuid: uuid,
             span: 4,
             title: String::from("Pi-Puck"),
@@ -457,9 +463,13 @@ async fn connections_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request
                     60..=100 => WIFI4_IMG,
                     _ => WIFI0_IMG,
                 }, state.rpi.0)]]
-            }, Content::Text(format!("{0}{0}{0}{0}", TEST_IMG))],
+            }],
             actions: state.actions.into_iter().map(Action::PiPuck).collect(),
         };
+        if let Some(data) = state.camera {
+            let image = generate_img_node("image/jpg", &data, "width:calc(50% - 10px);padding:5px;");
+            card.content.push(Content::Text(image));
+        }
         cards.push(card);       
     }
     /* generate drone cards */

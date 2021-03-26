@@ -1,3 +1,4 @@
+use bytes::BytesMut;
 use futures::{Future, FutureExt, TryFutureExt, TryStreamExt, stream::FuturesUnordered};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -8,9 +9,13 @@ use crate::network::fernbedienung;
 use crate::journal;
 use crate::software;
 
+// Info about reading the Pi-Puck battery level here:
+// https://github.com/yorkrobotlab/pi-puck-packages/blob/master/pi-puck-utils/pi-puck-battery
+
 #[derive(Debug)]
 pub struct State {
     pub rpi: (Ipv4Addr, i32),
+    pub camera: Option<BytesMut>,
     pub actions: Vec<Action>,
 }
 
@@ -36,6 +41,9 @@ pub enum Action {
     RpiReboot,
 }
 
+//fswebcam -d /dev/video0 --input 0 --palette YUYV --resolution 640x480 --no-banner --jpeg -1 --save -
+
+
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("Operation timed out")]
@@ -55,6 +63,11 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+pub async fn poll_rpi_camera(device: &fernbedienung::Device) -> Result<BytesMut> {
+    device.fswebcam("/dev/video0", 0, "YUYV", 640, 480).await
+        .map_err(|error| Error::FernbedienungError(error))
+}
+
 pub async fn poll_rpi_link_strength(device: &fernbedienung::Device) -> Result<i32> {
     tokio::time::sleep(Duration::from_secs(1)).await;
     tokio::time::timeout(Duration::from_secs(1), device.link_strength()).await
@@ -71,6 +84,10 @@ pub async fn new(uuid: Uuid, mut arena_rx: Receiver, device: fernbedienung::Devi
     tokio::pin!(poll_rpi_link_strength_task);
     let mut rpi_link_strength = -100;
 
+    let poll_rpi_camera_task = poll_rpi_camera(&device);
+    tokio::pin!(poll_rpi_camera_task);
+    let mut rpi_camera_image = None;
+
     loop {
         tokio::select! {
             /* poll the fernbedienung, exiting the main loop if we don't get a response */
@@ -80,8 +97,18 @@ pub async fn new(uuid: Uuid, mut arena_rx: Receiver, device: fernbedienung::Devi
                     poll_rpi_link_strength_task.set(poll_rpi_link_strength(&device));
                 }
                 Err(error) => {
-                    log::warn!("Raspberry Pi on Pi-Puck {}: {}", uuid, error);
+                    log::warn!("Polling link strength failed for Pi-Puck {}: {}", uuid, error);
                     break;
+                }
+            },
+            result = &mut poll_rpi_camera_task => match result {
+                Ok(camera_image) => {
+                    rpi_camera_image = Some(camera_image);
+                    poll_rpi_camera_task.set(poll_rpi_camera(&device));
+                }
+                Err(error) => {
+                    log::warn!("Polling camera failed for Pi-Puck {}: {}", uuid, error);
+                    poll_rpi_camera_task.set(poll_rpi_camera(&device));
                 }
             },
             /* if ARGoS is running, keep forwarding stdout/stderr  */
@@ -97,7 +124,8 @@ pub async fn new(uuid: Uuid, mut arena_rx: Receiver, device: fernbedienung::Devi
                     Request::State(callback) => {
                         let state = State {
                             rpi: (device.addr, rpi_link_strength),
-                            actions: vec![Action::RpiHalt, Action::RpiReboot]
+                            actions: vec![Action::RpiHalt, Action::RpiReboot],
+                            camera: rpi_camera_image.clone(),
                         };
                         let _ = callback.send(state);
                     }

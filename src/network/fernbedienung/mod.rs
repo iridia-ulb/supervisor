@@ -30,6 +30,8 @@ pub enum Error {
     IoError(#[from] std::io::Error),
     #[error("Could not send request")]
     RequestError,
+    #[error("Could not execute request")]
+    ExecuteError,
     #[error("Did not receive response")]
     ResponseError,
     #[error("Could not decode data")]
@@ -265,12 +267,19 @@ impl Device {
             args: vec!["-d".to_owned()],
         };
         let (stdout_tx, stdout_rx) = mpsc::unbounded_channel();
-        self.run(task, None, None, Some(stdout_tx), None).await?;
         let stdout_stream = UnboundedReceiverStream::new(stdout_rx);
-        let stdout = stdout_stream.concat().await;
-        let temp_dir = std::str::from_utf8(stdout.as_ref())
-            .map_err(|_| Error::DecodeError)?;
-        Ok(temp_dir.trim().to_owned())
+        let (exit_status, stdout) = tokio::try_join!(
+            self.run(task, None, None, Some(stdout_tx), None),
+            stdout_stream.concat().map(Result::Ok)
+        )?;
+        match exit_status {
+            true => {
+                let temp_dir = std::str::from_utf8(stdout.as_ref())
+                    .map_err(|_| Error::DecodeError)?;
+                Ok(temp_dir.trim().to_owned())
+            },
+            false => Err(Error::ExecuteError),
+        }
     }
 
     pub async fn hostname(&self) -> Result<String> {
@@ -280,12 +289,19 @@ impl Device {
             args: vec![],
         };
         let (stdout_tx, stdout_rx) = mpsc::unbounded_channel();
-        self.run(task, None, None, Some(stdout_tx), None).await?;
         let stdout_stream = UnboundedReceiverStream::new(stdout_rx);
-        let stdout = stdout_stream.concat().await;
-        let hostname = std::str::from_utf8(stdout.as_ref())
-            .map_err(|_| Error::DecodeError)?;
-        Ok(hostname.trim().to_owned())
+        let (exit_status, stdout) = tokio::try_join!(
+            self.run(task, None, None, Some(stdout_tx), None),
+            stdout_stream.concat().map(Result::Ok)
+        )?;
+        match exit_status {
+            true => {
+                let hostname = std::str::from_utf8(stdout.as_ref())
+                    .map_err(|_| Error::DecodeError)?;
+                Ok(hostname.trim().to_owned())
+            },
+            false => Err(Error::ExecuteError),
+        }
     }
 
     pub async fn halt(&self) -> Result<bool> {
@@ -313,16 +329,50 @@ impl Device {
             args: vec!["dev".to_owned(), "wlan0".to_owned(), "link".to_owned()],
         };
         let (stdout_tx, stdout_rx) = mpsc::unbounded_channel();
-        self.run(task, None, None, Some(stdout_tx), None).await?;
         let stdout_stream = UnboundedReceiverStream::new(stdout_rx);
-        let stdout = stdout_stream.concat().await;
-        let link_info = std::str::from_utf8(stdout.as_ref())
-            .map_err(|_| Error::DecodeError)?;
-        REGEX_LINK_STRENGTH.captures(link_info)
-            .and_then(|captures| captures.get(1))
-            .map(|capture| capture.as_str())
-            .ok_or(Error::DecodeError)
-            .and_then(|strength| strength.parse().map_err(|_| Error::DecodeError))
+        let (exit_status, stdout) = tokio::try_join!(
+            self.run(task, None, None, Some(stdout_tx), None),
+            stdout_stream.concat().map(Result::Ok)
+        )?;
+        match exit_status {
+            true => {
+                let link_info = std::str::from_utf8(stdout.as_ref())
+                    .map_err(|_| Error::DecodeError)?;
+                REGEX_LINK_STRENGTH.captures(link_info)
+                    .and_then(|captures| captures.get(1))
+                    .map(|capture| capture.as_str())
+                    .ok_or(Error::DecodeError)
+                    .and_then(|strength| strength.parse().map_err(|_| Error::DecodeError))
+            },
+            false => Err(Error::ExecuteError)
+        }
+    }
+
+    pub async fn fswebcam(&self, device: &str, input: usize, palette: &str, 
+                          width: usize, height: usize) -> Result<BytesMut> {
+        let task = protocol::process::Run {
+            target: "fswebcam".into(),
+            working_dir: "/tmp".into(),
+            args: vec![
+                "--device".to_owned(), device.to_owned(),
+                "--input".to_owned(), input.to_string(),
+                "--palette".to_owned(), palette.to_owned(),
+                "--resolution".to_owned(), format!("{}x{}", width, height),
+                "--jpeg".to_owned(), "50".to_owned(),
+                "--no-banner".to_owned(),
+                "--save".to_owned(), "-".to_owned()
+            ],
+        };
+        let (stdout_tx, stdout_rx) = mpsc::unbounded_channel();
+        let stdout_stream = UnboundedReceiverStream::new(stdout_rx);
+        let (exit_status, stdout) = tokio::try_join!(
+            self.run(task, None, None, Some(stdout_tx), None),
+            stdout_stream.concat().map(Result::Ok),
+        )?;
+        match exit_status {
+            true => Ok(stdout),
+            false => Err(Error::ExecuteError)
+        }
     }
 }
 
