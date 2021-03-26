@@ -8,7 +8,7 @@ use mpsc::UnboundedSender;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio::sync::{mpsc::{self, UnboundedReceiver}, oneshot};
 use uuid::Uuid;
-use futures::{self, FutureExt, SinkExt, StreamExt, stream::FuturesUnordered};
+use futures::{self, FutureExt, StreamExt, stream::FuturesUnordered};
 
 use tokio::net::TcpStream;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
@@ -28,12 +28,10 @@ lazy_static::lazy_static! {
 pub enum Error {
     #[error(transparent)]
     IoError(#[from] std::io::Error),
-
     #[error("Could not send request")]
     RequestError,
     #[error("Did not receive response")]
     ResponseError,
-
     #[error("Could not decode data")]
     DecodeError,
 }
@@ -49,8 +47,6 @@ pub type RemoteRequests = SymmetricallyFramed<
     FramedWrite<tokio::io::WriteHalf<TcpStream>, LengthDelimitedCodec>,
     protocol::Request,
     SymmetricalJson<protocol::Request>>;
-
-pub type Callbacks = HashMap<Uuid, mpsc::UnboundedSender<protocol::ResponseKind>>;
 
 pub struct Device {
     request_tx: mpsc::UnboundedSender<Request>,
