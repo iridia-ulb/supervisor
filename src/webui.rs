@@ -70,7 +70,6 @@ type Result<T> = std::result::Result<T, Error>;
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "lowercase", tag = "type")]
 enum Request {
-    Emergency,
     Arena {
         action: arena::Action,
         uuid: uuid::Uuid,
@@ -183,9 +182,6 @@ pub async fn run(ws: ws::WebSocket,
             */
             if let Ok(action) = serde_json::from_str::<Request>(request) {
                 match action {
-                    Request::Emergency => {
-                        todo!("Enter emergency mode?")
-                    },
                     Request::Arena{action, ..} => {
                         let request = arena::Request::Execute(action);
                         if let Err(error) = arena_request_tx.send(request) {
@@ -207,7 +203,6 @@ pub async fn run(ws: ws::WebSocket,
                     Request::Update{tab} => {
                         let result = match &tab[..] {
                             "Connections" => connections_tab(&arena_request_tx).await,
-                            "Diagnostics" => diagnostics_tab(&arena_request_tx).await,
                             "Experiment" => experiment_tab(&arena_request_tx).await,
                             "Optitrack" => optitrack_tab().await,
                             _ => Err(Error::BadRequest),
@@ -298,11 +293,6 @@ pub async fn run(ws: ws::WebSocket,
         }
     }
     log::info!("Client disconnected");
-}
-
-async fn diagnostics_tab(_arena_request_tx: &mpsc::UnboundedSender<arena::Request>) -> Result<Cards> {
-    /* hashmap of cards */
-    Ok(Cards::default())
 }
 
 async fn experiment_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request>) -> Result<Cards> {
