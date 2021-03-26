@@ -54,7 +54,6 @@ pub struct Upload {
 
 #[derive(Debug, Serialize)]
 pub enum RequestKind {
-    Ping,
     Upload(Upload),
     Process(process::Request),
 }
