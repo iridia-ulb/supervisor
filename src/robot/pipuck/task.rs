@@ -1,4 +1,4 @@
-use futures::{Future, FutureExt, TryFutureExt, TryStreamExt, future, stream::FuturesUnordered};
+use futures::{Future, FutureExt, TryFutureExt, TryStreamExt, stream::FuturesUnordered};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use std::{net::Ipv4Addr, path::PathBuf, time::Duration};

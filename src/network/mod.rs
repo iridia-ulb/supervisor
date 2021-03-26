@@ -17,13 +17,6 @@ enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-enum AddrState {
-    ProbeXbee,
-    ProbeFernbedienung,
-    InUse,
-    Sleep,
-}
-
 pub async fn new(network: Ipv4Net, arena_request_tx: &mpsc::UnboundedSender<arena::Request>) {
     let (return_addr_tx, mut return_addr_rx) = mpsc::unbounded_channel::<Ipv4Addr>();
     let mut addr_in_use_map = network.clone().hosts()

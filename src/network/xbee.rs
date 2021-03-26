@@ -46,10 +46,10 @@ pub enum Error {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum PinMode {
     Disable = 0,
-    Alternate = 1,
+    //Alternate = 1,
     Input = 3,
     OutputDefaultLow = 4,
-    OutputDefaultHigh = 5,
+    //OutputDefaultHigh = 5,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -143,7 +143,7 @@ struct Command {
 
 struct CommandResponse {
     frame_id: u8,
-    at_command: [u8; 2],
+    //at_command: [u8; 2],
     data: BytesMut,
 }
 
@@ -201,7 +201,7 @@ impl Decoder for Codec {
         /* skip command options */
         source.advance(1);
         let frame_id = source.get_u8();
-        let at_command = [source.get_u8(), source.get_u8()];
+        let _at_command = [source.get_u8(), source.get_u8()];
         let status = source.get_u8();
         if status != CONFIG_CMD_RESP_OK {
             return Err(Error::RemoteError{frame_id, status});
@@ -210,7 +210,7 @@ impl Decoder for Codec {
             true => source.split(),
             false => BytesMut::new(),
         };
-        Ok(Some(CommandResponse { frame_id, at_command, data}))
+        Ok(Some(CommandResponse { frame_id, data}))
     }
 }
 
@@ -324,14 +324,6 @@ impl Device {
         <[u8; 4]>::try_from(&value[..])
             .map_err(|_| Error::DecodeError)
             .map(|addr| Ipv4Addr::from(addr))
-    }
-
-    pub async fn ap(&self) -> Result<String> {
-        let (response_tx, response_rx) = oneshot::channel();
-        let request = Request::GetParameter([b'I',b'D'], response_tx);
-        self.request_tx.send(request).map_err(|_| Error::RequestFailed)?;
-        let value = response_rx.await.map_err(|_| Error::NoResponse)??;
-        String::from_utf8(value.to_vec()).map_err(|_| Error::DecodeError)
     }
 
     pub async fn link_margin(&self) -> Result<i32> {

@@ -30,7 +30,7 @@ pub enum Request {
 
 #[derive(Debug, Serialize)]
 pub enum Event {
-    Optitrack {},
+    //Optitrack {},
     Robot(Uuid, Robot),
     Broadcast(SocketAddr, crate::router::LuaType),
 }

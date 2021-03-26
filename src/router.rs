@@ -1,7 +1,7 @@
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::codec::{Decoder, Encoder, Framed};
 use bytes::{BytesMut, Bytes, BufMut, Buf};
-use std::{io, collections::HashMap, sync::Arc, net::{SocketAddr, IpAddr}};
+use std::{io, collections::HashMap, sync::Arc, net::SocketAddr};
 use tokio::{net::TcpListener, sync::{mpsc, RwLock}};
 use futures::StreamExt;
 use log;
@@ -13,13 +13,13 @@ use crate::journal;
 
 const LUA_TNIL: i8 = 0;
 const LUA_TBOOLEAN: i8 = 1;
-const LUA_TLIGHTUSERDATA: i8 = 2;
+//const LUA_TLIGHTUSERDATA: i8 = 2;
 const LUA_TNUMBER: i8 = 3;
 const LUA_TSTRING: i8 = 4;
 const LUA_TTABLE: i8 = 5;
-const LUA_TFUNCTION: i8 = 6;
+//const LUA_TFUNCTION: i8 = 6;
 const LUA_TUSERDATA: i8 = 7;
-const LUA_TTHREAD: i8 = 8;
+//const LUA_TTHREAD: i8 = 8;
 const LUA_TUSERDATA_VECTOR2: u8 = 1;
 const LUA_TUSERDATA_VECTOR3: u8 = 2;
 const LUA_TUSERDATA_QUATERNION: u8 = 3;

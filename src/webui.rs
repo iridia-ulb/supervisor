@@ -35,6 +35,8 @@ const WIFI2_IMG: &str = "<img src=\"images/wifi2.svg\" style=\"height:2em;paddin
 const WIFI3_IMG: &str = "<img src=\"images/wifi3.svg\" style=\"height:2em;padding-right:10px\" />";
 const WIFI4_IMG: &str = "<img src=\"images/wifi4.svg\" style=\"height:2em;padding-right:10px\" />";
 
+// This doesn't work since it changes the current URL, disconnecting the websocket
+// onclick=\"window.location.href=this.src.replace('image/png', 'image/octet-stream')\"
 const TEST_IMG: &str = "<img src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=\" style=\"width:calc(50% - 10px);padding:5px;\" />";
 
 #[derive(Serialize, Debug)]
