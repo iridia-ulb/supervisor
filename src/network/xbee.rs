@@ -46,7 +46,7 @@ pub enum Error {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum PinMode {
     Disable = 0,
-    //Alternate = 1,
+    Alternate = 1,
     Input = 3,
     OutputDefaultLow = 4,
     //OutputDefaultHigh = 5,
@@ -434,5 +434,47 @@ impl Device {
             )
             .collect::<Result<Vec<_>>>()
             .map(|_| ())
+    }
+
+    pub async fn set_scs_mode(&self, tcp: bool) -> Result<()> {
+        self.request_tx.send(Request::SetParameter(
+            [b'I', b'P'],
+            BytesMut::from(&(tcp as u8).to_be_bytes()[..]),
+            false
+        )).map_err(|_| Error::RequestFailed)?;
+        let (response_tx, response_rx) = oneshot::channel();
+        let request = Request::GetParameter([b'I',b'P'], response_tx);
+        self.request_tx.send(request).map_err(|_| Error::RequestFailed)?;
+        let mut response = response_rx.await.map_err(|_| Error::NoResponse)??;
+        match response.len() {
+            1 => match response.get_u8() == (tcp as u8) {
+                true => Ok(()),
+                false => Err(Error::RequestFailed)
+            },
+            _ => Err(Error::RequestFailed)
+        }
+    }
+
+    pub async fn set_baud_rate(&self, baud_rate: u32) -> Result<()> {
+        self.request_tx.send(Request::SetParameter(
+            [b'B', b'D'],
+            BytesMut::from(&baud_rate.to_be_bytes()[..]),
+            false
+        )).map_err(|_| Error::RequestFailed)?;
+        let (response_tx, response_rx) = oneshot::channel();
+        let request = Request::GetParameter([b'B',b'D'], response_tx);
+        self.request_tx.send(request).map_err(|_| Error::RequestFailed)?;
+        let mut response = response_rx.await.map_err(|_| Error::NoResponse)??;
+        match response.len() {
+            4 => {
+                let baud_rate = baud_rate as f32;
+                let selected_baud_rate = response.get_u32() as f32;
+                let error = (baud_rate - selected_baud_rate).abs() / baud_rate;
+                log::info!("Selected/target baud rate: {}/{} (error = {:.02}%)",
+                    selected_baud_rate, baud_rate, error * 100.0);
+                Ok(())
+            },
+            _ => Err(Error::RequestFailed)
+        }
     }
 }

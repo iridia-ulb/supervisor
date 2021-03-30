@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 use uuid::Uuid;
 use std::{net::Ipv4Addr, path::PathBuf, sync::Arc, time::Duration};
-use tokio::{net::UdpSocket, sync::{mpsc, oneshot}};
+use tokio::{net::{TcpStream, UdpSocket}, sync::{mpsc, oneshot}, io::{AsyncReadExt, AsyncWriteExt}};
 use crate::network::{fernbedienung, xbee};
 use crate::journal;
 use crate::software;
@@ -77,25 +77,38 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-pub async fn poll_upcore_link_strength(device: Arc<fernbedienung::Device>) -> Result<i32> {
+pub async fn poll_upcore_link_strength(fernbedienung: Arc<fernbedienung::Device>) -> Result<i32> {
     tokio::time::sleep(Duration::from_secs(1)).await;
-    tokio::time::timeout(Duration::from_secs(1), device.link_strength()).await
+    tokio::time::timeout(Duration::from_secs(1), fernbedienung.link_strength()).await
         .map_err(|_| Error::Timeout)
         .and_then(|inner| inner.map_err(|error| Error::FernbedienungError(error)))
 }
 
-async fn poll_xbee_link_margin(device: &xbee::Device) -> Result<i32> {
+async fn poll_xbee_link_margin(xbee: &xbee::Device) -> Result<i32> {
     tokio::time::sleep(Duration::from_secs(1)).await;
-    device.link_margin().await.map_err(|error| Error::XbeeError(error))
+    xbee.link_margin().await.map_err(|error| Error::XbeeError(error))
 }
 
 pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
-    /* attempt to initialize the xbee pins and mux */
+    /* initialize the xbee pins and mux */
     if let Err(error) = init(&xbee).await {
-        log::error!("Failed to initialize Xbee for drone {}: {}", uuid, error);
+        log::error!("Drone {}: failed to initialize Xbee: {}", uuid, error);
         return uuid;
     }
     
+    // let mut serial = match TcpStream::connect((xbee.addr, 0x2616)).await {
+    //     Ok(serial) => {
+    //         log::info!("Connected!");
+    //         serial
+    //     },
+    //     Err(error) => {
+    //         log::error!("Drone {}: failed to connect to the Xbee serial communication service: {}", uuid, error);
+    //         return uuid;
+    //     }
+    // };
+    // serial.write(b"Hello world").await.unwrap();
+    // let mut serial_buffer : [u8; 128] = [0; 128];
+
     let mut fernbedienung: Option<Arc<fernbedienung::Device>> = None;
     let poll_upcore_link_strength_task = future::pending().left_future();
     tokio::pin!(poll_upcore_link_strength_task);
@@ -111,6 +124,20 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
 
     loop {
         tokio::select! {
+            // result = serial.read(&mut serial_buffer[..]) => match result {
+            //     Ok(bytes) => {
+            //         log::info!("Received {:?}", &serial_buffer[..bytes]);
+            //         if bytes == 0 {
+            //             // this happens on EOF which occurs when the Xbee (?) shutsdown the connection
+            //             // after no activity is detected
+            //             // TODO: re-establish the connection if possible
+            //             break;
+            //         }
+            //     },
+            //     Err(error) => {
+            //         log::error!("Error reading from serial communication service: {}", error);
+            //     }
+            // },
             result = &mut poll_xbee_link_margin_task => match result {
                 Ok(link_margin) => {
                     xbee_link_margin = link_margin;
@@ -267,11 +294,13 @@ async fn get_id(xbee: &xbee::Device) -> Result<u8> {
 async fn init(xbee: &xbee::Device) -> Result<()> {
     /* set pin modes */
     let pin_modes = vec![
-        /* The UART pins need to be disabled for the moment */
-        /* CTS: DIO7, RTS: DIO6, TX: DOUT, RX: DIN */
-        (xbee::Pin::DIO7, xbee::PinMode::Disable),
-        (xbee::Pin::DIO6, xbee::PinMode::Disable),
+        /* Enabling DOUT and asserting UPCORE_EN at the same time appears to
+           result in the Xbee resetting itself (possibly due to a brown out).
+           Unfortunately, DOUT must be enabled for the SCS to work
+           Disable outputs: TX: DOUT, RTS: DIO6, RX: DIN, CTS: DIO7 */
         (xbee::Pin::DOUT, xbee::PinMode::Disable),
+        (xbee::Pin::DIO6, xbee::PinMode::Disable),
+        (xbee::Pin::DIO7, xbee::PinMode::Disable),
         (xbee::Pin::DIN,  xbee::PinMode::Disable),
         /* Input pins for reading an identifer */
         (xbee::Pin::DIO0, xbee::PinMode::Input),
@@ -286,6 +315,10 @@ async fn init(xbee: &xbee::Device) -> Result<()> {
     xbee.set_pin_modes(pin_modes).await?;
     /* configure mux */
     xbee.write_outputs(vec![(xbee::Pin::DIO4, true)]).await?;
+    // /* set the serial communication service to TCP mode */
+    // xbee.set_scs_mode(true).await?;
+    // /* set the baud rate to match the baud rate of the Pixhawk */
+    // xbee.set_baud_rate(115200).await?;
     Ok(())
 }
 
