@@ -29,11 +29,15 @@ use itertools::Itertools;
 const OK_ICON: &str = "<i class=\"material-icons mdl-list__item-icon\" style=\"color:green; vertical-align: middle;\">check_circle</i>";
 const ERROR_ICON: &str = "<i class=\"material-icons mdl-list__item-icon\" style=\"color:red; vertical-align: middle;\">error</i>";
 
-const WIFI0_IMG: &str = "<img src=\"images/wifi0.svg\" style=\"height:2em;padding-right:10px\" />";
 const WIFI1_IMG: &str = "<img src=\"images/wifi1.svg\" style=\"height:2em;padding-right:10px\" />";
 const WIFI2_IMG: &str = "<img src=\"images/wifi2.svg\" style=\"height:2em;padding-right:10px\" />";
 const WIFI3_IMG: &str = "<img src=\"images/wifi3.svg\" style=\"height:2em;padding-right:10px\" />";
 const WIFI4_IMG: &str = "<img src=\"images/wifi4.svg\" style=\"height:2em;padding-right:10px\" />";
+
+const BATT1_IMG: &str = "<img src=\"images/batt1.svg\" style=\"height:3em\" />";
+const BATT2_IMG: &str = "<img src=\"images/batt2.svg\" style=\"height:3em\" />";
+const BATT3_IMG: &str = "<img src=\"images/batt3.svg\" style=\"height:3em\" />";
+const BATT4_IMG: &str = "<img src=\"images/batt4.svg\" style=\"height:3em\" />";
 
 fn generate_image_node(mime: &str, data: &[u8], style: &str) -> String {
     let data = base64::encode(data);
@@ -450,14 +454,13 @@ async fn connections_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request
             span: 4,
             title: String::from("Pi-Puck"),
             content: vec![Content::Table {
-                header: vec!["Unique Identifier".to_owned(), "Raspberry Pi".to_owned()],
+                header: vec!["Unique Identifier".to_owned(), "Raspberry Pi".to_owned(), "Battery".to_owned()],
                 rows: vec![vec![uuid.to_string(), format!("{} {}", match state.rpi.1 + 90 {
-                    15..=29  => WIFI1_IMG,
-                    30..=44  => WIFI2_IMG,
-                    45..=59  => WIFI3_IMG,
-                    60..=100 => WIFI4_IMG,
-                    _ => WIFI0_IMG,
-                }, state.rpi.0)]]
+                    25..=49  => WIFI2_IMG,
+                    50..=74  => WIFI3_IMG,
+                    75..=100  => WIFI4_IMG,
+                    _ => WIFI1_IMG,
+                }, state.rpi.0), "(not implemented)".to_owned()]]
             }],
             actions: state.actions.into_iter().map(Action::PiPuck).collect(),
         };
@@ -474,26 +477,30 @@ async fn connections_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request
             span: 4,
             title: String::from("Drone"),
             content: vec![Content::Table {
-                header: vec!["Unique Identifier".to_owned(), "Xbee".to_owned(), "UP Core".to_owned()],
+                header: vec!["Unique Identifier".to_owned(), "Xbee".to_owned(), "UP Core".to_owned(), "Battery".to_owned()],
                 rows: vec![
                     vec![
                         uuid.to_string(),
                         format!("{} {}", match state.xbee.1 {
-                            15..=29  => WIFI1_IMG,
-                            30..=44  => WIFI2_IMG,
-                            45..=59  => WIFI3_IMG,
-                            60..=100 => WIFI4_IMG,
-                            _ => WIFI0_IMG,
+                            25..=49  => WIFI2_IMG,
+                            50..=74  => WIFI3_IMG,
+                            75..=100 => WIFI4_IMG,
+                            _ => WIFI1_IMG,
                         }, state.xbee.0),
                         state.upcore.map_or_else(|| "-".to_owned(), |upcore| {
                             format!("{} {}", match upcore.1 + 90 {
-                                15..=29  => WIFI1_IMG,
-                                30..=44  => WIFI2_IMG,
-                                45..=59  => WIFI3_IMG,
-                                60..=100 => WIFI4_IMG,
-                                _ => WIFI0_IMG,
+                                25..=49  => WIFI2_IMG,
+                                50..=74  => WIFI3_IMG,
+                                75..=100 => WIFI4_IMG,
+                                _ => WIFI1_IMG,
                             }, upcore.0)
-                        })
+                        }),
+                        match state.battery_remaining {
+                            25..=49  => BATT2_IMG,
+                            50..=74  => BATT3_IMG,
+                            75..=100 => BATT4_IMG,
+                            _ => BATT1_IMG,
+                        }.to_owned()
                     ]
                 ]
             }],

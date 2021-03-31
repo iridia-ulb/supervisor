@@ -14,6 +14,7 @@ use crate::robot::drone::codec;
 pub struct State {
     pub xbee: (Ipv4Addr, i32),
     pub upcore: Option<(Ipv4Addr, i32)>,
+    pub battery_remaining: i8,
     pub actions: Vec<Action>,
 }
 
@@ -122,11 +123,15 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
     tokio::pin!(poll_xbee_link_margin_task);
     let mut xbee_link_margin = 0;
 
+    let mut battery_remaining = -1i8;
+
     loop {
         tokio::select! {
-            Some(message) = mavlink.next() => match message {
-                Ok(message) => log::info!("{:?}", message),
-                Err(error) => log::error!("{}", error)
+            Some(message) = mavlink.next() => {
+                if let Ok((_, mavlink::common::MavMessage::BATTERY_STATUS(data))) = message {
+                    // todo: calculate from voltage using 4.05 => full, and 3.5 => empty
+                    battery_remaining = data.battery_remaining;
+                }
             },
             result = &mut poll_xbee_link_margin_task => match result {
                 Ok(link_margin) => {
@@ -176,6 +181,7 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
                         let state = State {
                             xbee: (xbee.addr, xbee_link_margin),
                             upcore: fernbedienung.as_ref().map(|dev| (dev.addr, upcore_link_strength)),
+                            battery_remaining: battery_remaining,
                             actions,
                         };
                         let _ = callback.send(state);

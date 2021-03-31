@@ -11,6 +11,12 @@ use crate::software;
 
 // Info about reading the Pi-Puck battery level here:
 // https://github.com/yorkrobotlab/pi-puck-packages/blob/master/pi-puck-utils/pi-puck-battery
+/*
+root@raspberrypi0-wifi:/sys/devices/platform/soc/20804000.i2c/i2c-1/i2c-11/11-0048/iio:device1# cat name 
+ads1015
+root@raspberrypi0-wifi:/sys/devices/platform/soc/20804000.i2c/i2c-1/i2c-11/11-0048/iio:device1# cat in_voltage0_raw
+1042
+*/
 
 #[derive(Debug)]
 pub struct State {
