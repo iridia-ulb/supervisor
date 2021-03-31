@@ -5,6 +5,7 @@ use tokio::{sync::mpsc, task::JoinHandle};
 use crate::network::xbee;
 
 mod task;
+mod codec;
 
 pub use task::{
     Action, Error, Receiver, Request, Sender, State

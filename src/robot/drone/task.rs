@@ -1,12 +1,15 @@
 use futures::{Future, FutureExt, TryFutureExt, TryStreamExt, future, stream::FuturesUnordered};
 use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
+use tokio_util::codec::FramedRead;
 use uuid::Uuid;
 use std::{net::Ipv4Addr, path::PathBuf, sync::Arc, time::Duration};
-use tokio::{net::{TcpStream, UdpSocket}, sync::{mpsc, oneshot}, io::{AsyncReadExt, AsyncWriteExt}};
+use tokio::{net::{TcpStream, UdpSocket}, sync::{mpsc, oneshot}};
 use crate::network::{fernbedienung, xbee};
 use crate::journal;
 use crate::software;
+
+use crate::robot::drone::codec;
 
 pub struct State {
     pub xbee: (Ipv4Addr, i32),
@@ -96,18 +99,15 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
         return uuid;
     }
     
-    // let mut serial = match TcpStream::connect((xbee.addr, 0x2616)).await {
-    //     Ok(serial) => {
-    //         log::info!("Connected!");
-    //         serial
-    //     },
-    //     Err(error) => {
-    //         log::error!("Drone {}: failed to connect to the Xbee serial communication service: {}", uuid, error);
-    //         return uuid;
-    //     }
-    // };
-    // serial.write(b"Hello world").await.unwrap();
-    // let mut serial_buffer : [u8; 128] = [0; 128];
+    let mut mavlink = match TcpStream::connect((xbee.addr, 0x2616)).await {
+        Ok(stream) => {
+            FramedRead::new(stream, codec::MavMessageDecoder::<mavlink::common::MavMessage>::new())
+        },
+        Err(error) => {
+            log::error!("Drone {}: failed to connect to the Xbee serial communication service: {}", uuid, error);
+            return uuid;
+        }
+    };
 
     let mut fernbedienung: Option<Arc<fernbedienung::Device>> = None;
     let poll_upcore_link_strength_task = future::pending().left_future();
@@ -124,20 +124,10 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
 
     loop {
         tokio::select! {
-            // result = serial.read(&mut serial_buffer[..]) => match result {
-            //     Ok(bytes) => {
-            //         log::info!("Received {:?}", &serial_buffer[..bytes]);
-            //         if bytes == 0 {
-            //             // this happens on EOF which occurs when the Xbee (?) shutsdown the connection
-            //             // after no activity is detected
-            //             // TODO: re-establish the connection if possible
-            //             break;
-            //         }
-            //     },
-            //     Err(error) => {
-            //         log::error!("Error reading from serial communication service: {}", error);
-            //     }
-            // },
+            Some(message) = mavlink.next() => match message {
+                Ok(message) => log::info!("{:?}", message),
+                Err(error) => log::error!("{}", error)
+            },
             result = &mut poll_xbee_link_margin_task => match result {
                 Ok(link_margin) => {
                     xbee_link_margin = link_margin;
@@ -298,10 +288,10 @@ async fn init(xbee: &xbee::Device) -> Result<()> {
            result in the Xbee resetting itself (possibly due to a brown out).
            Unfortunately, DOUT must be enabled for the SCS to work
            Disable outputs: TX: DOUT, RTS: DIO6, RX: DIN, CTS: DIO7 */
-        (xbee::Pin::DOUT, xbee::PinMode::Disable),
+        (xbee::Pin::DOUT, xbee::PinMode::Alternate),
         (xbee::Pin::DIO6, xbee::PinMode::Disable),
         (xbee::Pin::DIO7, xbee::PinMode::Disable),
-        (xbee::Pin::DIN,  xbee::PinMode::Disable),
+        (xbee::Pin::DIN,  xbee::PinMode::Alternate),
         /* Input pins for reading an identifer */
         (xbee::Pin::DIO0, xbee::PinMode::Input),
         (xbee::Pin::DIO1, xbee::PinMode::Input),
@@ -313,12 +303,13 @@ async fn init(xbee: &xbee::Device) -> Result<()> {
         (xbee::Pin::DIO12, xbee::PinMode::OutputDefaultLow),
     ];
     xbee.set_pin_modes(pin_modes).await?;
-    /* configure mux */
+    /* configure mux (upcore controls pixhawk) */
     xbee.write_outputs(vec![(xbee::Pin::DIO4, true)]).await?;
-    // /* set the serial communication service to TCP mode */
-    // xbee.set_scs_mode(true).await?;
-    // /* set the baud rate to match the baud rate of the Pixhawk */
-    // xbee.set_baud_rate(115200).await?;
+
+    /* set the serial communication service to TCP mode */
+    xbee.set_scs_mode(true).await?;
+    /* set the baud rate to match the baud rate of the Pixhawk */
+    xbee.set_baud_rate(115200).await?;
     Ok(())
 }
 
