@@ -9,6 +9,10 @@ use crate::network::{fernbedienung, xbee};
 use crate::journal;
 use crate::software;
 
+const DRONE_BATT_FULL_MV: f32 = 4050.0;
+const DRONE_BATT_EMPTY_MV: f32 = 3500.0;
+const DRONE_BATT_NUM_CELLS: f32 = 3.0;
+
 use crate::robot::drone::codec;
 
 pub struct State {
@@ -100,13 +104,20 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
         return uuid;
     }
     
-    let mut mavlink = match TcpStream::connect((xbee.addr, 0x2616)).await {
+    /* try to connect to the xbee scs for one second, using a pending stream on failure */
+    let mavlink_connect = TcpStream::connect((xbee.addr, 9750));
+    let mavlink_connect_timeout = Duration::from_secs(1);
+    let mavlink_connect_result = tokio::time::timeout(mavlink_connect_timeout, mavlink_connect).await
+        .map_err(|inner| std::io::Error::new(std::io::ErrorKind::TimedOut, inner))
+        .and_then(|inner| inner);
+    let mut mavlink = match mavlink_connect_result {
         Ok(stream) => {
-            FramedRead::new(stream, codec::MavMessageDecoder::<mavlink::common::MavMessage>::new())
+            let stream = FramedRead::new(stream, codec::MavMessageDecoder::<mavlink::common::MavMessage>::new());
+            futures::StreamExt::left_stream(stream)
         },
         Err(error) => {
-            log::error!("Drone {}: failed to connect to the Xbee serial communication service: {}", uuid, error);
-            return uuid;
+            log::warn!("Drone {}: failed to connect to the Xbee serial communication service: {}", uuid, error);
+            futures::StreamExt::right_stream(futures::stream::pending())
         }
     };
 
@@ -129,8 +140,14 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
         tokio::select! {
             Some(message) = mavlink.next() => {
                 if let Ok((_, mavlink::common::MavMessage::BATTERY_STATUS(data))) = message {
-                    // todo: calculate from voltage using 4.05 => full, and 3.5 => empty
-                    battery_remaining = data.battery_remaining;
+                    /* voltages: [u16; 10] Battery voltage of cells 1 to 10 in mV. If individual
+                       cell voltages are unknown or not measured for this battery, then the overall
+                       battery voltage should be filled in cell 0. */
+                    let mut battery_reading = data.voltages[0] as f32;
+                    battery_reading /= DRONE_BATT_NUM_CELLS;
+                    battery_reading -= DRONE_BATT_EMPTY_MV;
+                    battery_reading /= DRONE_BATT_FULL_MV - DRONE_BATT_EMPTY_MV;
+                    battery_remaining = (battery_reading.max(0.0).min(1.0) * 100.0) as i8;
                 }
             },
             result = &mut poll_xbee_link_margin_task => match result {
@@ -294,7 +311,7 @@ async fn init(xbee: &xbee::Device) -> Result<()> {
            result in the Xbee resetting itself (possibly due to a brown out).
            Unfortunately, DOUT must be enabled for the SCS to work
            Disable outputs: TX: DOUT, RTS: DIO6, RX: DIN, CTS: DIO7 */
-        (xbee::Pin::DOUT, xbee::PinMode::Alternate),
+        (xbee::Pin::DOUT, xbee::PinMode::Disable),
         (xbee::Pin::DIO6, xbee::PinMode::Disable),
         (xbee::Pin::DIO7, xbee::PinMode::Disable),
         (xbee::Pin::DIN,  xbee::PinMode::Alternate),

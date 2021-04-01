@@ -34,10 +34,10 @@ const WIFI2_IMG: &str = "<img src=\"images/wifi2.svg\" style=\"height:2em;paddin
 const WIFI3_IMG: &str = "<img src=\"images/wifi3.svg\" style=\"height:2em;padding-right:10px\" />";
 const WIFI4_IMG: &str = "<img src=\"images/wifi4.svg\" style=\"height:2em;padding-right:10px\" />";
 
-const BATT1_IMG: &str = "<img src=\"images/batt1.svg\" style=\"height:3em\" />";
-const BATT2_IMG: &str = "<img src=\"images/batt2.svg\" style=\"height:3em\" />";
-const BATT3_IMG: &str = "<img src=\"images/batt3.svg\" style=\"height:3em\" />";
-const BATT4_IMG: &str = "<img src=\"images/batt4.svg\" style=\"height:3em\" />";
+const BATT1_IMG: &str = "<img src=\"images/batt1.svg\" style=\"height:2.5em\" />";
+const BATT2_IMG: &str = "<img src=\"images/batt2.svg\" style=\"height:2.5em\" />";
+const BATT3_IMG: &str = "<img src=\"images/batt3.svg\" style=\"height:2.5em\" />";
+const BATT4_IMG: &str = "<img src=\"images/batt4.svg\" style=\"height:2.5em\" />";
 
 fn generate_image_node(mime: &str, data: &[u8], style: &str) -> String {
     let data = base64::encode(data);
