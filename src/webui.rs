@@ -453,22 +453,26 @@ async fn connections_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request
             uuid: uuid,
             span: 4,
             title: String::from("Pi-Puck"),
-            content: vec![Content::Table {
-                header: vec!["Unique Identifier".to_owned(), "Raspberry Pi".to_owned(), "Battery".to_owned()],
-                rows: vec![vec![uuid.to_string(), format!("{} {}", match state.rpi.1 + 90 {
-                    25..=49  => WIFI2_IMG,
-                    50..=74  => WIFI3_IMG,
-                    75..=100  => WIFI4_IMG,
-                    _ => WIFI1_IMG,
-                }, state.rpi.0), "(not implemented)".to_owned()]]
-            }],
+            content: vec![
+                Content::Table {
+                    header: vec!["Unique Identifier".to_owned(), "Raspberry Pi".to_owned(), "Battery".to_owned()],
+                    rows: vec![vec![uuid.to_string(), format!("{} {}", match state.rpi.1 + 90 {
+                        25..=49  => WIFI2_IMG,
+                        50..=74  => WIFI3_IMG,
+                        75..=100  => WIFI4_IMG,
+                        _ => WIFI1_IMG,
+                    }, state.rpi.0), "(not implemented)".to_owned()]]
+                }, 
+            ],
             actions: state.actions.into_iter().map(Action::PiPuck).collect(),
         };
-        if let Some(data) = state.camera {
-            let image = generate_image_node("image/jpg", &data, "width:calc(100% - 10px);padding:5px;");
-            card.content.push(Content::Text(image));
-        }
-        cards.push(card);       
+        let camera_frames = state.camera.into_iter()
+            .map(|data| {
+                let node = generate_image_node("image/jpg", &data, "width:calc(50% - 10px);padding:5px;");
+                Content::Text(node)
+            });
+        card.content.extend(camera_frames);
+        cards.push(card);
     }
     /* generate drone cards */
     for (uuid, state) in drones.into_iter() {

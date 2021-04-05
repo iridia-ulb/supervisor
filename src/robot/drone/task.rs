@@ -350,7 +350,7 @@ async fn handle_experiment_start(uuid: Uuid,
                                  device: Arc<fernbedienung::Device>,
                                  software: software::Software,
                                  journal: mpsc::UnboundedSender<journal::Request>) 
-    -> Result<(impl Future<Output = fernbedienung::Result<bool>>, oneshot::Sender<()>)> {
+    -> Result<(impl Future<Output = fernbedienung::Result<()>>, oneshot::Sender<()>)> {
     /* extract the name of the config file */
     let (argos_config, _) = software.argos_config()?;
     let argos_config = argos_config.to_owned();
@@ -380,7 +380,7 @@ async fn handle_experiment_start(uuid: Uuid,
         ).await?;
 
     /* create a remote instance of ARGoS3 */
-    let task = fernbedienung::Run {
+    let process = fernbedienung::Process {
         target: "argos3".into(),
         working_dir: software_upload_path.into(),
         args: vec![
@@ -399,7 +399,7 @@ async fn handle_experiment_start(uuid: Uuid,
         let (stdout_tx, mut stdout_rx) = mpsc::unbounded_channel();
         let (stderr_tx, mut stderr_rx) = mpsc::unbounded_channel();
         /* run argos remotely */
-        let argos = device.run(task, Some(terminate_rx), None, Some(stdout_tx), Some(stderr_tx));
+        let argos = device.run(process, Some(terminate_rx), None, Some(stdout_tx), Some(stderr_tx));
         tokio::pin!(argos);
         loop {
             tokio::select! {

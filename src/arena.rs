@@ -216,7 +216,7 @@ async fn handle_pair_with_drone_request(drone_tx_map: &HashMap<Uuid, drone::Send
     let mut rng = rand::thread_rng();
     let random_id : u8 = rng.gen_range(0..15);
     /* run the script with the random id */
-    let script = network::fernbedienung::Run {
+    let script = network::fernbedienung::Process {
         target: "sh".into(),
         working_dir: "/tmp".into(),
         args: vec!["write_upcore_id.sh".into(), random_id.to_string()],
