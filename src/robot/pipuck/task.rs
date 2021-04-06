@@ -3,11 +3,15 @@ use futures::{Future, FutureExt, StreamExt, TryFutureExt, TryStreamExt, future::
 use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
-use std::{net::{Ipv4Addr, SocketAddr}, path::PathBuf, time::Duration};
+use std::{net::Ipv4Addr, path::PathBuf, time::Duration};
 use tokio::{net::UdpSocket, sync::{mpsc, oneshot}};
 use crate::network::fernbedienung;
 use crate::journal;
 use crate::software;
+
+//const PIPUCK_BATT_FULL_MV: f32 = 4050.0;
+//const PIPUCK_BATT_EMPTY_MV: f32 = 3500.0;
+const PIPUCK_CAMERAS_CONFIG: &[(&str, u16, u16, u16)] = &[];
 
 // Info about reading the Pi-Puck battery level here:
 // https://github.com/yorkrobotlab/pi-puck-packages/blob/master/pi-puck-utils/pi-puck-battery
@@ -51,9 +55,6 @@ pub enum Action {
     StopCamera,
 }
 
-//fswebcam -d /dev/video0 --input 0 --palette YUYV --resolution 640x480 --no-banner --jpeg -1 --save -
-
-
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("Operation timed out")]
@@ -92,6 +93,7 @@ pub async fn new(uuid: Uuid, mut arena_rx: Receiver, device: fernbedienung::Devi
     let mut rpi_link_strength = -100;
 
     let mut rpi_camera_stream = futures::stream::pending().left_stream();
+    let mut rpi_camera_stream_stop_tx = None;
     let rpi_camera_task = futures::future::pending().left_future();
     tokio::pin!(rpi_camera_task);
     let mut rpi_camera_frames = Vec::new();
@@ -123,8 +125,12 @@ pub async fn new(uuid: Uuid, mut arena_rx: Receiver, device: fernbedienung::Devi
                 rpi_camera_task.set(futures::future::pending().left_future());
                 rpi_camera_frames.clear();
                 match rpi_camera_result {
-                    Ok(_) => log::info!("Camera stream stopped"),
-                    Err(error) => log::warn!("Camera stream stopped: {}", error),
+                    /* since we use the terminate signal to shutdown mjpg_streamer, report
+                       AbnormalTerminationError as not an error */
+                    Ok(_) | Err(Error::FernbedienungError(fernbedienung::Error::AbnormalTerminationError)) => 
+                        log::info!("Camera stream stopped"),
+                    Err(error) =>
+                        log::warn!("Camera stream stopped: {}", error),
                 }
             },
             /* handle incoming requests */
@@ -157,15 +163,19 @@ pub async fn new(uuid: Uuid, mut arena_rx: Receiver, device: fernbedienung::Devi
                         }
                         Action::StartCamera => {
                             if let Either::Left(_) = *rpi_camera_task {
-                                let (task, stop_tx, stream_rx) = handle_stream_start(&device);
+                                let (task, stop_tx, stream_rx) = 
+                                    handle_stream_start(&device, PIPUCK_CAMERAS_CONFIG);
+                                rpi_camera_stream_stop_tx = Some(stop_tx);
                                 rpi_camera_stream = ReceiverStream::new(stream_rx).right_stream();
                                 rpi_camera_task.set(task.right_future());
+                                log::info!("Camera stream started");
                             }
                         },
                         Action::StopCamera => {
                             if let Either::Right(_) = *rpi_camera_task {
-                                rpi_camera_task.set(futures::future::pending().left_future());
-                                rpi_camera_frames.clear();
+                                if let Some(stop_tx) = rpi_camera_stream_stop_tx.take() {
+                                    let _ = stop_tx.send(());
+                                }
                             }
                         }
                     },
@@ -198,23 +208,13 @@ pub async fn new(uuid: Uuid, mut arena_rx: Receiver, device: fernbedienung::Devi
     uuid
 }
 
-fn handle_stream_start<'d>(device: &'d fernbedienung::Device)
+fn handle_stream_start<'d>(device: &'d fernbedienung::Device, configs: &'static [(&str, u16, u16, u16)])
     -> (impl Future<Output = Result<()>> + 'd, oneshot::Sender<()>, mpsc::Receiver<Vec<Bytes>>) {
-
-    let cameras = [("/dev/video0", 1280u16, 720u16)];
-    let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
-    let (stream_tx, stream_rx) = mpsc::channel::<Vec<Bytes>>(2);
-
-    // pass in port/stop_tx somehow?
-    // make port part of camera?
-
-    let mjpeg_processes = cameras.iter()
-        .enumerate()
-        .map(|(index, &(camera, width, height))| {
-            let port = 8000 + index as u16;
-            let process = fernbedienung::Process {
+    let (processes, stop_txs) : (FuturesUnordered<_>, Vec<_>)  = configs.iter()
+        .map(|(camera, width, height, port)| {
+            let process_request = fernbedienung::Process {
                 target: "/home/mallwright/Workspace/mjpg-streamer/build/mjpg_streamer".into(),
-                working_dir: "/tmp".into(),
+                working_dir: Some("/home/mallwright/Workspace/mjpg-streamer/build".into()),
                 args: vec![
                     "-i".to_owned(),
                     format!("plugins/input_uvc/input_uvc.so -d {} -r {}x{} -n", camera, width, height),
@@ -222,28 +222,33 @@ fn handle_stream_start<'d>(device: &'d fernbedienung::Device)
                     format!("plugins/output_http/output_http.so -p {} -l {}", port, device.addr)
                 ],
             };
-            device.run(process, None, None, None, None)
-                .map_err(|e| Error::FernbedienungError(e))
-        })
-        .collect::<FuturesUnordered<_>>()
-        .try_collect::<Vec<_>>();
-    
-    // mjpeg_processes future<output = pipuck::Result<Vec<bool>>>
+            let (stop_tx, stop_rx) = oneshot::channel::<()>();
+            let process = device.run(process_request, Some(stop_rx), None, None, None)
+                .map_err(|e| Error::FernbedienungError(e));
+            (process, stop_tx)
+        }).unzip();
 
-    let task = futures::future::try_join(mjpeg_processes, async move {
+    let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
+    let (stream_tx, stream_rx) = mpsc::channel::<Vec<Bytes>>(2);
+    let task = futures::future::try_join(processes.try_collect::<Vec<_>>(), async move {
         /* sleep a bit while mjpeg_stream starts */
         tokio::time::sleep(Duration::from_millis(500)).await;
-        let sockets = [SocketAddr::from(([127,0,0,1], 8000))];       
+        /* poll for frames */
         loop {
-            let reqwest_frames = sockets.iter()
-                .map(|socket| {
-                    reqwest::get(format!("http://{}/?action=snapshot", socket))
+            let reqwest_frames = configs.iter()
+                .map(|&(_, _, _, port)| {
+                    reqwest::get(format!("http://{}:{}/?action=snapshot", device.addr, port))
                         .and_then(|response| response.bytes())
                 })
                 .collect::<FuturesOrdered<_>>()
                 .try_collect::<Vec<_>>();
             tokio::select! {
-                _ = &mut stop_rx => break Ok(()),
+                _ = &mut stop_rx => {
+                    break stop_txs.into_iter()
+                        .map(|stop_tx| stop_tx.send(()).map_err(|_| Error::RequestError))
+                        .collect::<Result<Vec<_>>>()
+                        .map(|_| ())
+                },
                 reqwest_result = reqwest_frames => match reqwest_result {
                     Ok(frames) => {
                         if let Err(_) = stream_tx.send(frames).await {
@@ -294,7 +299,7 @@ async fn handle_experiment_start<'d>(uuid: Uuid,
     /* create a remote instance of ARGoS3 */
     let process = fernbedienung::Process {
         target: "argos3".into(),
-        working_dir: software_upload_path.into(),
+        working_dir: Some(software_upload_path.into()),
         args: vec![
             "--config".to_owned(), argos_config.to_owned(),
             "--router".to_owned(), message_router_addr.to_string(),
