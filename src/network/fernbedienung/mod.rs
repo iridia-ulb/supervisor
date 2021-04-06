@@ -226,13 +226,11 @@ impl Device {
                         },
                         protocol::process::Response::StandardOutput(data) => {
                             if let Some(stdout_tx) = &stdout_tx {
-                                log::info!("{:?}", data);
                                 let _ = stdout_tx.send(data);
                             }
                         },
                         protocol::process::Response::StandardError(data) => {
                             if let Some(stderr_tx) = &stderr_tx {
-                                log::info!("{:?}", data);
                                 let _ = stderr_tx.send(data);
                             }
                         },
@@ -271,7 +269,7 @@ impl Device {
     pub async fn create_temp_dir(&self) -> Result<String> {
         let process = protocol::process::Process {
             target: "mktemp".into(),
-            working_dir: "/tmp".into(),
+            working_dir: None,
             args: vec!["-d".to_owned()],
         };
         let (stdout_tx, stdout_rx) = mpsc::unbounded_channel();
@@ -288,7 +286,7 @@ impl Device {
     pub async fn hostname(&self) -> Result<String> {
         let process = protocol::process::Process {
             target: "/usr/bin/hostname".into(),
-            working_dir: "/tmp".into(),
+            working_dir: None,
             args: vec![],
         };
         let (stdout_tx, stdout_rx) = mpsc::unbounded_channel();
@@ -305,7 +303,7 @@ impl Device {
     pub async fn halt(&self) -> Result<()> {
         let process = protocol::process::Process {
             target: "echo".into(),
-            working_dir: "/tmp".into(),
+            working_dir: None,
             args: vec!["halt".to_owned()],
         };
         self.run(process, None, None, None, None).await
@@ -314,7 +312,7 @@ impl Device {
     pub async fn reboot(&self) -> Result<()> {
         let process = protocol::process::Process {
             target: "echo".into(),
-            working_dir: "/tmp".into(),
+            working_dir: None,
             args: vec!["reboot".to_owned()],
         };
         self.run(process, None, None, None, None).await
@@ -323,7 +321,7 @@ impl Device {
     pub async fn link_strength(&self) -> Result<i32> {
         let process = protocol::process::Process {
             target: "/usr/bin/iw".into(),
-            working_dir: "/tmp".into(),
+            working_dir: None,
             args: vec!["dev".to_owned(), "wlp2s0".to_owned(), "link".to_owned()],
         };
         let (stdout_tx, stdout_rx) = mpsc::unbounded_channel();

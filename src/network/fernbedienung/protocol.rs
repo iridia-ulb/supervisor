@@ -24,7 +24,7 @@ pub mod process {
     #[derive(Debug, Serialize)]
     pub struct Process {
         pub target: PathBuf,
-        pub working_dir: PathBuf,
+        pub working_dir: Option<PathBuf>,
         pub args: Vec<String>,
     }
 

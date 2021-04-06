@@ -382,7 +382,7 @@ async fn handle_experiment_start(uuid: Uuid,
     /* create a remote instance of ARGoS3 */
     let process = fernbedienung::Process {
         target: "argos3".into(),
-        working_dir: software_upload_path.into(),
+        working_dir: Some(software_upload_path.into()),
         args: vec![
             "--config".to_owned(), argos_config.to_owned(),
             "--router".to_owned(), message_router_addr.to_string(),

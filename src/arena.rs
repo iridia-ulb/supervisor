@@ -218,7 +218,7 @@ async fn handle_pair_with_drone_request(drone_tx_map: &HashMap<Uuid, drone::Send
     /* run the script with the random id */
     let script = network::fernbedienung::Process {
         target: "sh".into(),
-        working_dir: "/tmp".into(),
+        working_dir: Some("/tmp".into()),
         args: vec!["write_upcore_id.sh".into(), random_id.to_string()],
     };
     let (terminate_tx, terminate_rx) = oneshot::channel();
