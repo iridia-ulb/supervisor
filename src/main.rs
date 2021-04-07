@@ -59,8 +59,8 @@ async fn main() {
             websocket.on_upgrade(move |socket| webui::run(socket, arena_requests_tx))
         });
     let static_route = warp::get()
-    //    .and(static_dir::static_dir!("static"));
-        .and(warp::fs::dir("/home/mallwright/Workspace/mns-supervisor/static"));
+        .and(static_dir::static_dir!("static"));
+    //    .and(warp::fs::dir("/home/mallwright/Workspace/mns-supervisor/static"));
     let server_addr : SocketAddr = (Ipv4Addr::LOCALHOST, 3030).into();
     let webui_task = warp::serve(socket_route.or(static_route)).run(server_addr);
     /* pin the futures so that they can be polled via &mut */
