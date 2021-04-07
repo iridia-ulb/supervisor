@@ -40,8 +40,10 @@ const BATT3_IMG: &str = "<img src=\"images/batt3.svg\" style=\"height:2.5em\" />
 const BATT4_IMG: &str = "<img src=\"images/batt4.svg\" style=\"height:2.5em\" />";
 
 fn generate_image_node(mime: &str, data: &[u8], style: &str) -> String {
+    //let data = String::from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
     let data = base64::encode(data);
-    format!("<img src=\"data:{};base64,{}\" style=\"{}\" />", mime, data, style)
+    let download = "save_frame(this.src.replace(/^data:image\\/[^;]+/, 'data:application/octet-stream'));";
+    format!("<img src=\"data:{};base64,{}\" style=\"{}\" onclick=\"{}\" />", mime, data, style, download)
 }
 
 #[derive(Serialize, Debug)]

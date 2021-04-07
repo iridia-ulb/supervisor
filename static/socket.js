@@ -46,7 +46,7 @@ ws.onmessage = function(message) {
                let uiCardUpdate = 
                   newCard(card.uuid, card.title, card.span, card.content, card.actions);
                if(uiCard.outerHTML != uiCardUpdate.outerHTML) {
-                  uiContainer.replaceChild(uiCardUpdate, uiCard);
+                  syncNodes(uiCardUpdate, uiCard);
                }
                cardFound = true;
                break;
@@ -68,8 +68,8 @@ ws.onmessage = function(message) {
 };
 
 // TODO
-emergency = document.getElementById('emergency-stop');
-emergency.onclick = function() {}
+//emergency = document.getElementById('emergency-stop');
+//emergency.onclick = function() {}
 
 // This function returns HTMLDivElement's
 function contentToHTML(content) {
@@ -206,6 +206,43 @@ function newCard(uuid, title, span, content, controls) {
    return card;
 }
 
-/* connect to the backend */
-connect()
-
+function syncNodes(source, target) {
+   /* if there is a mismatch in the length, the card is more changing
+      than having its content updated */
+   if(target.children.length != source.children.length) {
+      target.parentElement.replaceChild(source, target)
+   }
+   else {
+      /* remove attributes that are not in the source */
+      for(let index = 0; index < target.attributes.length; index++) {
+         let attribute = target.attributes[index];
+         if (attribute.specified) {
+            if (!source.hasAttribute(attribute.name)) {
+               target.removeAttribute(attribute.name)
+            }
+         }
+      }
+      for(let index = 0; index < source.attributes.length; index++) {
+         let attribute = source.attributes[index];
+         if (attribute.specified) {
+            // getAttribute returns null or "" when attribute doesn't exist
+            if(target.getAttribute(attribute.name) != attribute.value) {
+               target.setAttribute(attribute.name, attribute.value)
+            }
+         }
+      }
+      // source.children.length == target.children.length
+      for(let index = 0; index < source.children.length; index++) {
+         let sourceChild = source.children[index];
+         let targetChild = target.children[index];
+         /* if the tags are different types, we can just replace the outer html */
+         /* although this DOES NOT consider event handlers */
+         if(targetChild.tagName != sourceChild.tagName) {
+            target.replaceChild(sourceChild, targetChild)
+         }
+         else {
+            syncNodes(sourceChild, targetChild)
+         }
+      }
+   }
+}
