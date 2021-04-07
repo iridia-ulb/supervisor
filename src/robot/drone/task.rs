@@ -1,6 +1,7 @@
-use futures::{Future, FutureExt, TryFutureExt, TryStreamExt, future, stream::FuturesUnordered};
+use bytes::Bytes;
+use futures::{Future, FutureExt, StreamExt, TryFutureExt, TryStreamExt, future::{self, Either}, stream::{FuturesOrdered, FuturesUnordered}};
 use serde::{Deserialize, Serialize};
-use tokio_stream::StreamExt;
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::codec::FramedRead;
 use uuid::Uuid;
 use std::{net::Ipv4Addr, path::PathBuf, sync::Arc, time::Duration};
@@ -12,6 +13,7 @@ use crate::software;
 const DRONE_BATT_FULL_MV: f32 = 4050.0;
 const DRONE_BATT_EMPTY_MV: f32 = 3500.0;
 const DRONE_BATT_NUM_CELLS: f32 = 3.0;
+const DRONE_CAMERAS_CONFIG: &[(&str, u16, u16, u16)] = &[];
 
 use crate::robot::drone::codec;
 
@@ -22,10 +24,6 @@ pub struct State {
     pub actions: Vec<Action>,
 }
 
-// better design would involve making these methods that use fernbedienung some sort
-// of Robot (probably async) trait, that requires the implementation of a
-// fernbedienung() getter. Then have a Request::Robot(robot::Request), which includes 
-// ExperimentStart, ExperimentStop etc
 pub enum Request {
     GetState(oneshot::Sender<State>),
     GetId(oneshot::Sender<u8>),
@@ -42,9 +40,6 @@ pub enum Request {
 pub type Sender = mpsc::UnboundedSender<Request>;
 pub type Receiver = mpsc::UnboundedReceiver<Request>;
 
-// Note: the power off, shutdown, reboot up core actions
-// should change the state to standby which, in turn,
-// should move the IP address back to the probing pool
 #[derive(Copy, Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub enum Action {
     #[serde(rename = "Power on UP Core")]
@@ -59,6 +54,10 @@ pub enum Action {
     PixhawkPowerOn,
     #[serde(rename = "Power off Pixhawk")]
     PixhawkPowerOff,
+    #[serde(rename = "Start camera stream")]
+    StartCameraStream,
+    #[serde(rename = "Stop camera stream")]
+    StopCameraStream,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -77,6 +76,8 @@ pub enum Error {
     XbeeError(#[from] xbee::Error),
     #[error(transparent)]
     FernbedienungError(#[from] fernbedienung::Error),
+    #[error(transparent)]
+    FetchError(#[from] reqwest::Error),
     #[error(transparent)]
     SoftwareError(#[from] software::Error),
     #[error(transparent)]
@@ -112,12 +113,13 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
         .and_then(|inner| inner);
     let mut mavlink = match mavlink_connect_result {
         Ok(stream) => {
-            let stream = FramedRead::new(stream, codec::MavMessageDecoder::<mavlink::common::MavMessage>::new());
-            futures::StreamExt::left_stream(stream)
+            FramedRead::new(stream, codec::MavMessageDecoder::<mavlink::common::MavMessage>::new())
+                .left_stream()
         },
         Err(error) => {
             log::warn!("Drone {}: failed to connect to the Xbee serial communication service: {}", uuid, error);
-            futures::StreamExt::right_stream(futures::stream::pending())
+            futures::stream::pending()
+                .right_stream()
         }
     };
 
@@ -126,7 +128,7 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
     tokio::pin!(poll_upcore_link_strength_task);
     let mut upcore_link_strength = -100;
 
-    let mut terminate: Option<oneshot::Sender<()>> = None;
+    let mut argos_stop_tx = None;
     let argos_task = future::pending().left_future();
     tokio::pin!(argos_task);
 
@@ -134,10 +136,19 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
     tokio::pin!(poll_xbee_link_margin_task);
     let mut xbee_link_margin = 0;
 
+    let mut upcore_camera_stream_stop_tx = None;
+    let mut upcore_camera_stream = futures::stream::pending().left_stream();
+    let upcore_camera_task = futures::future::pending().left_future();
+    tokio::pin!(upcore_camera_task);
+    let mut upcore_camera_frames = Vec::new();
+
     let mut battery_remaining = -1i8;
 
     loop {
         tokio::select! {
+            Some(frames) = upcore_camera_stream.next() => {
+                upcore_camera_frames = frames;
+            },
             Some(message) = mavlink.next() => {
                 if let Ok((_, mavlink::common::MavMessage::BATTERY_STATUS(data))) = message {
                     /* voltages: [u16; 10] Battery voltage of cells 1 to 10 in mV. If individual
@@ -180,9 +191,22 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
             },
             /* if ARGoS is running, keep forwarding stdout/stderr  */
             argos_result = &mut argos_task => {
-                terminate = None;
+                argos_stop_tx = None;
                 argos_task.set(futures::future::pending().left_future());
                 log::info!("ARGoS terminated with {:?}", argos_result);
+            },
+            /* clean up for when the streaming process terminates */
+            upcore_camera_result = &mut upcore_camera_task => {
+                upcore_camera_task.set(futures::future::pending().left_future());
+                upcore_camera_frames.clear();
+                match upcore_camera_result {
+                    /* since we use the terminate signal to shutdown mjpg_streamer, report
+                       AbnormalTerminationError as not an error */
+                    Ok(_) | Err(Error::FernbedienungError(fernbedienung::Error::AbnormalTerminationError)) =>
+                        log::info!("Camera stream stopped"),
+                    Err(error) =>
+                        log::warn!("Camera stream stopped: {}", error),
+                }
             },
             recv_request = rx.recv() => match recv_request {
                 None => break, /* tx handle dropped, exit the loop */
@@ -226,6 +250,33 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
                                     .map_err(|error| Error::FernbedienungError(error)),
                                 None => Err(Error::InvalidAction(action)),
                             },
+                            Action::StartCameraStream => {
+                                if let Either::Left(_) = *upcore_camera_task {
+                                    match fernbedienung {
+                                        Some(ref device) => {
+                                            let (task, stop_tx, stream_rx) =
+                                                handle_stream_start(device.clone(), DRONE_CAMERAS_CONFIG);
+                                            upcore_camera_stream_stop_tx = Some(stop_tx);
+                                            upcore_camera_stream = ReceiverStream::new(stream_rx).right_stream();
+                                            upcore_camera_task.set(task.right_future());
+                                            log::info!("Camera stream started");
+                                            Ok(())
+                                        }
+                                        None => Err(Error::InvalidAction(action)),
+                                    }
+                                }
+                                else {
+                                    Err(Error::InvalidAction(action))
+                                }
+                            },
+                            Action::StopCameraStream => {
+                                if let Either::Right(_) = *upcore_camera_task {
+                                    if let Some(stop_tx) = upcore_camera_stream_stop_tx.take() {
+                                        let _ = stop_tx.send(());
+                                    }
+                                }
+                                Ok(())
+                            }
                         };
                         if let Err(error) = result {
                             log::warn!("Could not execute {:?}: {}", action, error);
@@ -244,9 +295,9 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
                             },
                             Some(device) => {
                                 match handle_experiment_start(uuid, device.clone(), software, journal).await {
-                                    Ok((argos, terminate_tx)) => {
+                                    Ok((argos, stop_tx)) => {
                                         argos_task.set(argos.right_future());
-                                        terminate = Some(terminate_tx);
+                                        argos_stop_tx = Some(stop_tx);
                                         let _ = callback.send(Ok(()));
                                     },
                                     Err(error) => {
@@ -257,8 +308,8 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
                         }
                     },
                     Request::ExperimentStop => {
-                        if let Some(terminate) = terminate.take() {
-                            let _ = terminate.send(());
+                        if let Some(stop_tx) = argos_stop_tx.take() {
+                            let _ = stop_tx.send(());
                         }
                         /* poll argos to completion */
                         let result = (&mut argos_task).await;
@@ -346,6 +397,64 @@ pub async fn set_pixhawk_power(xbee: &xbee::Device, enable: bool) -> Result<()> 
         .map_err(|error| Error::XbeeError(error))
 }
 
+fn handle_stream_start(device: Arc<fernbedienung::Device>, configs: &'static [(&str, u16, u16, u16)])
+    -> (impl Future<Output = Result<()>>, oneshot::Sender<()>, mpsc::Receiver<Vec<Bytes>>) {
+    let (processes, stop_txs) : (FuturesUnordered<_>, Vec<_>)  = configs.iter()
+        .map(|(camera, width, height, port)| {
+            let device = device.clone();
+            let process_request = fernbedienung::Process {
+                target: "/home/mallwright/Workspace/mjpg-streamer/build/mjpg_streamer".into(),
+                working_dir: Some("/home/mallwright/Workspace/mjpg-streamer/build".into()),
+                args: vec![
+                    "-i".to_owned(),
+                    format!("plugins/input_uvc/input_uvc.so -d {} -r {}x{} -n", camera, width, height),
+                    "-o".to_owned(),
+                    format!("plugins/output_http/output_http.so -p {} -l {}", port, device.addr)
+                ],
+            };
+            let (stop_tx, stop_rx) = oneshot::channel::<()>();
+            let process = async move {
+                device.run(process_request, Some(stop_rx), None, None, None)
+                    .map_err(|e| Error::FernbedienungError(e)).await
+            };
+            (process, stop_tx)
+        }).unzip();
+
+    let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
+    let (stream_tx, stream_rx) = mpsc::channel::<Vec<Bytes>>(2);
+    let task = futures::future::try_join(processes.try_collect::<Vec<_>>(), async move {
+        /* sleep a bit while mjpeg_stream starts */
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        /* poll for frames */
+        loop {
+            let reqwest_frames = configs.iter()
+                .map(|&(_, _, _, port)| {
+                    reqwest::get(format!("http://{}:{}/?action=snapshot", device.addr, port))
+                        .and_then(|response| response.bytes())
+                })
+                .collect::<FuturesOrdered<_>>()
+                .try_collect::<Vec<_>>();
+            tokio::select! {
+                _ = &mut stop_rx => {
+                    break stop_txs.into_iter()
+                        .map(|stop_tx| stop_tx.send(()).map_err(|_| Error::RequestError))
+                        .collect::<Result<Vec<_>>>()
+                        .map(|_| ())
+                },
+                reqwest_result = reqwest_frames => match reqwest_result {
+                    Ok(frames) => {
+                        if let Err(_) = stream_tx.send(frames).await {
+                            break Ok(());
+                        }
+                    },
+                    Err(error) => break Err(Error::FetchError(error)),
+                },
+            }
+        }
+    }).map_ok(|_| ());
+    (task, stop_tx, stream_rx)
+}
+
 async fn handle_experiment_start(uuid: Uuid,
                                  device: Arc<fernbedienung::Device>,
                                  software: software::Software,
@@ -375,7 +484,7 @@ async fn handle_experiment_start(uuid: Uuid,
             })
             .collect::<FuturesUnordered<_>>()
             .map_err(|error| Error::FernbedienungError(error))
-            .collect::<Result<Vec<_>>>()
+            .try_collect::<Vec<_>>()
             .map_ok(|_| path)
         ).await?;
 
@@ -391,7 +500,7 @@ async fn handle_experiment_start(uuid: Uuid,
     };
 
     /* channel for terminating ARGoS */
-    let (terminate_tx, terminate_rx) = oneshot::channel();
+    let (stop_tx, stop_rx) = oneshot::channel();
 
     /* create future for running ARGoS */
     let argos_task_future = async move {
@@ -399,7 +508,7 @@ async fn handle_experiment_start(uuid: Uuid,
         let (stdout_tx, mut stdout_rx) = mpsc::unbounded_channel();
         let (stderr_tx, mut stderr_rx) = mpsc::unbounded_channel();
         /* run argos remotely */
-        let argos = device.run(process, Some(terminate_rx), None, Some(stdout_tx), Some(stderr_tx));
+        let argos = device.run(process, Some(stop_rx), None, Some(stdout_tx), Some(stderr_tx));
         tokio::pin!(argos);
         loop {
             tokio::select! {
@@ -423,5 +532,5 @@ async fn handle_experiment_start(uuid: Uuid,
             }
         }
     };
-    Ok((argos_task_future, terminate_tx)) 
+    Ok((argos_task_future, stop_tx))
 }

@@ -11,7 +11,7 @@ use crate::software;
 
 //const PIPUCK_BATT_FULL_MV: f32 = 4050.0;
 //const PIPUCK_BATT_EMPTY_MV: f32 = 3500.0;
-const PIPUCK_CAMERAS_CONFIG: &[(&str, u16, u16, u16)] = &[];
+const PIPUCK_CAMERAS_CONFIG: &[(&str, u16, u16, u16)] = &[("/dev/video0", 1280, 720, 8029)];
 
 // Info about reading the Pi-Puck battery level here:
 // https://github.com/yorkrobotlab/pi-puck-packages/blob/master/pi-puck-utils/pi-puck-battery
@@ -49,10 +49,10 @@ pub enum Action {
     RpiHalt,
     #[serde(rename = "Reboot Raspberry Pi")]
     RpiReboot,
-    #[serde(rename = "Start Camera")]
-    StartCamera,
-    #[serde(rename = "Stop Camera")]
-    StopCamera,
+    #[serde(rename = "Start camera stream")]
+    StartCameraStream,
+    #[serde(rename = "Stop camera stream")]
+    StopCameraStream,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -84,7 +84,7 @@ pub async fn poll_rpi_link_strength(device: &fernbedienung::Device) -> Result<i3
 }
 
 pub async fn new(uuid: Uuid, mut arena_rx: Receiver, device: fernbedienung::Device) -> Uuid {
-    let mut terminate: Option<oneshot::Sender<()>> = Default::default();
+    let mut argos_stop_tx = None;
     let argos_task = futures::future::pending().left_future();
     tokio::pin!(argos_task);
 
@@ -116,11 +116,11 @@ pub async fn new(uuid: Uuid, mut arena_rx: Receiver, device: fernbedienung::Devi
             },
             /* if ARGoS is running, keep forwarding stdout/stderr  */
             argos_result = &mut argos_task => {
-                terminate = None;
+                argos_stop_tx = None;
                 argos_task.set(futures::future::pending().left_future());
                 log::info!("ARGoS terminated with {:?}", argos_result);
             },
-            /* if the streaming process terminates, disable streaming */
+            /* clean up for when the streaming process terminates */
             rpi_camera_result = &mut rpi_camera_task => {
                 rpi_camera_task.set(futures::future::pending().left_future());
                 rpi_camera_frames.clear();
@@ -141,8 +141,8 @@ pub async fn new(uuid: Uuid, mut arena_rx: Receiver, device: fernbedienung::Devi
                         let state = State {
                             rpi: (device.addr, rpi_link_strength),
                             actions: vec![Action::RpiHalt, Action::RpiReboot, match *rpi_camera_task {
-                                Either::Left(_) => Action::StartCamera,
-                                Either::Right(_) => Action::StopCamera
+                                Either::Left(_) => Action::StartCameraStream,
+                                Either::Right(_) => Action::StopCameraStream
                             }],
                             camera: rpi_camera_frames.clone(),
                         };
@@ -161,7 +161,7 @@ pub async fn new(uuid: Uuid, mut arena_rx: Receiver, device: fernbedienung::Devi
                             }
                             break;
                         }
-                        Action::StartCamera => {
+                        Action::StartCameraStream => {
                             if let Either::Left(_) = *rpi_camera_task {
                                 let (task, stop_tx, stream_rx) = 
                                     handle_stream_start(&device, PIPUCK_CAMERAS_CONFIG);
@@ -171,7 +171,7 @@ pub async fn new(uuid: Uuid, mut arena_rx: Receiver, device: fernbedienung::Devi
                                 log::info!("Camera stream started");
                             }
                         },
-                        Action::StopCamera => {
+                        Action::StopCameraStream => {
                             if let Either::Right(_) = *rpi_camera_task {
                                 if let Some(stop_tx) = rpi_camera_stream_stop_tx.take() {
                                     let _ = stop_tx.send(());
@@ -181,9 +181,9 @@ pub async fn new(uuid: Uuid, mut arena_rx: Receiver, device: fernbedienung::Devi
                     },
                     Request::ExperimentStart{software, journal, callback} => {
                         match handle_experiment_start(uuid, &device, software, journal).await {
-                            Ok((argos, terminate_tx)) => {
+                            Ok((argos, stop_tx)) => {
                                 argos_task.set(argos.right_future());
-                                terminate = Some(terminate_tx);
+                                argos_stop_tx = Some(stop_tx);
                                 let _ = callback.send(Ok(()));
                             },
                             Err(error) => {
@@ -192,8 +192,8 @@ pub async fn new(uuid: Uuid, mut arena_rx: Receiver, device: fernbedienung::Devi
                         }
                     },
                     Request::ExperimentStop => {
-                        if let Some(terminate) = terminate.take() {
-                            let _ = terminate.send(());
+                        if let Some(stop_tx) = argos_stop_tx.take() {
+                            let _ = stop_tx.send(());
                         }
                         /* poll argos to completion */
                         let result = (&mut argos_task).await;
