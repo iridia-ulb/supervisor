@@ -210,7 +210,7 @@ function syncNodes(source, target) {
    /* if there is a mismatch in the length, the card is more changing
       than having its content updated */
    if(target.children.length != source.children.length) {
-      target.parentElement.replaceChild(source, target)
+      target.replaceWith(source)
    }
    else {
       /* remove attributes that are not in the source */
@@ -238,11 +238,16 @@ function syncNodes(source, target) {
          /* if the tags are different types, we can just replace the outer html */
          /* although this DOES NOT consider event handlers */
          if(targetChild.tagName != sourceChild.tagName) {
-            target.replaceChild(sourceChild, targetChild)
+            targetChild.replaceWith(sourceChild)
          }
          else {
             syncNodes(sourceChild, targetChild)
          }
       }
+   }
+   /* this should only be true if we are at the lowest level
+      and need to sync the inner text etc */
+   if(target.innerHTML != source.innerHTML) {
+      target.innerHTML = source.innerHTML
    }
 }

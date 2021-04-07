@@ -468,12 +468,14 @@ async fn connections_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request
             ],
             actions: state.actions.into_iter().map(Action::PiPuck).collect(),
         };
-        let camera_frames = state.camera.into_iter()
-            .map(|data| {
-                generate_image_node("image/jpg", &data, "width:calc(50% - 10px);padding:5px;")
-            })
-            .collect::<String>();
-        card.content.push(Content::Text(camera_frames));
+        if state.cameras.len() > 0 {
+            let camera_frames = state.cameras.into_iter()
+                .map(|data| {
+                    generate_image_node("image/jpg", &data, "width:calc(50% - 10px);padding:5px;")
+                })
+                .collect::<String>();
+            card.content.push(Content::Text(camera_frames));
+        }
         cards.push(card);
     }
     /* generate drone cards */
@@ -514,12 +516,14 @@ async fn connections_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request
             ],
             actions: state.actions.into_iter().map(Action::Drone).collect(),
         };
-        let camera_frames = state.cameras.into_iter()
-            .map(|data| {
-                generate_image_node("image/jpg", &data, "width:calc(50% - 10px);padding:5px;")
-            })
-            .collect::<String>();
-        card.content.push(Content::Text(camera_frames));
+        if state.cameras.len() > 0 {
+            let camera_frames = state.cameras.into_iter()
+                .map(|data| {
+                    generate_image_node("image/jpg", &data, "width:calc(50% - 10px);padding:5px;")
+                })
+                .collect::<String>();
+            card.content.push(Content::Text(camera_frames));
+        }
         cards.push(card);
     }
     Ok(cards)

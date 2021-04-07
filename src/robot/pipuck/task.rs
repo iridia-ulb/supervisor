@@ -25,7 +25,7 @@ root@raspberrypi0-wifi:/sys/devices/platform/soc/20804000.i2c/i2c-1/i2c-11/11-00
 #[derive(Debug)]
 pub struct State {
     pub rpi: (Ipv4Addr, i32),
-    pub camera: Vec<Bytes>,
+    pub cameras: Vec<Bytes>,
     pub actions: Vec<Action>,
 }
 
@@ -144,7 +144,7 @@ pub async fn new(uuid: Uuid, mut arena_rx: Receiver, device: fernbedienung::Devi
                                 Either::Left(_) => Action::StartCameraStream,
                                 Either::Right(_) => Action::StopCameraStream
                             }],
-                            camera: rpi_camera_frames.clone(),
+                            cameras: rpi_camera_frames.clone(),
                         };
                         let _ = callback.send(state);
                     }
