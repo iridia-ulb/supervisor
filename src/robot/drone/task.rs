@@ -13,7 +13,12 @@ use crate::software;
 const DRONE_BATT_FULL_MV: f32 = 4050.0;
 const DRONE_BATT_EMPTY_MV: f32 = 3500.0;
 const DRONE_BATT_NUM_CELLS: f32 = 3.0;
-const DRONE_CAMERAS_CONFIG: &[(&str, u16, u16, u16)] = &[];
+const DRONE_CAMERAS_CONFIG: &[(&str, u16, u16, u16)] = &[
+    ("/dev/video0", 1024, 768, 8000),
+    ("/dev/video2", 1024, 768, 8001),
+    ("/dev/video4", 1024, 768, 8002),
+    ("/dev/video6", 1024, 768, 8003),
+];
 
 use crate::robot::drone::codec;
 
@@ -22,6 +27,7 @@ pub struct State {
     pub upcore: Option<(Ipv4Addr, i32)>,
     pub battery_remaining: i8,
     pub actions: Vec<Action>,
+    pub cameras: Vec<Bytes>,
 }
 
 pub enum Request {
@@ -217,12 +223,17 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
                         if fernbedienung.is_some() {
                             actions.push(Action::UpCoreReboot);
                             actions.push(Action::UpCoreHalt);
+                            actions.push(match *upcore_camera_task {
+                                Either::Left(_) => Action::StartCameraStream,
+                                Either::Right(_) => Action::StopCameraStream,
+                            });
                         }
                         /* send back the state */
                         let state = State {
                             xbee: (xbee.addr, xbee_link_margin),
                             upcore: fernbedienung.as_ref().map(|dev| (dev.addr, upcore_link_strength)),
                             battery_remaining: battery_remaining,
+                            cameras: upcore_camera_frames.clone(),
                             actions,
                         };
                         let _ = callback.send(state);
@@ -403,13 +414,13 @@ fn handle_stream_start(device: Arc<fernbedienung::Device>, configs: &'static [(&
         .map(|(camera, width, height, port)| {
             let device = device.clone();
             let process_request = fernbedienung::Process {
-                target: "/home/mallwright/Workspace/mjpg-streamer/build/mjpg_streamer".into(),
-                working_dir: Some("/home/mallwright/Workspace/mjpg-streamer/build".into()),
+                target: "mjpg_streamer".into(),
+                working_dir: None,
                 args: vec![
                     "-i".to_owned(),
-                    format!("plugins/input_uvc/input_uvc.so -d {} -r {}x{} -n", camera, width, height),
+                    format!("input_uvc.so -d {} -r {}x{} -n", camera, width, height),
                     "-o".to_owned(),
-                    format!("plugins/output_http/output_http.so -p {} -l {}", port, device.addr)
+                    format!("output_http.so -p {} -l {}", port, device.addr)
                 ],
             };
             let (stop_tx, stop_rx) = oneshot::channel::<()>();

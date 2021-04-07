@@ -11,7 +11,7 @@ use crate::software;
 
 //const PIPUCK_BATT_FULL_MV: f32 = 4050.0;
 //const PIPUCK_BATT_EMPTY_MV: f32 = 3500.0;
-const PIPUCK_CAMERAS_CONFIG: &[(&str, u16, u16, u16)] = &[("/dev/video0", 1280, 720, 8029)];
+const PIPUCK_CAMERAS_CONFIG: &[(&str, u16, u16, u16)] = &[];
 
 // Info about reading the Pi-Puck battery level here:
 // https://github.com/yorkrobotlab/pi-puck-packages/blob/master/pi-puck-utils/pi-puck-battery
@@ -213,13 +213,13 @@ fn handle_stream_start<'d>(device: &'d fernbedienung::Device, configs: &'static 
     let (processes, stop_txs) : (FuturesUnordered<_>, Vec<_>)  = configs.iter()
         .map(|(camera, width, height, port)| {
             let process_request = fernbedienung::Process {
-                target: "/home/mallwright/Workspace/mjpg-streamer/build/mjpg_streamer".into(),
-                working_dir: Some("/home/mallwright/Workspace/mjpg-streamer/build".into()),
+                target: "mjpg_streamer".into(),
+                working_dir: None,
                 args: vec![
                     "-i".to_owned(),
-                    format!("plugins/input_uvc/input_uvc.so -d {} -r {}x{} -n", camera, width, height),
+                    format!("input_uvc.so -d {} -r {}x{} -n", camera, width, height),
                     "-o".to_owned(),
-                    format!("plugins/output_http/output_http.so -p {} -l {}", port, device.addr)
+                    format!("output_http.so -p {} -l {}", port, device.addr)
                 ],
             };
             let (stop_tx, stop_rx) = oneshot::channel::<()>();

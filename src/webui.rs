@@ -39,8 +39,8 @@ const BATT2_IMG: &str = "<img src=\"images/batt2.svg\" style=\"height:2.5em\" />
 const BATT3_IMG: &str = "<img src=\"images/batt3.svg\" style=\"height:2.5em\" />";
 const BATT4_IMG: &str = "<img src=\"images/batt4.svg\" style=\"height:2.5em\" />";
 
+// "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 fn generate_image_node(mime: &str, data: &[u8], style: &str) -> String {
-    //let data = String::from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
     let data = base64::encode(data);
     let download = "save_frame(this.src.replace(/^data:image\\/[^;]+/, 'data:application/octet-stream'));";
     format!("<img src=\"data:{};base64,{}\" style=\"{}\" onclick=\"{}\" />", mime, data, style, download)
@@ -470,48 +470,56 @@ async fn connections_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request
         };
         let camera_frames = state.camera.into_iter()
             .map(|data| {
-                let node = generate_image_node("image/jpg", &data, "width:calc(50% - 10px);padding:5px;");
-                Content::Text(node)
-            });
-        card.content.extend(camera_frames);
+                generate_image_node("image/jpg", &data, "width:calc(50% - 10px);padding:5px;")
+            })
+            .collect::<String>();
+        card.content.push(Content::Text(camera_frames));
         cards.push(card);
     }
     /* generate drone cards */
     for (uuid, state) in drones.into_iter() {
-        let card = Card {
+        let mut card = Card {
             uuid: uuid,
             span: 4,
             title: String::from("Drone"),
-            content: vec![Content::Table {
-                header: vec!["Unique Identifier".to_owned(), "Xbee".to_owned(), "UP Core".to_owned(), "Battery".to_owned()],
-                rows: vec![
-                    vec![
-                        uuid.to_string(),
-                        format!("{} {}", match state.xbee.1 {
-                            25..=49  => WIFI2_IMG,
-                            50..=74  => WIFI3_IMG,
-                            75..=100 => WIFI4_IMG,
-                            _ => WIFI1_IMG,
-                        }, state.xbee.0),
-                        state.upcore.map_or_else(|| "-".to_owned(), |upcore| {
-                            format!("{} {}", match upcore.1 + 90 {
+            content: vec![
+                Content::Table {
+                    header: vec!["Unique Identifier".to_owned(), "Xbee".to_owned(), "UP Core".to_owned(), "Battery".to_owned()],
+                    rows: vec![
+                        vec![
+                            uuid.to_string(),
+                            format!("{} {}", match state.xbee.1 {
                                 25..=49  => WIFI2_IMG,
                                 50..=74  => WIFI3_IMG,
                                 75..=100 => WIFI4_IMG,
                                 _ => WIFI1_IMG,
-                            }, upcore.0)
-                        }),
-                        match state.battery_remaining {
-                            25..=49  => BATT2_IMG,
-                            50..=74  => BATT3_IMG,
-                            75..=100 => BATT4_IMG,
-                            _ => BATT1_IMG,
-                        }.to_owned()
+                            }, state.xbee.0),
+                            state.upcore.map_or_else(|| "-".to_owned(), |upcore| {
+                                format!("{} {}", match upcore.1 + 90 {
+                                    25..=49  => WIFI2_IMG,
+                                    50..=74  => WIFI3_IMG,
+                                    75..=100 => WIFI4_IMG,
+                                    _ => WIFI1_IMG,
+                                }, upcore.0)
+                            }),
+                            match state.battery_remaining {
+                                25..=49  => BATT2_IMG,
+                                50..=74  => BATT3_IMG,
+                                75..=100 => BATT4_IMG,
+                                _ => BATT1_IMG,
+                            }.to_owned()
+                        ]
                     ]
-                ]
-            }],
+                },
+            ],
             actions: state.actions.into_iter().map(Action::Drone).collect(),
         };
+        let camera_frames = state.cameras.into_iter()
+            .map(|data| {
+                generate_image_node("image/jpg", &data, "width:calc(50% - 10px);padding:5px;")
+            })
+            .collect::<String>();
+        card.content.push(Content::Text(camera_frames));
         cards.push(card);
     }
     Ok(cards)

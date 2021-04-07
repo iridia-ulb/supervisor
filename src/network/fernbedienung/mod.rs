@@ -285,7 +285,7 @@ impl Device {
 
     pub async fn hostname(&self) -> Result<String> {
         let process = protocol::process::Process {
-            target: "/usr/bin/hostname".into(),
+            target: "hostname".into(),
             working_dir: None,
             args: vec![],
         };
@@ -320,9 +320,9 @@ impl Device {
 
     pub async fn link_strength(&self) -> Result<i32> {
         let process = protocol::process::Process {
-            target: "/usr/bin/iw".into(),
+            target: "iw".into(),
             working_dir: None,
-            args: vec!["dev".to_owned(), "wlp2s0".to_owned(), "link".to_owned()],
+            args: vec!["dev".to_owned(), "wlan0".to_owned(), "link".to_owned()],
         };
         let (stdout_tx, stdout_rx) = mpsc::unbounded_channel();
         let stdout_stream = UnboundedReceiverStream::new(stdout_rx);
