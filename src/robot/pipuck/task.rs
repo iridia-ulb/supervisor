@@ -179,6 +179,8 @@ pub async fn new(uuid: Uuid, mut arena_rx: Receiver, device: fernbedienung::Devi
                             }
                         }
                     },
+                    // modify experiment start to use a mpsc channel to send ARGoS started/stopped
+                    // events back to the arena. The stop event should be sent when ARGoS terminates
                     Request::ExperimentStart{software, journal, callback} => {
                         match handle_experiment_start(uuid, &device, software, journal).await {
                             Ok((argos, stop_tx)) => {
