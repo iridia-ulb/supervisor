@@ -521,6 +521,7 @@ async fn handle_experiment_start(uuid: Uuid,
         working_dir: Some(software_upload_path.into()),
         args: vec![
             "--config".to_owned(), argos_config.to_owned(),
+            "--pixhawk".to_owned(), "/dev/ttyS1:921600".to_owned(),
             "--router".to_owned(), message_router_addr.to_string(),
             "--id".to_owned(), uuid.to_string(),
         ],
