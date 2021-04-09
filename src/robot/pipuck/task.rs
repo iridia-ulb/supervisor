@@ -170,12 +170,18 @@ pub async fn new(uuid: Uuid, mut arena_rx: Receiver, device: fernbedienung::Devi
                                 rpi_camera_task.set(task.right_future());
                                 log::info!("Camera stream started");
                             }
+                            else {
+                                log::warn!("Camera stream already started");
+                            }
                         },
                         Action::StopCameraStream => {
                             if let Either::Right(_) = *rpi_camera_task {
                                 if let Some(stop_tx) = rpi_camera_stream_stop_tx.take() {
                                     let _ = stop_tx.send(());
                                 }
+                            }
+                            else {
+                                log::warn!("Camera stream has not been started");
                             }
                         }
                     },
