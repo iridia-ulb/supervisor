@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::codec::FramedRead;
 use uuid::Uuid;
-use std::{net::Ipv4Addr, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::HashMap, net::Ipv4Addr, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{net::{TcpStream, UdpSocket}, sync::{mpsc, oneshot}};
 use crate::network::{fernbedienung, xbee};
 use crate::journal;
@@ -410,8 +410,8 @@ pub async fn set_pixhawk_power(xbee: &xbee::Device, enable: bool) -> Result<()> 
 
 fn handle_stream_start(device: Arc<fernbedienung::Device>, configs: &'static [(&str, u16, u16, u16)])
     -> (impl Future<Output = Result<()>>, oneshot::Sender<()>, mpsc::Receiver<Vec<Bytes>>) {
-    let (processes, stop_txs) : (FuturesUnordered<_>, Vec<_>)  = configs.iter()
-        .map(|(camera, width, height, port)| {
+    let (mut processes, mut stop_txs) : (FuturesUnordered<_>, HashMap<_,_>)  = configs.iter()
+        .map(|&(camera, width, height, port)| {
             let device = device.clone();
             let process_request = fernbedienung::Process {
                 target: "mjpg_streamer".into(),
@@ -425,30 +425,46 @@ fn handle_stream_start(device: Arc<fernbedienung::Device>, configs: &'static [(&
             };
             let (stop_tx, stop_rx) = oneshot::channel::<()>();
             let process = async move {
-                device.run(process_request, Some(stop_rx), None, None, None)
-                    .map_err(|e| Error::FernbedienungError(e)).await
+                (camera, device.run(process_request, Some(stop_rx), None, None, None)
+                    .map_err(|e| Error::FernbedienungError(e)).await)
             };
-            (process, stop_tx)
+            (process, (camera, stop_tx))
         }).unzip();
-
     let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
     let (stream_tx, stream_rx) = mpsc::channel::<Vec<Bytes>>(2);
-    let task = futures::future::try_join(processes.try_collect::<Vec<_>>(), async move {
-        /* sleep a bit while mjpeg_stream starts */
-        tokio::time::sleep(Duration::from_millis(500)).await;
+    let task = async move {
+        let mut instances = configs.iter()
+            .map(|&(camera, _, _, port)| (camera, port))
+            .collect::<HashMap<_,_>>();
+        /* start mjpg_stream */
+        loop {
+            tokio::select! {
+                Some((camera, _)) = processes.next() => {
+                    instances.remove(camera);
+                    stop_txs.remove(camera);
+                    log::warn!("Streaming from {} failed", camera);
+                },
+                _ = tokio::time::sleep(Duration::from_secs(1)) => break
+            }
+        }
         /* poll for frames */
         loop {
-            let reqwest_frames = configs.iter()
-                .map(|&(_, _, _, port)| {
+            let reqwest_frames = instances.iter()
+                .map(|(_, port)| {
                     reqwest::get(format!("http://{}:{}/?action=snapshot", device.addr, port))
                         .and_then(|response| response.bytes())
                 })
                 .collect::<FuturesOrdered<_>>()
                 .try_collect::<Vec<_>>();
             tokio::select! {
+                Some((camera, _)) = processes.next() => {
+                    instances.remove(camera);
+                    stop_txs.remove(camera);
+                    log::info!("Streaming from {} terminated", camera);
+                },
                 _ = &mut stop_rx => {
                     break stop_txs.into_iter()
-                        .map(|stop_tx| stop_tx.send(()).map_err(|_| Error::RequestError))
+                        .map(|(_, stop_tx)| stop_tx.send(()).map_err(|_| Error::RequestError))
                         .collect::<Result<Vec<_>>>()
                         .map(|_| ())
                 },
@@ -462,7 +478,7 @@ fn handle_stream_start(device: Arc<fernbedienung::Device>, configs: &'static [(&
                 },
             }
         }
-    }).map_ok(|_| ());
+    };
     (task, stop_tx, stream_rx)
 }
 
