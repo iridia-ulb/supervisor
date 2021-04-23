@@ -453,7 +453,7 @@ async fn connections_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request
     for (uuid, state) in pipucks.into_iter() {
         let mut card = Card {
             uuid: uuid,
-            span: 4,
+            span: 6,
             title: String::from("Pi-Puck"),
             content: vec![
                 Content::Table {
@@ -482,28 +482,15 @@ async fn connections_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request
     for (uuid, state) in drones.into_iter() {
         let mut card = Card {
             uuid: uuid,
-            span: 4,
+            span: 2,
             title: String::from("Drone"),
             content: vec![
+                Content::Text("Overview".to_owned()),
                 Content::Table {
-                    header: vec!["Unique Identifier".to_owned(), "Xbee".to_owned(), "UP Core".to_owned(), "Battery".to_owned()],
+                    header: vec!["Unique Identifier".to_owned(), "Battery".to_owned()],
                     rows: vec![
                         vec![
                             uuid.to_string(),
-                            format!("{} {}", match state.xbee.1 {
-                                25..=49  => WIFI2_IMG,
-                                50..=74  => WIFI3_IMG,
-                                75..=100 => WIFI4_IMG,
-                                _ => WIFI1_IMG,
-                            }, state.xbee.0),
-                            state.upcore.map_or_else(|| "-".to_owned(), |upcore| {
-                                format!("{} {}", match upcore.1 + 90 {
-                                    25..=49  => WIFI2_IMG,
-                                    50..=74  => WIFI3_IMG,
-                                    75..=100 => WIFI4_IMG,
-                                    _ => WIFI1_IMG,
-                                }, upcore.0)
-                            }),
                             match state.battery_remaining {
                                 25..=49  => BATT2_IMG,
                                 50..=74  => BATT3_IMG,
@@ -512,6 +499,33 @@ async fn connections_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request
                             }.to_owned()
                         ]
                     ]
+                },
+                Content::Text("Connectivity".to_owned()),
+                Content::Table {
+                    header: vec!["Device".to_owned(), "IP Address".to_owned(), "Signal Strength".to_owned()],
+                    rows: vec![
+                        vec!["Xbee".to_owned(), state.xbee.0.to_string(), format!("{}", match state.xbee.1 {
+                            25..=49  => WIFI2_IMG,
+                            50..=74  => WIFI3_IMG,
+                            75..=100 => WIFI4_IMG,
+                            _ => WIFI1_IMG,
+                        })],
+                        vec!["UP Core".to_owned(),
+                            state.upcore.map_or_else(|| "-".to_owned(), |upcore| upcore.0.to_string()),
+                            state.upcore.map_or_else(|| "-".to_owned(), |upcore| {
+                                format!("{}", match upcore.1 + 90 {
+                                    25..=49  => WIFI2_IMG,
+                                    50..=74  => WIFI3_IMG,
+                                    75..=100 => WIFI4_IMG,
+                                    _ => WIFI1_IMG,
+                                })
+                            })],
+                    ]
+                },
+                Content::Text("Sensors and actuators".to_owned()),
+                Content::Table {
+                    header: vec!["Device".to_owned(), "Location".to_owned()],
+                    rows: state.devices.into_iter().map(|(left, right)| vec![left, right]).collect()
                 },
             ],
             actions: state.actions.into_iter().map(Action::Drone).collect(),

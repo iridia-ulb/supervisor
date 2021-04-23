@@ -209,8 +209,8 @@ pub async fn new(arena_request_rx: mpsc::UnboundedReceiver<Request>,
 async fn handle_pair_with_drone_request(drone_tx_map: &HashMap<Uuid, drone::Sender>,
                                         device: network::fernbedienung::Device) -> Result<()> {
     /* upload the set id script */
-    let write_upcore_id_script = include_bytes!("scripts/write_upcore_id.sh");
-    device.upload("/tmp".into(), "write_upcore_id.sh".into(), write_upcore_id_script.to_vec()).await
+    let write_upcore_id_script = include_bytes!("scripts/drone_set_identifier.sh");
+    device.upload("/tmp".into(), "drone_set_identifier.sh".into(), write_upcore_id_script.to_vec()).await
         .map_err(|error| Error::FernbedienungError(error))?;
     /* get a random id from between 0 and 15 (15 is intentionally not included) */
     let mut rng = rand::thread_rng();
@@ -219,7 +219,7 @@ async fn handle_pair_with_drone_request(drone_tx_map: &HashMap<Uuid, drone::Send
     let script = network::fernbedienung::Process {
         target: "sh".into(),
         working_dir: Some("/tmp".into()),
-        args: vec!["write_upcore_id.sh".into(), random_id.to_string()],
+        args: vec!["drone_set_identifier.sh".into(), random_id.to_string()],
     };
     let (terminate_tx, terminate_rx) = oneshot::channel();
 

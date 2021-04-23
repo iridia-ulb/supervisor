@@ -1,12 +1,12 @@
 use bytes::Bytes;
 use futures::{Future, FutureExt, StreamExt, TryFutureExt, TryStreamExt, future::{self, Either}, stream::{FuturesOrdered, FuturesUnordered}};
 use serde::{Deserialize, Serialize};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::wrappers::{ReceiverStream, UnboundedReceiverStream};
 use tokio_util::codec::FramedRead;
 use uuid::Uuid;
 use std::{collections::HashMap, net::Ipv4Addr, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{net::{TcpStream, UdpSocket}, sync::{mpsc, oneshot}};
-use crate::network::{fernbedienung, xbee};
+use crate::network::{fernbedienung::{self, Process}, xbee};
 use crate::journal;
 use crate::software;
 
@@ -28,6 +28,7 @@ pub struct State {
     pub battery_remaining: i8,
     pub actions: Vec<Action>,
     pub cameras: Vec<Bytes>,
+    pub devices: Vec<(String, String)>
 }
 
 pub enum Request {
@@ -64,6 +65,8 @@ pub enum Action {
     StartCameraStream,
     #[serde(rename = "Stop camera stream")]
     StopCameraStream,
+    // #[serde(rename = "Identify")]
+    // Identify,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -91,6 +94,51 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+// pub async fn identify(device: Arc<fernbedienung::Device>) {
+//     let identify = fernbedienung::Process {
+//         target: (),
+//         working_dir: (),
+//         args: (),
+
+//     };
+
+// }
+
+
+pub async fn poll_upcore_devices(device: Arc<fernbedienung::Device>) -> Result<Vec<(String, String)>> {
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let query_devices_script = include_bytes!("../../scripts/drone_query_devices.sh");
+    device.upload("/tmp".into(), "drone_query_devices.sh".into(), query_devices_script.to_vec()).await
+        .map_err(|error| Error::FernbedienungError(error))?;
+    let query_hubs = fernbedienung::Process {
+        target: "sh".into(),
+        working_dir: Some("/tmp".into()),
+        args: vec!["drone_query_devices.sh".to_owned()],
+    };
+    let (stdout_tx, stdout_rx) = mpsc::unbounded_channel();
+    let stdout_stream = UnboundedReceiverStream::new(stdout_rx);
+    let (_, stdout) = tokio::try_join!(
+        device.run(query_hubs, None, None, Some(stdout_tx), None),
+        stdout_stream.concat().map(fernbedienung::Result::Ok)
+    )?;
+    let result = String::from_utf8(stdout.to_vec())
+        .map_err(|_| Error::FernbedienungError(fernbedienung::Error::DecodeError))?
+        .lines()
+        .map(|device| {
+            let mut device = device.split_whitespace();
+            let left = match device.next() {
+                Some(left) => left.to_owned(),
+                None => String::new()
+            };
+            let right = match device.next() {
+                Some(right) => right.to_owned(),
+                None => String::new()
+            };
+            (left, right)
+        }).collect::<Vec<_>>();
+    Ok(result)
+}
 
 pub async fn poll_upcore_link_strength(fernbedienung: Arc<fernbedienung::Device>) -> Result<i32> {
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -134,9 +182,16 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
     tokio::pin!(poll_upcore_link_strength_task);
     let mut upcore_link_strength = -100;
 
+    let poll_upcore_devices_task = future::pending().left_future();
+    tokio::pin!(poll_upcore_devices_task);
+    let mut upcore_devices = Vec::new();
+
     let mut argos_stop_tx = None;
     let argos_task = future::pending().left_future();
     tokio::pin!(argos_task);
+
+    // let identify_task = future::pending().left_future();
+    // tokio::pin!(identify_task);
 
     let poll_xbee_link_margin_task = poll_xbee_link_margin(&xbee);
     tokio::pin!(poll_xbee_link_margin_task);
@@ -167,6 +222,16 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
                     battery_remaining = (battery_reading.max(0.0).min(1.0) * 100.0) as i8;
                 }
             },
+            result = &mut poll_upcore_devices_task => {
+                poll_upcore_devices_task.set(match fernbedienung {
+                    Some(ref device) => poll_upcore_devices(device.clone()).right_future(),
+                    None => future::pending().left_future(),
+                });
+                match result {
+                    Ok(devices) => upcore_devices = devices,
+                    Err(error) => log::warn!("Could not poll devices: {}", error),
+                }
+            },
             result = &mut poll_xbee_link_margin_task => match result {
                 Ok(link_margin) => {
                     xbee_link_margin = link_margin;
@@ -193,6 +258,7 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
                     /* TODO consider this as a disconnection scenario */
                     fernbedienung = None;
                     poll_upcore_link_strength_task.set(future::pending().left_future());
+                    poll_upcore_devices_task.set(future::pending().left_future());
                 }
             },
             /* if ARGoS is running, keep forwarding stdout/stderr  */
@@ -234,14 +300,16 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
                             upcore: fernbedienung.as_ref().map(|dev| (dev.addr, upcore_link_strength)),
                             battery_remaining: battery_remaining,
                             cameras: upcore_camera_frames.clone(),
+                            devices: upcore_devices.clone(),
                             actions,
                         };
                         let _ = callback.send(state);
                     },
                     Request::Pair(device) => {
                         let device = Arc::new(device);
-                        fernbedienung = Some(device.clone());
-                        poll_upcore_link_strength_task.set(poll_upcore_link_strength(device).right_future());
+                        poll_upcore_link_strength_task.set(poll_upcore_link_strength(device.clone()).right_future());
+                        poll_upcore_devices_task.set(poll_upcore_devices(device.clone()).right_future());
+                        fernbedienung = Some(device);
                     },
                     Request::Execute(action) => {
                         let result = match action {
@@ -261,6 +329,16 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
                                     .map_err(|error| Error::FernbedienungError(error)),
                                 None => Err(Error::InvalidAction(action)),
                             },
+                            /*
+                            Action::Identify => match fernbedienung {
+                                Some(ref device) => {
+                                    let indentify = fernbedienung::Process {
+
+                                    }
+                                },
+                                None => Err(Error::InvalidAction(action)),
+                            },
+                            */
                             Action::StartCameraStream => {
                                 if let Either::Left(_) = *upcore_camera_task {
                                     match fernbedienung {
