@@ -492,6 +492,10 @@ async fn connections_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request
                 .collect::<String>();
             card.content.push(Content::Text(camera_frames));
         }
+        if let Some(kernel_messages) = state.kernel_messages {
+            let data = base64::encode(kernel_messages.as_bytes());
+            card.content.push(Content::Download { data, filename: "kernel_messages.txt".to_owned() } );
+        }
         cards.push(card);
     }
     /* generate drone cards */
