@@ -300,6 +300,23 @@ impl Device {
         Ok(hostname.trim().to_owned())
     }
 
+    pub async fn kernel_messages(&self) -> Result<String> {
+        let process = protocol::process::Process {
+            target: "dmesg".into(),
+            working_dir: None,
+            args: vec![],
+        };
+        let (stdout_tx, stdout_rx) = mpsc::unbounded_channel();
+        let stdout_stream = UnboundedReceiverStream::new(stdout_rx);
+        let (_, stdout) = tokio::try_join!(
+            self.run(process, None, None, Some(stdout_tx), None),
+            stdout_stream.concat().map(Result::Ok)
+        )?;
+        let messages = std::str::from_utf8(stdout.as_ref())
+            .map_err(|_| Error::DecodeError)?;
+        Ok(messages.trim().to_owned())
+    }
+
     pub async fn halt(&self) -> Result<()> {
         let process = protocol::process::Process {
             target: "echo".into(),

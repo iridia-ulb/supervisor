@@ -54,6 +54,10 @@ enum Content {
         header: Vec<String>,
         rows: Vec<Vec<String>>
     },
+    Download  {
+        data: String,
+        filename: String,
+    },
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -541,10 +545,14 @@ async fn connections_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request
                     _ => WIFI1_IMG,
                 }.to_owned()
             ];
-            /* the fourth index should be the connectivity table */
+            /* the third index (fourth entry) should be the connectivity table */
             if let Some(Content::Table{rows, ..}) = content.get_mut(3) {
                 rows.push(upcore);
             }
+        }
+        if let Some(kernel_messages) = state.kernel_messages {
+            let data = base64::encode(kernel_messages.as_bytes());
+            content.push(Content::Download { data, filename: "kernel_messages.txt".to_owned() } );
         }
         let mut card = Card {
             uuid: uuid,

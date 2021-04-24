@@ -28,7 +28,8 @@ pub struct State {
     pub battery_remaining: i8,
     pub actions: Vec<Action>,
     pub cameras: Vec<Bytes>,
-    pub devices: Vec<(String, String)>
+    pub devices: Vec<(String, String)>,
+    pub kernel_messages: Option<String>,
 }
 
 pub enum Request {
@@ -65,6 +66,8 @@ pub enum Action {
     StartCameraStream,
     #[serde(rename = "Stop camera stream")]
     StopCameraStream,
+    #[serde(rename = "Get kernel messages")]
+    GetKernelMessages,
     // #[serde(rename = "Identify")]
     // Identify,
 }
@@ -190,6 +193,8 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
     let argos_task = future::pending().left_future();
     tokio::pin!(argos_task);
 
+    let mut kernel_messages = None;
+
     // let identify_task = future::pending().left_future();
     // tokio::pin!(identify_task);
 
@@ -293,6 +298,7 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
                                 Either::Left(_) => Action::StartCameraStream,
                                 Either::Right(_) => Action::StopCameraStream,
                             });
+                            actions.push(Action::GetKernelMessages);
                         }
                         /* send back the state */
                         let state = State {
@@ -301,6 +307,7 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
                             battery_remaining: battery_remaining,
                             cameras: upcore_camera_frames.clone(),
                             devices: upcore_devices.clone(),
+                            kernel_messages: kernel_messages.take(),
                             actions,
                         };
                         let _ = callback.send(state);
@@ -319,16 +326,26 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
                             Action::PixhawkPowerOff => set_pixhawk_power(&xbee, false).await,
                             Action::UpCoreReboot => match fernbedienung {
                                 Some(ref device) => device.reboot().await
-                                    .map(|_| ())
                                     .map_err(|error| Error::FernbedienungError(error)),
                                 None => Err(Error::InvalidAction(action)),
                             },
                             Action::UpCoreHalt => match fernbedienung {
                                 Some(ref device) => device.halt().await
-                                    .map(|_| ())
                                     .map_err(|error| Error::FernbedienungError(error)),
                                 None => Err(Error::InvalidAction(action)),
                             },
+                            Action::GetKernelMessages => match fernbedienung {
+                                Some(ref device) => {
+                                    match device.kernel_messages().await {
+                                        Ok(messages) => {
+                                            kernel_messages = Some(messages);
+                                            Ok(())
+                                        },
+                                        Err(error) => Err(Error::FernbedienungError(error))
+                                    }
+                                }
+                                None => Err(Error::InvalidAction(action)),
+                            }
                             /*
                             Action::Identify => match fernbedienung {
                                 Some(ref device) => {
