@@ -319,18 +319,18 @@ impl Device {
 
     pub async fn halt(&self) -> Result<()> {
         let process = protocol::process::Process {
-            target: "echo".into(),
+            target: "halt".into(),
             working_dir: None,
-            args: vec!["halt".to_owned()],
+            args: vec![],
         };
         self.run(process, None, None, None, None).await
     }
 
     pub async fn reboot(&self) -> Result<()> {
         let process = protocol::process::Process {
-            target: "echo".into(),
+            target: "reboot".into(),
             working_dir: None,
-            args: vec!["reboot".to_owned()],
+            args: vec![],
         };
         self.run(process, None, None, None, None).await
     }
