@@ -266,10 +266,12 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
                 }
                 Err(error) => {
                     log::warn!("Xbee on drone {}: {}", uuid, error);
-                    /* TODO consider this as a disconnection scenario? */
-                    /* disconnect here if the upcore is also offline? otherwise try to
-                       reestablish connection with xbee */
-                    poll_xbee_link_margin_task.set(poll_xbee_link_margin(&xbee));
+                    /* disconnect here if the upcore is offline, otherwise try to reestablish
+                       the connection with xbee */
+                    match fernbedienung {
+                        Some(_) => poll_xbee_link_margin_task.set(poll_xbee_link_margin(&xbee)),
+                        None => break,
+                    }
                 }
             },
             result = &mut poll_upcore_link_strength_task => match result {
@@ -286,6 +288,8 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
                     fernbedienung = None;
                     poll_upcore_link_strength_task.set(future::pending().left_future());
                     poll_upcore_devices_task.set(future::pending().left_future());
+                    upcore_devices.clear();
+                    upcore_camera_frames.clear();
                 }
             },
             /* if ARGoS is running, keep forwarding stdout/stderr  */
@@ -296,6 +300,7 @@ pub async fn new(uuid: Uuid, mut rx: Receiver, xbee: xbee::Device) -> Uuid {
             },
             /* clean up for when the streaming process terminates */
             upcore_camera_result = &mut upcore_camera_task => {
+                upcore_camera_stream = futures::stream::pending().left_stream();
                 upcore_camera_task.set(futures::future::pending().left_future());
                 upcore_camera_frames.clear();
                 match upcore_camera_result {
