@@ -457,7 +457,7 @@ async fn connections_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request
     for (uuid, state) in pipucks.into_iter() {
         let mut card = Card {
             uuid: uuid,
-            span: 3,
+            span: 4,
             title: String::from("Pi-Puck"),
             content: vec![
                 Content::Text("Overview".to_owned()),
@@ -560,7 +560,7 @@ async fn connections_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request
         }
         let mut card = Card {
             uuid: uuid,
-            span: 3,
+            span: 4,
             title: String::from("Drone"),
             content: content,
             actions: state.actions.into_iter().map(Action::Drone).collect(),
