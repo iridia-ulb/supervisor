@@ -19,7 +19,7 @@ tokio-stream = { version = "0.1" }
 natnet-decode = { version = "0.1" }
 warp = { version = "0.3", features = ["websocket"] }
 futures = { version = "0.3" }
-static_dir = { git = "https://github.com/coolreader18/static_dir", branch = "tokio1" }
+static_dir = { version = "0.2" }
 structopt = { version = "0.3", default-features = false }
 reqwest = { version = "0.11" }
 
