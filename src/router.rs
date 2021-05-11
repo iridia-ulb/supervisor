@@ -219,7 +219,7 @@ impl Encoder<Bytes> for ByteArrayCodec {
 type Peers = Arc<RwLock<HashMap<SocketAddr, mpsc::UnboundedSender<Bytes>>>>;
 
 pub async fn new(bind_to_addr: SocketAddr,
-                 journal_requests_tx: &mpsc::UnboundedSender<journal::Request>) -> io::Result<()> {
+                 journal_requests_tx: mpsc::UnboundedSender<journal::Request>) -> io::Result<()> {
     let listener = TcpListener::bind(bind_to_addr).await?;
     log::info!("Message router running on: {:?}", listener.local_addr());
     /* create an atomic map of all peers */

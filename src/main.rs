@@ -47,7 +47,7 @@ async fn main() {
     let network_task = network::new(options.network, &arena_requests_tx);
     /* create message router task */
     let message_router_addr : SocketAddr = (Ipv4Addr::UNSPECIFIED, 4950).into();
-    let router_task = router::new(message_router_addr, &journal_requests_tx);
+    let router_task = router::new(message_router_addr, journal_requests_tx.clone());
     /* create webui task */
     /* clone arena requests tx for moving into the closure */
     let arena_requests_tx = arena_requests_tx.clone();
@@ -67,10 +67,10 @@ async fn main() {
     tokio::pin!(arena_task);
     tokio::pin!(journal_task);
     tokio::pin!(network_task);
-    tokio::pin!(router_task);
     tokio::pin!(webui_task);
     tokio::pin!(sigint_task);
 
+    let mut router_task = tokio::spawn(router_task);
     /* no point in implementing automatic browser opening */
     /* https://bugzilla.mozilla.org/show_bug.cgi?id=1512438 */
     let server_addr = format!("http://{}/", server_addr);
