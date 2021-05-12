@@ -186,32 +186,22 @@ struct ByteArrayCodec {
 }
 
 impl Decoder for ByteArrayCodec {
-    type Item = Vec<Bytes>;
+    type Item = Bytes;
     type Error = io::Error;
 
-    fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Vec<Bytes>>, io::Error> {
-        let mut messages : Vec<Bytes> = Vec::new();
-        loop {
-            match self.len {
-                Some(len) => {
-                    match buf.len() >= len {
-                        true => {
-                            messages.push(buf.split_to(len).freeze());
-                            self.len = None;
-                        }
-                        false => break,
-                    }
-                }
-                None => match buf.len() >= 4 {
-                    true => self.len = Some(buf.get_u32() as usize),
-                    false => break,
-                }
+    fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Bytes>, io::Error> {
+        if let Some(len) = self.len {
+            if buf.len() >= len {
+                self.len = None;
+                return Ok(Some(buf.split_to(len).freeze()));
             }
         }
-        match messages.len() {
-            0 => Ok(None),
-            _ => Ok(Some(messages))
+        else {
+            if buf.len() >= 4 {
+                self.len = Some(buf.get_u32() as usize);
+            }
         }
+        Ok(None)
     }
 }
 
@@ -253,28 +243,24 @@ pub async fn new(bind_to_addr: SocketAddr,
                         Framed::new(stream, ByteArrayCodec::default()).split();
                     /* send and receive messages concurrently */
                     let _ = tokio::join!(rx_stream.map(|msg| {
-                        log::info!("Send message {:?} to {}", md5::compute(&msg), addr);
+                        log::info!("Send message {:?} to {}", decode_lua_table(&mut msg.clone()).unwrap(), addr);
                         Ok(msg)
                     }).forward(sink), async {
                         peers.write().await.insert(addr, tx);
-                        while let Some(messages) = stream.next().await {
-                            match messages {
-                                Ok(messages) => {
+                        while let Some(message) = stream.next().await {
+                            match message {
+                                Ok(mut message) => {
+                                    log::info!("Recv message {:?} from {}", decode_lua_table(&mut message.clone()).unwrap(), addr);
                                     for (peer_addr, tx) in peers.read().await.iter() {
-                                        for message in messages.iter() {
-                                            log::info!("Recv message {:?} from {}", md5::compute(&message), addr);
-                                            /* do not send messages to the sending robot */   
-                                            if peer_addr != &addr {
-                                                let _ = tx.send(message.clone());
-                                            }
+                                        /* do not send messages to the sending robot */   
+                                        if peer_addr != &addr {
+                                            let _ = tx.send(message.clone());
                                         }
                                     }
-                                    for mut message in messages.into_iter() {
-                                        if let Ok(decoded) = decode_lua_table(&mut message) {
-                                            let event = journal::Event::Broadcast(addr, decoded);
-                                            if let Err(error) = journal_requests_tx.send(journal::Request::Record(event)) {
-                                                log::error!("Could not record event in journal: {}", error);
-                                            }
+                                    if let Ok(decoded) = decode_lua_table(&mut message) {
+                                        let event = journal::Event::Broadcast(addr, decoded);
+                                        if let Err(error) = journal_requests_tx.send(journal::Request::Record(event)) {
+                                            log::error!("Could not record event in journal: {}", error);
                                         }
                                     }
                                 },
