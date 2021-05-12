@@ -242,11 +242,15 @@ pub async fn new(bind_to_addr: SocketAddr,
                     let (sink, mut stream) = 
                         Framed::new(stream, ByteArrayCodec::default()).split();
                     /* send and receive messages concurrently */
-                    let _ = tokio::join!(rx_stream.map(|msg| Ok(msg)).forward(sink), async {
+                    let _ = tokio::join!(rx_stream.map(|msg| {
+                        log::info!("Send message {:?} to {}", md5::compute(&msg), addr);
+                        Ok(msg)
+                    }).forward(sink), async {
                         peers.write().await.insert(addr, tx);
                         while let Some(message) = stream.next().await {
                             match message {
                                 Ok(mut message) => {
+                                    log::info!("Recv message {:?} from {}", md5::compute(&message), addr);
                                     for (peer_addr, tx) in peers.read().await.iter() {
                                         /* do not send messages to the sending robot */   
                                         if peer_addr != &addr {

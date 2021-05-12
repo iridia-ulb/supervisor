@@ -33,7 +33,7 @@ async fn main() {
     let options = Options::from_args();
     /* initialize the logger */
     let environment = env_logger::Env::default().default_filter_or("mns_supervisor=info");
-    env_logger::Builder::from_env(environment).init();
+    env_logger::Builder::from_env(environment).format_timestamp_millis().init();
     /* create a task for tracking the robots and state of the experiment */
     let (arena_requests_tx, arena_requests_rx) = mpsc::unbounded_channel();
     let (journal_requests_tx, journal_requests_rx) = mpsc::unbounded_channel();
