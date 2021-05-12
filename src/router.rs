@@ -178,7 +178,25 @@ fn decode_lua_table(buf: &mut impl Buf) -> Result<LuaType, Error> {
     Ok(LuaType::Table(table))
 }
 
-
+fn get_step_count(lua: &LuaType) -> Option<f64> {
+    if let LuaType::Table(entries) = lua {
+        for (key, value) in entries.into_iter() {
+            if let LuaType::Table(_) = value {
+                if let Some(step_count) = get_step_count(value) {
+                    return Some(step_count);
+                }
+            }
+            if let LuaType::String(key) = key {
+                if key == "stepCount" {
+                    if let LuaType::Number(value) = value {
+                        return Some(*value);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
 
 #[derive(Debug, Default)]
 struct ByteArrayCodec {
@@ -243,16 +261,16 @@ pub async fn new(bind_to_addr: SocketAddr,
                         Framed::new(stream, ByteArrayCodec::default()).split();
                     /* send and receive messages concurrently */
                     let _ = tokio::join!(rx_stream.map(|msg| {
-                        let table = serde_json::to_string_pretty(&decode_lua_table(&mut msg.clone()).unwrap()).unwrap();
-                        log::info!("Send to {}: {}", addr, table);
+                        let step_count = get_step_count(&decode_lua_table(&mut msg.clone()).unwrap());
+                        log::info!("Send to {}: step count = {:?}", addr, step_count);
                         Ok(msg)
                     }).forward(sink), async {
                         peers.write().await.insert(addr, tx);
                         while let Some(message) = stream.next().await {
                             match message {
                                 Ok(mut message) => {
-                                    let table = serde_json::to_string_pretty(&decode_lua_table(&mut message.clone()).unwrap()).unwrap();
-                                    log::info!("Recv from {}: {}", addr, table);
+                                    let step_count = get_step_count(&decode_lua_table(&mut message.clone()).unwrap());
+                                    log::info!("Send to {}: step count = {:?}", addr, step_count);
                                     for (peer_addr, tx) in peers.read().await.iter() {
                                         /* do not send messages to the sending robot */   
                                         if peer_addr != &addr {
