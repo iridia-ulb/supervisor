@@ -262,6 +262,7 @@ pub async fn new(bind_to_addr: SocketAddr,
                                 Ok(messages) => {
                                     for (peer_addr, tx) in peers.read().await.iter() {
                                         for message in messages.iter() {
+                                            log::info!("Recv message {:?} from {}", md5::compute(&message), addr);
                                             /* do not send messages to the sending robot */   
                                             if peer_addr != &addr {
                                                 let _ = tx.send(message.clone());
