@@ -262,7 +262,7 @@ pub async fn new(bind_to_addr: SocketAddr,
                     /* send and receive messages concurrently */
                     let _ = tokio::join!(rx_stream.map(|msg| {
                         let step_count = get_step_count(&decode_lua_table(&mut msg.clone()).unwrap());
-                        log::info!("Send to {}: step count = {:?}", addr, step_count);
+                        log::info!("Send {:?} to {}: step count = {:?}", md5::compute(&msg), addr, step_count);
                         Ok(msg)
                     }).forward(sink), async {
                         peers.write().await.insert(addr, tx);
@@ -270,7 +270,7 @@ pub async fn new(bind_to_addr: SocketAddr,
                             match message {
                                 Ok(mut message) => {
                                     let step_count = get_step_count(&decode_lua_table(&mut message.clone()).unwrap());
-                                    log::info!("Send to {}: step count = {:?}", addr, step_count);
+                                    log::info!("Recv {:?} from {}: step count = {:?}", md5::compute(&message), addr, step_count);
                                     for (peer_addr, tx) in peers.read().await.iter() {
                                         /* do not send messages to the sending robot */   
                                         if peer_addr != &addr {
