@@ -243,14 +243,16 @@ pub async fn new(bind_to_addr: SocketAddr,
                         Framed::new(stream, ByteArrayCodec::default()).split();
                     /* send and receive messages concurrently */
                     let _ = tokio::join!(rx_stream.map(|msg| {
-                        log::info!("Send message {:?} to {}", decode_lua_table(&mut msg.clone()).unwrap(), addr);
+                        let table = serde_json::to_string_pretty(&decode_lua_table(&mut msg.clone()).unwrap()).unwrap();
+                        log::info!("Send to {}: {}", addr, table);
                         Ok(msg)
                     }).forward(sink), async {
                         peers.write().await.insert(addr, tx);
                         while let Some(message) = stream.next().await {
                             match message {
                                 Ok(mut message) => {
-                                    log::info!("Recv message {:?} from {}", decode_lua_table(&mut message.clone()).unwrap(), addr);
+                                    let table = serde_json::to_string_pretty(&decode_lua_table(&mut message.clone()).unwrap()).unwrap();
+                                    log::info!("Recv from {}: {}", addr, table);
                                     for (peer_addr, tx) in peers.read().await.iter() {
                                         /* do not send messages to the sending robot */   
                                         if peer_addr != &addr {
