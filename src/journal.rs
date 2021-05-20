@@ -41,8 +41,6 @@ pub enum Robot {
     StandardError(BytesMut),
 }
 
-
-
 #[derive(Debug, Serialize)]
 struct Entry {
     timestamp: Duration,
@@ -62,11 +60,11 @@ pub async fn new(rx: mpsc::UnboundedReceiver<Request>) -> Result<()> {
                     Err(error) => Err(Error::SystemTimeError(error)),
                     Ok(since_unix_epoch) => {
                         let log_filename = format!("{}.pkl", since_unix_epoch.as_secs());
-                        start.get_or_insert_with(Instant::now);
+                        start = Some(Instant::now());
                         match File::create(log_filename) {
                             Err(error) => Err(Error::IoError(error)),
                             Ok(file) => {
-                                writer.get_or_insert(BufWriter::new(file));
+                                writer = Some(BufWriter::new(file));
                                 Ok(())
                             }
                         }
@@ -78,8 +76,8 @@ pub async fn new(rx: mpsc::UnboundedReceiver<Request>) -> Result<()> {
             },
             Request::Stop => {
                 /* clear the start time and close the file */
-                start.take();
-                writer.take();
+                start = None;
+                writer = None;
             },
             Request::Record(event) => if let Some(start) = start.as_ref() {
                 if let Some(writer) = writer.as_mut() {
