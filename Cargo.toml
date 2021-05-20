@@ -12,7 +12,7 @@ serde_json = { version = "1.0" }
 serde-pickle = { version = "0.6" }
 roxmltree = { version = "0.13" }
 
-tokio = { version = "1.2", features = ["full"] }
+tokio = { version = "1.6", features = ["full"] }
 tokio-util = { version = "0.6", features = ["full"] }
 tokio-serde = { version = "0.8", features = ["json"] }
 tokio-stream = { version = "0.1" }
