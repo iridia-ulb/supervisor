@@ -187,7 +187,7 @@ fn get_step_count(lua: &LuaType) -> Option<f64> {
                 }
             }
             if let LuaType::String(key) = key {
-                if key == "step_count" {
+                if key == "stepCount" {
                     if let LuaType::Number(value) = value {
                         return Some(*value);
                     }
@@ -208,15 +208,23 @@ impl Decoder for ByteArrayCodec {
     type Error = io::Error;
 
     fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Bytes>, io::Error> {
-        if let Some(len) = self.len {
-            if buf.len() >= len {
-                self.len = None;
-                return Ok(Some(buf.split_to(len).freeze()));
+        loop {
+            if let Some(len) = self.len {
+                if buf.len() >= len {
+                    self.len = None;
+                    return Ok(Some(buf.split_to(len).freeze()));
+                }
+                else {
+                    break;
+                }
             }
-        }
-        else {
-            if buf.len() >= 4 {
-                self.len = Some(buf.get_u32() as usize);
+            else {
+                if buf.len() >= 4 {
+                    self.len = Some(buf.get_u32() as usize);
+                }
+                else {
+                    break;
+                }
             }
         }
         Ok(None)
