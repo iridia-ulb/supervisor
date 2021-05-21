@@ -178,26 +178,6 @@ fn decode_lua_table(buf: &mut impl Buf) -> Result<LuaType, Error> {
     Ok(LuaType::Table(table))
 }
 
-fn get_step_count(lua: &LuaType) -> Option<f64> {
-    if let LuaType::Table(entries) = lua {
-        for (key, value) in entries.into_iter() {
-            if let LuaType::Table(_) = value {
-                if let Some(step_count) = get_step_count(value) {
-                    return Some(step_count);
-                }
-            }
-            if let LuaType::String(key) = key {
-                if key == "stepCount" {
-                    if let LuaType::Number(value) = value {
-                        return Some(*value);
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
 #[derive(Debug, Default)]
 struct ByteArrayCodec {
     len: Option<usize>
@@ -261,22 +241,13 @@ async fn client_handler(stream: TcpStream,
     }
 
     /* send and receive messages concurrently */
-    let mut forward = rx_stream.map(|msg| {
-        let step_count = get_step_count(&decode_lua_table(&mut msg.clone()).unwrap());
-        log::info!("Send {:?} to {}: step count = {:?}", md5::compute(&msg), addr, step_count);
-        Ok(msg)
-    }).forward(sink);
+    let mut forward = rx_stream.map(|msg| Ok(msg)).forward(sink);
 
     loop {
         tokio::select! {
             biased;
             Some(message) = stream.next() => match message {
                 Ok(mut message) => {
-                    let step_count = get_step_count(&decode_lua_table(&mut message.clone()).unwrap());
-                    log::info!("Recv {:?} from {}: step count = {:?}", md5::compute(&message), addr, step_count);
-
-
-
                     for (peer_addr, tx) in peers.lock().await.iter() {
                         /* do not send messages to the sending robot */   
                         if peer_addr != &addr {
