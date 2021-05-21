@@ -6,7 +6,7 @@
   <!-- ************************* -->
   <framework>
     <system threads="0" />
-    <experiment length="5" ticks_per_second="5" random_seed="12345" />
+    <experiment length="25" ticks_per_second="5" random_seed="0" />
   </framework>
   
   <!-- *************** -->
