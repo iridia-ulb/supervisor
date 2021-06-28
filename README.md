@@ -1,0 +1,4 @@
+# Supervisor
+Supervisor is a piece of software for securely starting, monitoring, and stopping experiments involving swarms of robots. It was developed by Michael Allwright for the MNS project and supports the Pi-Puck and the IRIDIA drone. It is possible to add support for other robot types.
+
+Supervisor uses the [Fernbedienung protocol](https://github.com/iridia-ulb/fernbedienung-python) to remotely start [ARGoS](https://www.argos-sim.info/) on robots. The supervisor stores various information gathered during experiments in a [Python Pickle](https://docs.python.org/3/library/pickle.html). The standard output and standard error produced by ARGoS is included in the Pickle as are the messages sent between robots using the wifi sensor and actuator. If these messages are sent via the Lua interface, the Lua types and tables are automatically converted into their Python equivalents.
