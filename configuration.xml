@@ -1,0 +1,17 @@
+<?xml version="1.0" ?>
+<configuration>
+    <supervisor>
+        <router socket="localhost:1234" />
+        <webui socket="localhost:8000" />
+    </supervisor>
+    <robots network="192.168.1.0/24">
+        <drone  id="drone1" 
+                xbee_addr="FFFFFFFFFFFF"
+                upcore_addr="FFFFFFFFFFFF"
+                optitrack_id="1" />
+        <pipuck id="pipuck1" 
+                rpi_addr="FFFFFFFFFFFF"
+                optitrack_id="2"
+                apriltag_id="20" />
+    </robots>
+</configuration>
