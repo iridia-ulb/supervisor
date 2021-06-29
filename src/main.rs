@@ -1,5 +1,8 @@
-use std::net::{Ipv4Addr, SocketAddr};
+use std::{io, net::{Ipv4Addr, SocketAddr}, path::{Path, PathBuf}, str::FromStr};
+use anyhow::Context;
+use base64::Config;
 use ipnet::Ipv4Net;
+use journal::Robot;
 use tokio::sync::mpsc;
 use warp::Filter;
 use structopt::StructOpt;
@@ -14,18 +17,26 @@ mod journal;
 mod router;
 
 #[derive(Debug, StructOpt)]
-#[structopt(name = "mns-supervisor", about = "A supervisor for the MNS experiments")]
+#[structopt(name = "supervisor", about = "A supervisor for experiments with swarms of robots")]
 struct Options {
-    #[structopt(long)]
-    network: Ipv4Net,
+    #[structopt(short = "c", long = "configuration")]
+    config: PathBuf,
 }
 
 #[tokio::main]
 async fn main() {
-    let options = Options::from_args();
     /* initialize the logger */
-    let environment = env_logger::Env::default().default_filter_or("mns_supervisor=info");
+    let environment = env_logger::Env::default().default_filter_or("supervisor=info");
     env_logger::Builder::from_env(environment).format_timestamp_millis().init();
+    /* parse the configuration file */
+    let options = Options::from_args();
+    let config = match read_config(&options.config) {
+        Ok(config) => config,
+        Err(err) => {
+            log::error!("Configuration error: {}", err);
+            return;
+        }
+    };
     /* create a task for tracking the robots and state of the experiment */
     let (arena_requests_tx, arena_requests_rx) = mpsc::unbounded_channel();
     let (journal_requests_tx, journal_requests_rx) = mpsc::unbounded_channel();
@@ -36,7 +47,7 @@ async fn main() {
     /* create arena task */
     let arena_task = arena::new(arena_requests_rx, &journal_requests_tx);
     /* create network task */
-    let network_task = network::new(options.network, &arena_requests_tx);
+    let network_task = network::new(config.robot_network, &arena_requests_tx);
     /* create message router task */
     let message_router_addr : SocketAddr = (Ipv4Addr::UNSPECIFIED, 4950).into();
     let router_task = router::new(message_router_addr, journal_requests_tx.clone());
@@ -84,4 +95,61 @@ async fn main() {
             log::info!("Shutting down");
         }
     }
+}
+
+/*
+<?xml version="1.0" ?>
+<configuration>
+    <supervisor>
+        <router socket="localhost:1234" />
+        <webui socket="localhost:8000" />
+    </supervisor>
+    <robots network="192.168.1.0/24">
+        <drone  id="drone1" 
+                xbee_addr="FFFFFFFFFFFF"
+                upcore_addr="FFFFFFFFFFFF"
+                optitrack_id="1" />
+        <pipuck id="pipuck1" 
+                rpi_addr="FFFFFFFFFFFF"
+                optitrack_id="2"
+                apriltag_id="20" />
+    </robots>
+</configuration>
+
+ */
+
+enum RobotTableEntry {
+    Drone {
+        id: String,
+        xbee_macaddr: [u8; 6],
+        upcore_macaddr: [u8; 6],
+        optitrack_id: u8,
+    },
+    PiPuck {
+        id: String,
+        rpi_macaddr: [u8; 6],
+        optitrack_id: u8,
+        apriltag_id: u8,
+    }
+}
+
+struct Configuration {
+    router_socket: Option<SocketAddr>,
+    webui_socket: Option<SocketAddr>,
+    robot_network: Ipv4Net,
+    robot_table: Vec<RobotTableEntry>,
+}
+
+fn read_config(config: &Path) -> anyhow::Result<Configuration> {
+    let config = std::fs::read_to_string(config)
+        .context("Could not read configuration file")?;
+    let xml = roxmltree::Document::parse(&config)
+        .context("Could not parse configuration file")?;
+    let supervisor_config = xml
+        .descendants()
+        .find(|a| a.tag_name().name() == "supervisor")
+        .ok_or("Could not find tag \"supervisor\"");
+
+
+    Ok(Configuration {})
 }

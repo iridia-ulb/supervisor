@@ -1,5 +1,5 @@
 [package]
-name = "mns-supervisor"
+name = "supervisor"
 version = "0.1.0"
 authors = ["Michael Allwright <allsey87@gmail.com>"]
 edition = "2018"
@@ -38,6 +38,7 @@ semver = { version = "0.4"}
 log = { version = "0.4" }
 env_logger = { version = "0.8" }
 thiserror = { version = "1.0" }
+anyhow = { version = "1.0" }
 
 mavlink = {version = "0.9"}
 crc-any = {version = "2.3"}
