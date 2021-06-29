@@ -14,10 +14,10 @@ const DRONE_BATT_FULL_MV: f32 = 4050.0;
 const DRONE_BATT_EMPTY_MV: f32 = 3500.0;
 const DRONE_BATT_NUM_CELLS: f32 = 3.0;
 const DRONE_CAMERAS_CONFIG: &[(&str, u16, u16, u16)] = &[
-    ("/dev/video0", 1024, 768, 8000),
-    ("/dev/video2", 1024, 768, 8001),
-    ("/dev/video4", 1024, 768, 8002),
-    ("/dev/video6", 1024, 768, 8003),
+    ("/dev/camera0", 1024, 768, 8000),
+    ("/dev/camera1", 1024, 768, 8001),
+    ("/dev/camera2", 1024, 768, 8002),
+    ("/dev/camera3", 1024, 768, 8003),
 ];
 
 use crate::robot::drone::codec;
