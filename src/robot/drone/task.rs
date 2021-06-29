@@ -489,11 +489,9 @@ async fn get_id(xbee: &xbee::Device) -> Result<u8> {
 async fn init(xbee: &xbee::Device) -> Result<()> {
     /* set pin modes */
     let pin_modes = vec![
-        /* Enabling DOUT and asserting UPCORE_EN at the same time appears to
-           result in the Xbee resetting itself (possibly due to a brown out).
-           Unfortunately, DOUT must be enabled for the SCS to work
-           Disable outputs: TX: DOUT, RTS: DIO6, RX: DIN, CTS: DIO7 */
-        (xbee::Pin::DOUT, xbee::PinMode::Disable),
+        /* UART pins: TX: DOUT, RTS: DIO6, RX: DIN, CTS: DIO7 */
+        /* hardware flow control connected but disabled */
+        (xbee::Pin::DOUT, xbee::PinMode::Alternate),
         (xbee::Pin::DIO6, xbee::PinMode::Disable),
         (xbee::Pin::DIO7, xbee::PinMode::Disable),
         (xbee::Pin::DIN,  xbee::PinMode::Alternate),
