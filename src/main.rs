@@ -1,11 +1,10 @@
-use std::{io, net::{Ipv4Addr, SocketAddr}, path::{Path, PathBuf}, str::FromStr};
-use anyhow::Context;
-use base64::Config;
+use std::{net::SocketAddr, path::{Path, PathBuf}};
 use ipnet::Ipv4Net;
-use journal::Robot;
+use macaddr::{MacAddr6, MacAddr8};
 use tokio::sync::mpsc;
 use warp::Filter;
 use structopt::StructOpt;
+use anyhow::Context;
 
 mod arena;
 mod robot;
@@ -24,19 +23,16 @@ struct Options {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     /* initialize the logger */
     let environment = env_logger::Env::default().default_filter_or("supervisor=info");
     env_logger::Builder::from_env(environment).format_timestamp_millis().init();
     /* parse the configuration file */
     let options = Options::from_args();
-    let config = match read_config(&options.config) {
-        Ok(config) => config,
-        Err(err) => {
-            log::error!("Configuration error: {}", err);
-            return;
-        }
-    };
+    let config = parse_config(&options.config)
+        .context("Could not parse configuration file")?;
+
+    log::info!("Configuration = {:?}", config);
     /* create a task for tracking the robots and state of the experiment */
     let (arena_requests_tx, arena_requests_rx) = mpsc::unbounded_channel();
     let (journal_requests_tx, journal_requests_rx) = mpsc::unbounded_channel();
@@ -49,8 +45,9 @@ async fn main() {
     /* create network task */
     let network_task = network::new(config.robot_network, &arena_requests_tx);
     /* create message router task */
-    let message_router_addr : SocketAddr = (Ipv4Addr::UNSPECIFIED, 4950).into();
-    let router_task = router::new(message_router_addr, journal_requests_tx.clone());
+    let router_addr = config.router_socket
+        .ok_or(anyhow::anyhow!("A socket for the message router must be provided"))?;
+    let router_task = router::new(router_addr, journal_requests_tx.clone());
     /* create webui task */
     /* clone arena requests tx for moving into the closure */
     let arena_requests_tx = arena_requests_tx.clone();
@@ -64,8 +61,9 @@ async fn main() {
     let static_route = warp::get()
         .and(static_dir::static_dir!("static"));
     //    .and(warp::fs::dir("/home/mallwright/Workspace/mns-supervisor/static"));
-    let server_addr : SocketAddr = (Ipv4Addr::LOCALHOST, 3030).into();
-    let webui_task = warp::serve(socket_route.or(static_route)).run(server_addr);
+    let webui_addr = config.webui_socket
+        .ok_or(anyhow::anyhow!("A socket for the message router must be provided"))?;
+    let webui_task = warp::serve(socket_route.or(static_route)).run(webui_addr);
     /* pin the futures so that they can be polled via &mut */
     tokio::pin!(arena_task);
     tokio::pin!(journal_task);
@@ -76,7 +74,7 @@ async fn main() {
     let mut router_task = tokio::spawn(router_task);
     /* no point in implementing automatic browser opening */
     /* https://bugzilla.mozilla.org/show_bug.cgi?id=1512438 */
-    let server_addr = format!("http://{}/", server_addr);
+    let server_addr = format!("http://{}/", webui_addr);
     if let Err(_) = webbrowser::open(&server_addr) {
         log::warn!("Could not start browser");
         log::info!("Please open this URL manually: {}", server_addr);
@@ -95,6 +93,8 @@ async fn main() {
             log::info!("Shutting down");
         }
     }
+
+    Ok(())
 }
 
 /*
@@ -118,21 +118,23 @@ async fn main() {
 
  */
 
+#[derive(Debug)]
 enum RobotTableEntry {
     Drone {
         id: String,
-        xbee_macaddr: [u8; 6],
-        upcore_macaddr: [u8; 6],
-        optitrack_id: u8,
+        xbee_macaddr: MacAddr8,
+        upcore_macaddr: MacAddr6,
+        optitrack_id: i32,
     },
     PiPuck {
         id: String,
-        rpi_macaddr: [u8; 6],
-        optitrack_id: u8,
+        rpi_macaddr: MacAddr6,
+        optitrack_id: i32,
         apriltag_id: u8,
     }
 }
 
+#[derive(Debug)]
 struct Configuration {
     router_socket: Option<SocketAddr>,
     webui_socket: Option<SocketAddr>,
@@ -140,16 +142,96 @@ struct Configuration {
     robot_table: Vec<RobotTableEntry>,
 }
 
-fn read_config(config: &Path) -> anyhow::Result<Configuration> {
-    let config = std::fs::read_to_string(config)
-        .context("Could not read configuration file")?;
-    let xml = roxmltree::Document::parse(&config)
-        .context("Could not parse configuration file")?;
-    let supervisor_config = xml
+fn parse_config(config: &Path) -> anyhow::Result<Configuration> {
+    let config = std::fs::read_to_string(config)?;
+    let tree = roxmltree::Document::parse(&config)?;
+    let configuration = tree
         .descendants()
-        .find(|a| a.tag_name().name() == "supervisor")
-        .ok_or("Could not find tag \"supervisor\"");
-
-
-    Ok(Configuration {})
+        .find(|node| node.tag_name().name() == "configuration")
+        .ok_or(anyhow::anyhow!("Could not find node <configuration>"))?;
+    let supervisor = configuration
+        .descendants()
+        .find(|node| node.tag_name().name() == "supervisor")
+        .ok_or(anyhow::anyhow!("Could not find node <supervisor>"))?;
+    let webui_socket = supervisor
+        .descendants()
+        .find(|node| node.tag_name().name() == "webui")
+        .map(|node| node
+            .attribute("socket")
+            .ok_or(anyhow::anyhow!("Could not find attribute \"socket\" in <webui>"))?
+            .parse::<SocketAddr>()
+            .context("Could not parse attribute \"socket\" in <webui>"))
+        .transpose()?;
+    let router_socket = supervisor
+        .descendants()
+        .find(|node| node.tag_name().name() == "router")
+        .map(|node| node
+            .attribute("socket")
+            .ok_or(anyhow::anyhow!("Could not find attribute \"socket\" in <router>"))?
+            .parse::<SocketAddr>()
+            .context("Could not parse attribute \"socket\" in <router>"))
+        .transpose()?;
+    let robots = configuration
+        .descendants()
+        .find(|node| node.tag_name().name() == "robots")
+        .ok_or(anyhow::anyhow!("Could not find node \"robots\" in <configuration>"))?;
+    let robot_network = robots
+        .attribute("network")
+        .ok_or(anyhow::anyhow!("Could not find attribute \"network\" in <robots>"))?
+        .parse::<Ipv4Net>()
+        .context("Could not parse attribute \"network\" in <robots>")?;
+    let mut robot_table = Vec::new();
+    for robot in robots.descendants() {
+        match robot.tag_name().name() {
+            "pipuck" => {
+                let pipuck = RobotTableEntry::PiPuck {
+                    id: robot
+                        .attribute("id")
+                        .ok_or(anyhow::anyhow!("Could not find attribute \"id\" for <pipuck>"))?
+                        .to_owned(),
+                    rpi_macaddr: robot.attribute("rpi_macaddr")
+                        .ok_or(anyhow::anyhow!("Could not find attribute \"rpi_macaddr\" for <pipuck>"))?
+                        .parse()
+                        .context("Could not parse attribute \"rpi_macaddr\" for <pipuck>")?,
+                    optitrack_id: robot.attribute("optitrack_id")
+                        .ok_or(anyhow::anyhow!("Could not find attribute \"optitrack_id\" for <pipuck>"))?
+                        .parse()
+                        .context("Could not parse attribute \"optitrack_id\" for <pipuck>")?,
+                    apriltag_id: robot.attribute("apriltag_id")
+                        .ok_or(anyhow::anyhow!("Could not find attribute \"apriltag_id\" for <pipuck>"))?
+                        .parse()
+                        .context("Could not parse attribute \"apriltag_id\" for <pipuck>")?,
+                };
+                robot_table.push(pipuck);
+            },
+            "drone" => {
+                let drone = RobotTableEntry::Drone {
+                    id: robot
+                        .attribute("id")
+                        .ok_or(anyhow::anyhow!("Could not find attribute \"id\" for <drone>"))?
+                        .to_owned(),
+                    xbee_macaddr: robot.attribute("xbee_macaddr")
+                        .ok_or(anyhow::anyhow!("Could not find attribute \"xbee_macaddr\" for <drone>"))?
+                        .parse()
+                        .context("Could not parse attribute \"xbee_macaddr\" for <drone>")?,
+                    upcore_macaddr: robot.attribute("upcore_macaddr")
+                        .ok_or(anyhow::anyhow!("Could not find attribute \"upcore_macaddr\" for <drone>"))?
+                        .parse()
+                        .context("Could not parse attribute \"upcore_macaddr\" for <drone>")?,
+                    optitrack_id: robot.attribute("optitrack_id")
+                        .ok_or(anyhow::anyhow!("Could not find attribute \"optitrack_id\" for <drone>"))?
+                        .parse()
+                        .context("Could not parse attribute \"optitrack_id\" for <drone>")?,
+                };
+                robot_table.push(drone);
+            },
+            _ => continue,
+        }
+    }
+    Ok(Configuration { 
+        router_socket,
+        webui_socket,
+        robot_network,
+        robot_table,
+    })
 }
