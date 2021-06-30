@@ -14,10 +14,10 @@ const DRONE_BATT_FULL_MV: f32 = 4050.0;
 const DRONE_BATT_EMPTY_MV: f32 = 3500.0;
 const DRONE_BATT_NUM_CELLS: f32 = 3.0;
 const DRONE_CAMERAS_CONFIG: &[(&str, u16, u16, u16)] = &[
-    ("/dev/video0", 1024, 768, 8000),
-    ("/dev/video2", 1024, 768, 8001),
-    ("/dev/video4", 1024, 768, 8002),
-    ("/dev/video6", 1024, 768, 8003),
+    ("/dev/camera0", 1024, 768, 8000),
+    ("/dev/camera1", 1024, 768, 8001),
+    ("/dev/camera2", 1024, 768, 8002),
+    ("/dev/camera3", 1024, 768, 8003),
 ];
 
 use crate::robot::drone::codec;
@@ -489,11 +489,9 @@ async fn get_id(xbee: &xbee::Device) -> Result<u8> {
 async fn init(xbee: &xbee::Device) -> Result<()> {
     /* set pin modes */
     let pin_modes = vec![
-        /* Enabling DOUT and asserting UPCORE_EN at the same time appears to
-           result in the Xbee resetting itself (possibly due to a brown out).
-           Unfortunately, DOUT must be enabled for the SCS to work
-           Disable outputs: TX: DOUT, RTS: DIO6, RX: DIN, CTS: DIO7 */
-        (xbee::Pin::DOUT, xbee::PinMode::Disable),
+        /* UART pins: TX: DOUT, RTS: DIO6, RX: DIN, CTS: DIO7 */
+        /* hardware flow control connected but disabled */
+        (xbee::Pin::DOUT, xbee::PinMode::Alternate),
         (xbee::Pin::DIO6, xbee::PinMode::Disable),
         (xbee::Pin::DIO7, xbee::PinMode::Disable),
         (xbee::Pin::DIN,  xbee::PinMode::Alternate),
