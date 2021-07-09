@@ -4,9 +4,9 @@ use std::path::PathBuf;
 use std::collections::HashMap;
 
 use bytes::BytesMut;
-use mpsc::UnboundedSender;
-use tokio_stream::wrappers::UnboundedReceiverStream;
-use tokio::sync::{mpsc::{self, UnboundedReceiver}, oneshot};
+use macaddr::MacAddr6;
+use tokio_stream::wrappers::ReceiverStream;
+use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 use futures::{self, FutureExt, StreamExt, stream::FuturesUnordered};
 
@@ -22,6 +22,9 @@ pub use protocol::{Upload, process::Process};
 lazy_static::lazy_static! {
     static ref REGEX_LINK_STRENGTH: Regex = 
         Regex::new(r"signal:\s+(-\d+)\s+dBm+").unwrap();
+    
+    static ref REGEX_MAC_ADDR: Regex = 
+        Regex::new(r"addr\s+([0-9a-fA-F:.-]+)").unwrap();
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -53,7 +56,7 @@ pub type RemoteRequests = SymmetricallyFramed<
     SymmetricalJson<protocol::Request>>;
 
 pub struct Device {
-    request_tx: mpsc::UnboundedSender<Request>,
+    request_tx: mpsc::Sender<Request>,
     pub addr: Ipv4Addr
 }
 
@@ -67,9 +70,9 @@ enum Request {
     Run {
         process: protocol::process::Process,
         terminate_rx: Option<oneshot::Receiver<()>>,
-        stdin_rx: Option<UnboundedReceiver<BytesMut>>,
-        stdout_tx: Option<UnboundedSender<BytesMut>>,
-        stderr_tx: Option<UnboundedSender<BytesMut>>,
+        stdin_rx: Option<mpsc::Receiver<BytesMut>>,
+        stdout_tx: Option<mpsc::Sender<BytesMut>>,
+        stderr_tx: Option<mpsc::Sender<BytesMut>>,
         result_tx: oneshot::Sender<Result<()>>,
     },
     Upload {
@@ -79,10 +82,10 @@ enum Request {
 }
 
 impl Device {
-    pub async fn new(addr: Ipv4Addr, return_addr_tx: mpsc::UnboundedSender<Ipv4Addr>) -> Result<Self> {
+    pub async fn new(addr: Ipv4Addr, return_addr_tx: oneshot::Sender<Ipv4Addr>) -> Result<Self> {
         let stream = TcpStream::connect((addr, 17653)).await
             .map_err(|error| Error::IoError(error))?;
-        let (local_request_tx, mut local_request_rx) = mpsc::unbounded_channel();
+        let (local_request_tx, mut local_request_rx) = mpsc::channel(32);
         tokio::spawn(async move {
             /* requests and responses from remote */
             let (read, write) = tokio::io::split(stream);
@@ -95,12 +98,12 @@ impl Device {
                 SymmetricalJson::<protocol::Response>::default(),
             );
             /* create an mpsc channel to share for remote_requests */
-            let (remote_requests_tx, remote_requests_rx) = mpsc::unbounded_channel();           
-            let mut forward_remote_requests = UnboundedReceiverStream::new(remote_requests_rx)
+            let (remote_requests_tx, remote_requests_rx) = mpsc::channel(32);           
+            let mut forward_remote_requests = ReceiverStream::new(remote_requests_rx)
                 .map(|request| Ok(request))
                 .forward(remote_requests);
             /* collections for tracking state */
-            let mut status_txs: HashMap<Uuid, UnboundedSender<protocol::ResponseKind>> = Default::default();
+            let mut status_txs: HashMap<Uuid, mpsc::Sender<protocol::ResponseKind>> = Default::default();
             let mut tasks: FuturesUnordered<_> = Default::default();
             /* event loop */
             loop {
@@ -126,9 +129,10 @@ impl Device {
                                 Request::Halt { result_tx } => {
                                     let uuid = Uuid::new_v4();
                                     let request = protocol::RequestKind::Halt;
-                                    let (halt_status_tx, mut halt_status_rx) = mpsc::unbounded_channel();
+                                    let (halt_status_tx, mut halt_status_rx) = mpsc::channel(8);
                                     status_txs.insert(uuid, halt_status_tx);
-                                    let request_result = remote_requests_tx.send(protocol::Request(uuid, request));
+                                    let request_result = remote_requests_tx
+                                        .send(protocol::Request(uuid, request)).await;
                                     async move {
                                         let result = match request_result {
                                             Ok(_) => match halt_status_rx.recv().await {
@@ -144,9 +148,10 @@ impl Device {
                                 Request::Reboot { result_tx } => {
                                     let uuid = Uuid::new_v4();
                                     let request = protocol::RequestKind::Reboot;
-                                    let (reboot_status_tx, mut reboot_status_rx) = mpsc::unbounded_channel();
+                                    let (reboot_status_tx, mut reboot_status_rx) = mpsc::channel(8);
                                     status_txs.insert(uuid, reboot_status_tx);
-                                    let request_result = remote_requests_tx.send(protocol::Request(uuid, request));
+                                    let request_result = remote_requests_tx
+                                        .send(protocol::Request(uuid, request)).await;
                                     async move {
                                         let result = match request_result {
                                             Ok(_) => match reboot_status_rx.recv().await {
@@ -163,10 +168,11 @@ impl Device {
                                     let uuid = Uuid::new_v4();
                                     let request = protocol::RequestKind::Upload(upload);
                                     /* subscribe to updates */
-                                    let (upload_status_tx, mut upload_status_rx) = mpsc::unbounded_channel();
+                                    let (upload_status_tx, mut upload_status_rx) = mpsc::channel(8);
                                     status_txs.insert(uuid, upload_status_tx);
                                     /* send the request */
-                                    let request_result = remote_requests_tx.send(protocol::Request(uuid, request));
+                                    let request_result = remote_requests_tx
+                                        .send(protocol::Request(uuid, request)).await;
                                     /* process responses */
                                     async move {
                                         let result = match request_result {
@@ -184,10 +190,10 @@ impl Device {
                                     let uuid = Uuid::new_v4();
                                     let request = protocol::RequestKind::Process(protocol::process::Request::Run(process));
                                     /* subscribe to updates */
-                                    let (run_status_tx, run_status_rx) = mpsc::unbounded_channel();
+                                    let (run_status_tx, run_status_rx) = mpsc::channel(8);
                                     status_txs.insert(uuid, run_status_tx);
                                     /* send the request */
-                                    match remote_requests_tx.send(protocol::Request(uuid, request)) {
+                                    match remote_requests_tx.send(protocol::Request(uuid, request)).await {
                                         Ok(_) => {
                                             let remote_requests_tx = remote_requests_tx.clone();
                                             Device::handle_run_request(uuid, run_status_rx, remote_requests_tx,
@@ -219,19 +225,19 @@ impl Device {
     }
 
     async fn handle_run_request(uuid: Uuid,
-                                mut run_status_rx: mpsc::UnboundedReceiver<protocol::ResponseKind>,
-                                remote_requests_tx: mpsc::UnboundedSender<protocol::Request>,
+                                mut run_status_rx: mpsc::Receiver<protocol::ResponseKind>,
+                                remote_requests_tx: mpsc::Sender<protocol::Request>,
                                 terminate_rx: Option<oneshot::Receiver<()>>,
-                                stdin_rx: Option<mpsc::UnboundedReceiver<BytesMut>>,
-                                stdout_tx: Option<mpsc::UnboundedSender<BytesMut>>,
-                                stderr_tx: Option<mpsc::UnboundedSender<BytesMut>>,
+                                stdin_rx: Option<mpsc::Receiver<BytesMut>>,
+                                stdout_tx: Option<mpsc::Sender<BytesMut>>,
+                                stderr_tx: Option<mpsc::Sender<BytesMut>>,
                                 exit_status_tx: oneshot::Sender<Result<()>>) -> Uuid {
         let mut terminate_rx = match terminate_rx {
             Some(terminate_rx) => terminate_rx.into_stream().left_stream(),
             None => futures::stream::pending().right_stream(),
         };
         let mut stdin_rx = match stdin_rx {
-            Some(stdin_rx) => UnboundedReceiverStream::new(stdin_rx).left_stream(),
+            Some(stdin_rx) => ReceiverStream::new(stdin_rx).left_stream(),
             None => futures::stream::pending().right_stream(),
         };
 
@@ -291,7 +297,7 @@ impl Device {
         };
         let (result_tx, result_rx) = oneshot::channel();
         self.request_tx
-            .send(Request::Upload { upload, result_tx })
+            .send(Request::Upload { upload, result_tx }).await
             .map_err(|_| Error::RequestError)?;
         result_rx.await.map_err(|_| Error::ResponseError).and_then(|result| result)
     }
@@ -299,7 +305,7 @@ impl Device {
     pub async fn halt(&self) -> Result<()> {
         let (result_tx, result_rx) = oneshot::channel();
         self.request_tx
-            .send(Request::Halt { result_tx })
+            .send(Request::Halt { result_tx }).await
             .map_err(|_| Error::RequestError)?;
         result_rx.await.map_err(|_| Error::ResponseError).and_then(|result| result)
     }
@@ -307,7 +313,7 @@ impl Device {
     pub async fn reboot(&self) -> Result<()> {
         let (result_tx, result_rx) = oneshot::channel();
         self.request_tx
-            .send(Request::Reboot { result_tx })
+            .send(Request::Reboot { result_tx }).await
             .map_err(|_| Error::RequestError)?;
         result_rx.await.map_err(|_| Error::ResponseError).and_then(|result| result)
     }
@@ -315,12 +321,12 @@ impl Device {
     pub async fn run(&self,
                      process: protocol::process::Process,
                      terminate_rx: Option<oneshot::Receiver<()>>,
-                     stdin_rx: Option<mpsc::UnboundedReceiver<BytesMut>>,
-                     stdout_tx: Option<mpsc::UnboundedSender<BytesMut>>,
-                     stderr_tx: Option<mpsc::UnboundedSender<BytesMut>>) -> Result<()> {
+                     stdin_rx: Option<mpsc::Receiver<BytesMut>>,
+                     stdout_tx: Option<mpsc::Sender<BytesMut>>,
+                     stderr_tx: Option<mpsc::Sender<BytesMut>>) -> Result<()> {
         let (result_tx, result_rx) = oneshot::channel();
         let request = Request::Run{ process, terminate_rx, stdin_rx, stdout_tx, stderr_tx, result_tx };
-        self.request_tx.send(request).map_err(|_ | Error::RequestError)?;
+        self.request_tx.send(request).await.map_err(|_ | Error::RequestError)?;
         result_rx.await.map_err(|_| Error::ResponseError).and_then(|result| result)
     }
 
@@ -330,8 +336,8 @@ impl Device {
             working_dir: None,
             args: vec!["-d".to_owned()],
         };
-        let (stdout_tx, stdout_rx) = mpsc::unbounded_channel();
-        let stdout_stream = UnboundedReceiverStream::new(stdout_rx);
+        let (stdout_tx, stdout_rx) = mpsc::channel(8);
+        let stdout_stream = ReceiverStream::new(stdout_rx);
         let (_, stdout) = tokio::try_join!(
             self.run(process, None, None, Some(stdout_tx), None),
             stdout_stream.concat().map(Result::Ok)
@@ -347,8 +353,8 @@ impl Device {
             working_dir: None,
             args: vec![],
         };
-        let (stdout_tx, stdout_rx) = mpsc::unbounded_channel();
-        let stdout_stream = UnboundedReceiverStream::new(stdout_rx);
+        let (stdout_tx, stdout_rx) = mpsc::channel(8);
+        let stdout_stream = ReceiverStream::new(stdout_rx);
         let (_, stdout) = tokio::try_join!(
             self.run(process, None, None, Some(stdout_tx), None),
             stdout_stream.concat().map(Result::Ok)
@@ -364,8 +370,8 @@ impl Device {
             working_dir: None,
             args: vec![],
         };
-        let (stdout_tx, stdout_rx) = mpsc::unbounded_channel();
-        let stdout_stream = UnboundedReceiverStream::new(stdout_rx);
+        let (stdout_tx, stdout_rx) = mpsc::channel(8);
+        let stdout_stream = ReceiverStream::new(stdout_rx);
         let (_, stdout) = tokio::try_join!(
             self.run(process, None, None, Some(stdout_tx), None),
             stdout_stream.concat().map(Result::Ok)
@@ -379,21 +385,48 @@ impl Device {
         let process = protocol::process::Process {
             target: "iw".into(),
             working_dir: None,
-            args: vec!["dev".to_owned(), "wlan0".to_owned(), "link".to_owned()],
+            args: "dev wlan0 link"
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect(),
         };
-        let (stdout_tx, stdout_rx) = mpsc::unbounded_channel();
-        let stdout_stream = UnboundedReceiverStream::new(stdout_rx);
+        let (stdout_tx, stdout_rx) = mpsc::channel(8);
+        let stdout_stream = ReceiverStream::new(stdout_rx);
         let (_, stdout) = tokio::try_join!(
             self.run(process, None, None, Some(stdout_tx), None),
             stdout_stream.concat().map(Result::Ok)
         )?;
-        let link_info = std::str::from_utf8(stdout.as_ref())
+        let link = std::str::from_utf8(stdout.as_ref())
             .map_err(|_| Error::DecodeError)?;
-        REGEX_LINK_STRENGTH.captures(link_info)
+        REGEX_LINK_STRENGTH.captures(link)
             .and_then(|captures| captures.get(1))
             .map(|capture| capture.as_str())
             .ok_or(Error::DecodeError)
             .and_then(|strength| strength.parse().map_err(|_| Error::DecodeError))
+    }
+
+    pub async fn mac(&self) -> Result<MacAddr6> {
+        let process = protocol::process::Process {
+            target: "iw".into(),
+            working_dir: None,
+            args: "dev wlan0 info"
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect(),
+        };
+        let (stdout_tx, stdout_rx) = mpsc::channel(8);
+        let stdout_stream = ReceiverStream::new(stdout_rx);
+        let (_, stdout) = tokio::try_join!(
+            self.run(process, None, None, Some(stdout_tx), None),
+            stdout_stream.concat().map(Result::Ok)
+        )?;
+        let info = std::str::from_utf8(stdout.as_ref())
+            .map_err(|_| Error::DecodeError)?;
+        REGEX_MAC_ADDR.captures(info)
+            .and_then(|captures| captures.get(1))
+            .map(|capture| capture.as_str())
+            .ok_or(Error::DecodeError)
+            .and_then(|mac_addr| mac_addr.parse().map_err(|_| Error::DecodeError))
     }
 }
 

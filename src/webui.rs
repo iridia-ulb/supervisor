@@ -1,4 +1,4 @@
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_stream::wrappers::ReceiverStream;
 use warp::ws;
 
 use std::{
@@ -159,14 +159,14 @@ lazy_static::lazy_static! {
 }
 
 pub async fn run(ws: ws::WebSocket,
-                 arena_request_tx: mpsc::UnboundedSender<arena::Request>) {
+                 arena_request_tx: mpsc::Sender<arena::Request>) {
     log::info!("Client connected");
     /* split the socket into a sender and receive of messages */
     let (websocket_tx, mut websocket_rx) = ws.split();
 
     // TODO is this multiplexing necessary?
-    let (tx, rx) = mpsc::unbounded_channel();
-    let rx_stream = UnboundedReceiverStream::new(rx);
+    let (tx, rx) = mpsc::channel(32);
+    let rx_stream = ReceiverStream::new(rx);
 
     // TODO is it desirable to spawn here?
     tokio::task::spawn(rx_stream.forward(websocket_tx).map(|result| {
@@ -197,19 +197,19 @@ pub async fn run(ws: ws::WebSocket,
                 match action {
                     Request::Arena{action, ..} => {
                         let request = arena::Request::Execute(action);
-                        if let Err(error) = arena_request_tx.send(request) {
+                        if let Err(error) = arena_request_tx.send(request).await {
                             log::error!("Could not execute action on arena: {}", error);
                         }
                     },
                     Request::Drone{uuid, action} => {
                         let request = arena::Request::ForwardDroneAction(uuid, action);
-                        if let Err(error) = arena_request_tx.send(request) {
+                        if let Err(error) = arena_request_tx.send(request).await {
                             log::error!("Could not forward drone action to arena: {}", error);
                         }
                     },
                     Request::PiPuck{uuid, action} => {
                         let request = arena::Request::ForwardPiPuckAction(uuid, action);
-                        if let Err(error) = arena_request_tx.send(request) {
+                        if let Err(error) = arena_request_tx.send(request).await {
                             log::error!("Could not forward Pi-Puck action to arena: {}", error);
                         }
                     },
@@ -237,7 +237,7 @@ pub async fn run(ws: ws::WebSocket,
                         match serde_json::to_string(&reply) {
                             Ok(content) => {
                                 let message = Ok(ws::Message::text(content));
-                                if let Err(_) = tx.send(message) {
+                                if let Err(_) = tx.send(message).await {
                                     log::error!("Could not reply to client");
                                 }
                             },
@@ -264,13 +264,13 @@ pub async fn run(ws: ws::WebSocket,
                                 if let Some((filename, contents)) = file {
                                     if uuid == *UUID_ARENA_DRONES {
                                         let request = arena::Request::AddDroneSoftware(filename, contents);
-                                        if let Err(error) = arena_request_tx.send(request) {
+                                        if let Err(error) = arena_request_tx.send(request).await {
                                             log::error!("Could not add drone software: {}", error);
                                         }
                                     }
                                     else if uuid == *UUID_ARENA_PIPUCKS {
                                         let request = arena::Request::AddPiPuckSoftware(filename, contents);
-                                        if let Err(error) = arena_request_tx.send(request) {
+                                        if let Err(error) = arena_request_tx.send(request).await {
                                             log::error!("Could not add Pi-Puck software: {}", error);
                                         }
                                     }
@@ -282,13 +282,13 @@ pub async fn run(ws: ws::WebSocket,
                             software::Action::Clear => {
                                 if uuid == *UUID_ARENA_DRONES {
                                     let request = arena::Request::ClearDroneSoftware;
-                                    if let Err(error) = arena_request_tx.send(request) {
+                                    if let Err(error) = arena_request_tx.send(request).await {
                                         log::error!("Could not clear drone software: {}", error);
                                     }
                                 }
                                 else if uuid == *UUID_ARENA_PIPUCKS {
                                     let request = arena::Request::ClearPiPuckSoftware;
-                                    if let Err(error) = arena_request_tx.send(request) {
+                                    if let Err(error) = arena_request_tx.send(request).await {
                                         log::error!("Could not clear Pi-Puck software: {}", error);
                                     }
                                 }
@@ -308,7 +308,7 @@ pub async fn run(ws: ws::WebSocket,
     log::info!("Client disconnected");
 }
 
-async fn experiment_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request>) -> Result<Cards> {
+async fn experiment_tab(arena_request_tx: &mpsc::Sender<arena::Request>) -> Result<Cards> {
     let mut cards = Cards::default();
     /* check pipuck software */
     let (check_pipuck_software_callback_tx, check_pipuck_software_callback_rx) =
@@ -316,7 +316,7 @@ async fn experiment_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request>
     let check_pipuck_software_request = 
         arena::Request::CheckPiPuckSoftware(check_pipuck_software_callback_tx);
     arena_request_tx
-        .send(check_pipuck_software_request)
+        .send(check_pipuck_software_request).await
         .map_err(|_| Error::ArenaRequestError)?;
     let (pipuck_software_checksums, pipuck_software_check) = check_pipuck_software_callback_rx.await
         .map_err(|_| Error::ArenaResponseError)?;
@@ -326,7 +326,7 @@ async fn experiment_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request>
     let check_drone_software_request = 
         arena::Request::CheckDroneSoftware(check_drone_software_callback_tx);
     arena_request_tx
-        .send(check_drone_software_request)
+        .send(check_drone_software_request).await
         .map_err(|_| Error::ArenaRequestError)?;
     let (drone_software_checksums, drone_software_check) = check_drone_software_callback_rx.await
         .map_err(|_| Error::ArenaResponseError)?;
@@ -334,7 +334,7 @@ async fn experiment_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request>
     let (get_actions_callback_tx, get_actions_callback_rx) = oneshot::channel();
     let get_actions_request = arena::Request::GetActions(get_actions_callback_tx);
     arena_request_tx
-        .send(get_actions_request)
+        .send(get_actions_request).await
         .map_err(|_| Error::ArenaRequestError)?;
     let actions = get_actions_callback_rx.await
         .map_err(|_| Error::ArenaResponseError)?;
@@ -432,13 +432,13 @@ async fn optitrack_tab() -> Result<Cards> {
     Ok(cards)
 }
 
-async fn connections_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request>) -> Result<Cards> {
+async fn connections_tab(arena_request_tx: &mpsc::Sender<arena::Request>) -> Result<Cards> {
     /* get connected Pi-Pucks */
     let (get_pipucks_callback_tx, get_pipucks_callback_rx) = oneshot::channel();
     let get_pipucks_request = 
         arena::Request::GetPiPucks(get_pipucks_callback_tx);
     arena_request_tx
-        .send(get_pipucks_request)
+        .send(get_pipucks_request).await
         .map_err(|_| Error::ArenaRequestError)?;
     let pipucks = get_pipucks_callback_rx.await
         .map_err(|_| Error::ArenaResponseError)?;
@@ -447,7 +447,7 @@ async fn connections_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request
     let get_drones_request = 
         arena::Request::GetDrones(get_drones_callback_tx);
     arena_request_tx
-        .send(get_drones_request)
+        .send(get_drones_request).await
         .map_err(|_| Error::ArenaRequestError)?;
     let drones = get_drones_callback_rx.await
         .map_err(|_| Error::ArenaResponseError)?;

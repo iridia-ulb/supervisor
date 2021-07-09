@@ -15,6 +15,14 @@ mod software;
 mod journal;
 mod router;
 
+// supervisor changes
+// - configuration comes from XML (done)
+// - network module just searches for fernbedienung/xbee instances and sends them to the arena (with the mac address?).
+// - network module sends Ferbedienung(Macaddr6, Ipv4Addr) or Xbee(Macaddr6, Ipv4Addr) to the arena
+// - if the arena does not have a robot associated with that Mac, a warning is printed and the address is no longer probed.
+// - how do addresses get back to the network module? oneshot channel?
+// - arena creates drones and pipucks as specified in the XML. These actor are initialised without connections. Requests are made over bounded channels to associate a fernbedienung or xbee device.
+
 #[derive(Debug, StructOpt)]
 #[structopt(name = "supervisor", about = "A supervisor for experiments with swarms of robots")]
 struct Options {
@@ -34,8 +42,8 @@ async fn main() -> anyhow::Result<()> {
 
     log::info!("Configuration = {:?}", config);
     /* create a task for tracking the robots and state of the experiment */
-    let (arena_requests_tx, arena_requests_rx) = mpsc::unbounded_channel();
-    let (journal_requests_tx, journal_requests_rx) = mpsc::unbounded_channel();
+    let (arena_requests_tx, arena_requests_rx) = mpsc::channel(32);
+    let (journal_requests_tx, journal_requests_rx) = mpsc::channel(32);
     /* listen for the ctrl-c shutdown signal */
     let sigint_task = tokio::signal::ctrl_c();
     /* create journal task */

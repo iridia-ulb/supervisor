@@ -35,14 +35,14 @@ pub enum Request {
     Execute(Action),
     ExperimentStart {
         software: software::Software,
-        journal: mpsc::UnboundedSender<journal::Request>,
+        journal: mpsc::Sender<journal::Request>,
         callback: oneshot::Sender<Result<()>>
     },
     ExperimentStop,
 }
 
-pub type Sender = mpsc::UnboundedSender<Request>;
-pub type Receiver = mpsc::UnboundedReceiver<Request>;
+pub type Sender = mpsc::Sender<Request>;
+pub type Receiver = mpsc::Receiver<Request>;
 
 #[derive(Copy, Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub enum Action {
@@ -289,7 +289,7 @@ fn handle_stream_start<'d>(device: &'d fernbedienung::Device, configs: &'static 
 async fn handle_experiment_start<'d>(uuid: Uuid,
                                      device: &'d fernbedienung::Device,
                                      software: software::Software,
-                                     journal: mpsc::UnboundedSender<journal::Request>) 
+                                     journal: mpsc::Sender<journal::Request>) 
     -> Result<(impl Future<Output = fernbedienung::Result<()>> + 'd, oneshot::Sender<()>)> {
     /* extract the name of the config file */
     let (argos_config, _) = software.argos_config()?;
@@ -336,8 +336,8 @@ async fn handle_experiment_start<'d>(uuid: Uuid,
     /* create future for running ARGoS */
     let argos_task_future = async move {
         /* channels for routing stdout and stderr to the journal */
-        let (stdout_tx, mut stdout_rx) = mpsc::unbounded_channel();
-        let (stderr_tx, mut stderr_rx) = mpsc::unbounded_channel();
+        let (stdout_tx, mut stdout_rx) = mpsc::channel(8);
+        let (stderr_tx, mut stderr_rx) = mpsc::channel(8);
         /* run argos remotely */
         let argos = device.run(process, Some(terminate_rx), None, Some(stdout_tx), Some(stderr_tx));
         tokio::pin!(argos);
@@ -347,7 +347,7 @@ async fn handle_experiment_start<'d>(uuid: Uuid,
                     let message = journal::Robot::StandardOutput(data);
                     let event = journal::Event::Robot(uuid, message);
                     let request = journal::Request::Record(event);
-                    if let Err(error) = journal.send(request) {
+                    if let Err(error) = journal.send(request).await {
                         log::warn!("Could not forward standard output of {} to journal: {}", uuid, error);
                     }
                 },
@@ -355,7 +355,7 @@ async fn handle_experiment_start<'d>(uuid: Uuid,
                     let message = journal::Robot::StandardError(data);
                     let event = journal::Event::Robot(uuid, message);
                     let request = journal::Request::Record(event);
-                    if let Err(error) = journal.send(request) {
+                    if let Err(error) = journal.send(request).await {
                         log::warn!("Could not forward standard error of {} to journal: {}", uuid, error);
                     }
                 },

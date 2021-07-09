@@ -1,4 +1,4 @@
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::codec::{Decoder, Encoder, Framed};
 use bytes::{BytesMut, Bytes, BufMut, Buf};
 use std::{io, collections::HashMap, sync::Arc, net::SocketAddr};
@@ -222,17 +222,17 @@ impl Encoder<Bytes> for ByteArrayCodec {
     }
 }
 
-type Peers = Arc<Mutex<HashMap<SocketAddr, mpsc::UnboundedSender<Bytes>>>>;
+type Peers = Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<Bytes>>>>;
 
 
 async fn client_handler(stream: TcpStream,
                         addr: SocketAddr,
                         peers: Peers,
-                        journal: mpsc::UnboundedSender<journal::Request>) {
+                        journal: mpsc::Sender<journal::Request>) {
     log::info!("Robot {} connected to message router", addr);
     /* set up a channel for communicating with other robot sockets */
-    let (tx, rx) = mpsc::unbounded_channel::<Bytes>();
-    let rx_stream = UnboundedReceiverStream::new(rx);
+    let (tx, rx) = mpsc::channel::<Bytes>(32);
+    let rx_stream = ReceiverStream::new(rx);
     /* wrap up socket in our ByteArrayCodec */
     let (sink, mut stream) = Framed::new(stream, ByteArrayCodec::default()).split();
     
@@ -256,7 +256,7 @@ async fn client_handler(stream: TcpStream,
                     }
                     if let Ok(decoded) = decode_lua_table(&mut message) {
                         let event = journal::Event::Broadcast(addr, decoded);
-                        if let Err(error) = journal.send(journal::Request::Record(event)) {
+                        if let Err(error) = journal.send(journal::Request::Record(event)).await {
                             log::error!("Could not record event in journal: {}", error);
                         }
                     }
@@ -272,7 +272,7 @@ async fn client_handler(stream: TcpStream,
     log::info!("Robot {} disconnected from message router", addr);
 }
 
-pub async fn new(addr: SocketAddr, journal: mpsc::UnboundedSender<journal::Request>) -> io::Result<()> {
+pub async fn new(addr: SocketAddr, journal: mpsc::Sender<journal::Request>) -> io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     log::info!("Message router running on: {:?}", listener.local_addr());
     /* create an atomic map of all peers */

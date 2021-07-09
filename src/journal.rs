@@ -5,7 +5,7 @@ use bytes::BytesMut;
 use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
-use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
+use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use std::time::{SystemTime, SystemTimeError};
 
 #[derive(thiserror::Error, Debug)]
@@ -48,8 +48,8 @@ struct Entry {
 }
 
 // todo spawn a logging task here and return a channel for logging messages
-pub async fn new(rx: mpsc::UnboundedReceiver<Request>) -> Result<()> {
-    let mut requests = UnboundedReceiverStream::new(rx);
+pub async fn new(rx: mpsc::Receiver<Request>) -> Result<()> {
+    let mut requests = ReceiverStream::new(rx);
     let mut start: Option<Instant> = None;
     let mut writer: Option<BufWriter<_>> = None;
     while let Some(request) = requests.next().await {

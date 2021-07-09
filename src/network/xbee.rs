@@ -2,6 +2,7 @@ use bytes::{BytesMut, Buf, BufMut};
 use bitvec::view::BitView;
 
 use futures::{SinkExt, stream::FuturesUnordered};
+use macaddr::MacAddr6;
 use tokio::{net::UdpSocket, sync::{oneshot, mpsc}, time::Instant};
 use tokio_stream::StreamExt;
 use tokio_util::{codec::{Decoder, Encoder}, udp::UdpFramed};
@@ -215,7 +216,7 @@ impl Decoder for Codec {
 }
 
 impl Device {
-    pub async fn new(addr: Ipv4Addr, return_addr_tx: mpsc::UnboundedSender<Ipv4Addr>) -> Result<Device> {
+    pub async fn new(addr: Ipv4Addr, return_addr_tx: oneshot::Sender<Ipv4Addr>) -> Result<Device> {
         type RemoteRequest = (Instant, Option<oneshot::Sender<Result<BytesMut>>>, Command, usize);
         /* bind to a random port on any interface */
         let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
@@ -324,6 +325,23 @@ impl Device {
         <[u8; 4]>::try_from(&value[..])
             .map_err(|_| Error::DecodeError)
             .map(|addr| Ipv4Addr::from(addr))
+    }
+
+    pub async fn mac(&self) -> Result<MacAddr6> {
+        /* get the upper 16 bits */
+        let (response_tx, response_rx) = oneshot::channel();
+        let request = Request::GetParameter([b'S',b'H'], response_tx);
+        self.request_tx.send(request).map_err(|_| Error::RequestFailed)?;
+        let mut value = response_rx.await.map_err(|_| Error::NoResponse)??;
+        /* get the lower 32 bits */
+        let (response_tx, response_rx) = oneshot::channel();
+        let request = Request::GetParameter([b'S',b'L'], response_tx);
+        self.request_tx.send(request).map_err(|_| Error::RequestFailed)?;
+        value.extend_from_slice(&response_rx.await.map_err(|_| Error::NoResponse)??);
+        /* try build a MacAddr6 from the responses */
+        <[u8; 6]>::try_from(&value[..])
+            .map_err(|_| Error::DecodeError)
+            .map(|addr| MacAddr6::from(addr))
     }
 
     pub async fn link_margin(&self) -> Result<i32> {

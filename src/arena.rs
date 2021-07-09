@@ -6,7 +6,7 @@ use futures::{StreamExt, TryStreamExt, stream::FuturesUnordered};
 use log;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_stream::wrappers::ReceiverStream;
 use rand::Rng;
 
 use crate::robot::{pipuck::{self, PiPuck}, drone::{self, Drone}};
@@ -48,6 +48,8 @@ enum State {
     Active,
 }
 
+// TODO Remove actions AddDrone, AddPiPuck
+// TODO Add actions AddXbee, AddFernbedienung
 pub enum Request {
     /* Arena requests */
     GetActions(oneshot::Sender<Vec<Action>>),
@@ -71,11 +73,12 @@ pub enum Request {
     GetPiPucks(oneshot::Sender<HashMap<Uuid, pipuck::State>>),
 }
 
-pub async fn new(arena_request_rx: mpsc::UnboundedReceiver<Request>,
-                 journal_requests_tx: &mpsc::UnboundedSender<journal::Request>) {
+// TODO the table of known robots should be passed here
+pub async fn new(arena_request_rx: mpsc::Receiver<Request>,
+                 journal_requests_tx: &mpsc::Sender<journal::Request>) {
     let mut state = State::Standby;
 
-    let mut requests = UnboundedReceiverStream::new(arena_request_rx);
+    let mut requests = ReceiverStream::new(arena_request_rx);
     
     let mut drone_software : crate::software::Software = Default::default();
     let mut drone_tasks : FuturesUnordered<Drone> = Default::default();
@@ -234,7 +237,7 @@ async fn handle_pair_with_drone_request(drone_tx_map: &HashMap<Uuid, drone::Send
             let uuid = uuid.clone();
             let (response_tx, response_rx) = oneshot::channel();
             let request = drone::Request::GetId(response_tx);
-            tx.send(request).map(|_| async move {
+            tx.send(request).await.map(|_| async move {
                 (uuid, response_rx.await)
             }).ok()
         })
@@ -258,7 +261,7 @@ async fn handle_pair_with_drone_request(drone_tx_map: &HashMap<Uuid, drone::Send
             match drone_tx_map.get(&uuid) {
                 Some(tx) => {
                     let request = drone::Request::Pair(device);
-                    if let Err(error) = tx.send(request) {
+                    if let Err(error) = tx.send(request).await {
                         log::warn!("Could not pair fernbedienung instance with drone {}: {}", uuid, error);
                     }
                 }
@@ -273,7 +276,7 @@ async fn handle_pair_with_drone_request(drone_tx_map: &HashMap<Uuid, drone::Send
 
 async fn stop_experiment(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>,
                          drone_tx_map: &HashMap<Uuid, drone::Sender>,
-                         journal_requests_tx: &mpsc::UnboundedSender<journal::Request>) {
+                         journal_requests_tx: &mpsc::Sender<journal::Request>) {
     let _ = journal_requests_tx.send(journal::Request::Stop);
     for (_, tx) in drone_tx_map.into_iter() {
         let _ = tx.send(drone::Request::ExperimentStop);
@@ -287,7 +290,7 @@ async fn start_experiment(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>,
                           pipuck_software: &Software,
                           drone_tx_map: &HashMap<Uuid, drone::Sender>,
                           drone_software: &Software,
-                          journal_requests_tx: &mpsc::UnboundedSender<journal::Request>) -> Result<()> {
+                          journal_requests_tx: &mpsc::Sender<journal::Request>) -> Result<()> {
     // TODO call luac on each robot and validate the control software
 
     /* check software validity before starting */
@@ -301,7 +304,7 @@ async fn start_experiment(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>,
     /* start an experiment journal to record events during the experiment */
     let (callback_tx, callback_rx) = oneshot::channel();
     journal_requests_tx
-        .send(journal::Request::Start(callback_tx))
+        .send(journal::Request::Start(callback_tx)).await
         .map_err(|_| journal::Error::RequestError)?;
     callback_rx.await
         .map_err(|_| journal::Error::ResponseError)
@@ -319,7 +322,7 @@ async fn start_experiment(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>,
                 journal: journal_requests_tx,
                 callback: response_tx
             };
-            tx.send(request)
+            tx.send(request).await
                 .map_err(|_| Error::PiPuckError(uuid, pipuck::Error::RequestError))
                 .map(|_| async move {
                     (uuid, response_rx.await)
@@ -354,7 +357,7 @@ async fn start_experiment(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>,
                 journal: journal_requests_tx,
                 callback: response_tx
             };
-            tx.send(request)
+            tx.send(request).await
                 .map_err(|_| Error::DroneError(uuid, drone::Error::RequestError))
                 .map(|_| async move {
                     (uuid, response_rx.await)
@@ -385,7 +388,7 @@ fn handle_forward_pipuck_action_request(pipuck_tx_map: &HashMap<Uuid, pipuck::Se
     match pipuck_tx_map.get(&uuid) {
         Some(tx) => {
             let request = pipuck::Request::Execute(action);
-            if let Err(error) = tx.send(request) {
+            if let Err(error) = tx.send(request).await {
                 log::warn!("Could not send action {:?} to Pi-Puck {}: {}", action, uuid, error);
             }
         }
@@ -401,7 +404,7 @@ async fn handle_get_pipucks_request(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender
             let uuid = uuid.clone();
             let (response_tx, response_rx) = oneshot::channel();
             let request = pipuck::Request::State(response_tx);
-            tx.send(request).map(|_| async move {
+            tx.send(request).await.map(|_| async move {
                 (uuid, response_rx.await)
             }).ok()
         })
@@ -421,7 +424,7 @@ async fn handle_forward_drone_action_request(drone_tx_map: &HashMap<Uuid, drone:
     match drone_tx_map.get(&uuid) {
         Some(tx) => {
             let request = drone::Request::Execute(action);
-            if let Err(error) = tx.send(request) {
+            if let Err(error) = tx.send(request).await {
                 log::warn!("Could not send action {:?} to drone {}: {}", action, uuid, error);
             }
         }
@@ -437,7 +440,7 @@ async fn handle_get_drones_request(drone_tx_map: &HashMap<Uuid, drone::Sender>,
             let uuid = uuid.clone();
             let (response_tx, response_rx) = oneshot::channel();
             let request = drone::Request::GetState(response_tx);
-            tx.send(request).map(|_| async move {
+            tx.send(request).await.map(|_| async move {
                 (uuid, response_rx.await)
             }).ok()
         })

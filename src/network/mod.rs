@@ -1,7 +1,8 @@
 use futures::stream::FuturesUnordered;
-use tokio::sync::mpsc;
+use macaddr::MacAddr6;
+use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;
-use std::{collections::HashMap, net::Ipv4Addr, time::Duration};
+use std::{net::Ipv4Addr, time::Duration};
 use ipnet::Ipv4Net;
 
 pub mod xbee;
@@ -9,52 +10,51 @@ pub mod fernbedienung;
 
 use crate::arena;
 
-#[derive(thiserror::Error, Debug)]
-enum Error {
-    #[error("Could not associate address")]
-    AssociateError,
-}
-
-type Result<T> = std::result::Result<T, Error>;
-
-pub async fn new(network: Ipv4Net, arena_request_tx: &mpsc::UnboundedSender<arena::Request>) {
-    let (return_addr_tx, mut return_addr_rx) = mpsc::unbounded_channel::<Ipv4Addr>();
-    let mut addr_in_use_map = network.clone().hosts()
-        .map(|addr| (addr, false))
-        .collect::<HashMap<_,_>>();
-    let mut associate_xbee_queue = network.hosts()
-        .map(|addr| associate_xbee(&arena_request_tx, &return_addr_tx, addr))
-        .collect::<FuturesUnordered<_>>();
-    let mut associate_fernbedienung_queue: FuturesUnordered<_> = Default::default();
+/// This function represents the main task of the network module. It takes a network and a channel for
+/// making requests to the arena. IP addresses belonging to this network are repeated probed for an
+/// xbee or for the fernbedienung service until they are associated
+pub async fn new(network: Ipv4Net, arena_request_tx: &mpsc::Sender<arena::Request>) {
+    /* probe for xbees on all addresses */
+    let (mut xbee_returned_addrs, mut probe_xbee_queue) : (FuturesUnordered<_>, FuturesUnordered<_>) = network
+        .hosts()
+        .map(|addr| {
+            let (return_addr_tx, return_addr_rx) = oneshot::channel();
+            (return_addr_rx, probe_xbee(return_addr_tx, addr))
+        }).unzip();
+    /* empty collections for the fernbedienung tasks */
+    let fernbedienung_returned_addrs : FuturesUnordered<oneshot::Receiver<Ipv4Addr>> = Default::default();
+    let mut probe_fernbedienung_queue: FuturesUnordered<_> = Default::default();
+    /* main task loop */
     loop {
         tokio::select!{
-            Some(recv_addr) = return_addr_rx.recv() => {
-                /* check if received address was in-use */
-                if let Some(true) = addr_in_use_map.get(&recv_addr) {
-                    addr_in_use_map.insert(recv_addr, false);
-                    let association =
-                        associate_xbee(&arena_request_tx, &return_addr_tx, recv_addr);
-                    associate_xbee_queue.push(association);
+            Some(result) = probe_xbee_queue.next() => {
+                if let Ok((mac_addr, device)) = result {
+                    let _ = arena_request_tx.send(arena::Request::AddXbee(device, mac_addr));
                 }
             },
-            Some((addr, result)) = associate_xbee_queue.next() => match result {
-                Ok(_) => { 
-                    addr_in_use_map.insert(addr, true);
+            Some(result) = xbee_returned_addrs.next() => match result {
+                Ok(addr) => {
+                    let (return_addr_tx, return_addr_rx) = oneshot::channel();
+                    fernbedienung_returned_addrs.push(return_addr_rx);
+                    probe_fernbedienung_queue.push(probe_fernbedienung(return_addr_tx, addr));
                 },
                 Err(_) => {
-                    let association =
-                        associate_fernbedienung(&arena_request_tx, &return_addr_tx, addr);
-                    associate_fernbedienung_queue.push(association);
+                    log::error!("IPV4 address not returned");
                 }
             },
-            Some((addr, result)) = associate_fernbedienung_queue.next() => match result {
-                Ok(_) => { 
-                    addr_in_use_map.insert(addr, true);
+            Some(result) = probe_fernbedienung_queue.next() => {
+                if let Ok((mac_addr, device)) = result {
+                    let _ = arena_request_tx.send(arena::Request::AddFernbedienung(device, mac_addr));
+                }
+            },
+            Some(result) = fernbedienung_returned_addrs.next() => match result {
+                Ok(addr) => {
+                    let (return_addr_tx, return_addr_rx) = oneshot::channel();
+                    xbee_returned_addrs.push(return_addr_rx);
+                    probe_xbee_queue.push(probe_xbee(return_addr_tx, addr));
                 },
                 Err(_) => {
-                    let association =
-                        associate_xbee(&arena_request_tx, &return_addr_tx, addr);
-                    associate_xbee_queue.push(association);
+                    log::error!("IPV4 address not returned");
                 }
             },
             else => break
@@ -62,66 +62,27 @@ pub async fn new(network: Ipv4Net, arena_request_tx: &mpsc::UnboundedSender<aren
     }
 }
 
-// The problem here is that during probing, I create a new device which will return its IP address if it
-// fails. Solutions:
-
-// 1. set a flag (or give the device the channel only after initialization is complete and
-// we send it to the arena). This could even be done from the arena? device.set_in_arena()
-
-// 2. keep track locally which IP addresses have been given out, what stage in probing they are up to.
-
-// keep all addresses locally
-
-
-async fn associate_xbee(arena_request_tx: &mpsc::UnboundedSender<arena::Request>,
-                        return_addr_tx: &mpsc::UnboundedSender<Ipv4Addr>,
-                        addr: Ipv4Addr) -> (Ipv4Addr, Result<()>) {
+/// This function attempts to associate an xbee device with a given Ipv4Addr. The function starts the async 
+/// xbee::Device function `new` inside of a tokio::timeout which attempts the connection.
+async fn probe_xbee(return_addr_tx: oneshot::Sender<Ipv4Addr>,
+                    addr: Ipv4Addr) -> anyhow::Result<(MacAddr6, xbee::Device)> {
     /* assume address is an xbee and attempt to connect for 500 ms */
-    let xbee_attempt = tokio::time::timeout(Duration::from_millis(500), async {
-        let device = xbee::Device::new(addr, return_addr_tx.clone()).await?;
-        let addr = device.ip().await?;
-        std::result::Result::<_, xbee::Error>::Ok((addr, device))
-    }).await;
-    /* inspect result */
-    if let Ok(xbee_result) = xbee_attempt {
-        if let Ok((xbee_addr, xbee_device)) = xbee_result {
-            if xbee_addr == addr {
-                let result = arena_request_tx.send(arena::Request::AddDrone(xbee_device))
-                    .map_err(|_| Error::AssociateError);
-                return (addr, result);
-            }
-        }
-    }
-    (addr, Err(Error::AssociateError))
+    tokio::time::timeout(Duration::from_millis(500), async {
+        let device = xbee::Device::new(addr, return_addr_tx).await?;
+        let mac_addr = device.mac().await?;
+        Ok((mac_addr, device))
+    }).await?
 }
 
-async fn associate_fernbedienung(arena_request_tx: &mpsc::UnboundedSender<arena::Request>,
-                                 return_addr_tx: &mpsc::UnboundedSender<Ipv4Addr>,
-                                 addr: Ipv4Addr) -> (Ipv4Addr, Result<()>) {
-    /* assume address is a device running the fernbedienung service and 
-       attempt to connect for 500 ms */
-    let fernbedienung_attempt = tokio::time::timeout(Duration::from_millis(500), async {
-        let device = fernbedienung::Device::new(addr, return_addr_tx.clone()).await?;
-        let hostname = device.hostname().await?;
-        std::result::Result::<_, fernbedienung::Error>::Ok((hostname, device))
-    }).await;
-    /* inspect result */
-    if let Ok(fernbedienung_result) = fernbedienung_attempt {
-        if let Ok((hostname, device)) = fernbedienung_result {
-            let result = match &hostname[..] {
-                "raspberrypi0-wifi" | "ToshibaLaptop" =>
-                    arena_request_tx.send(arena::Request::AddPiPuck(device))
-                        .map_err(|_| Error::AssociateError),
-                "up-core" =>
-                    arena_request_tx.send(arena::Request::PairWithDrone(device))
-                        .map_err(|_| Error::AssociateError),
-                _ => Err(Error::AssociateError),
-            };
-            return (addr, result);
-        }
-    }
-    (addr, Err(Error::AssociateError))
+/// This function attempts to associate an instance of the fernbedienung service with a given Ipv4Addr. The
+/// function starts the async fernbedienung::Device function `new` inside of a tokio::timeout which attempts
+/// the connection.
+async fn probe_fernbedienung(return_addr_tx: oneshot::Sender<Ipv4Addr>,
+                             addr: Ipv4Addr) -> anyhow::Result<(MacAddr6, fernbedienung::Device)> {
+    /* assume there is a fernbedienung instance running on `addr` and attempt to connect to it for 500 ms */
+    tokio::time::timeout(Duration::from_millis(500), async {
+        let device = fernbedienung::Device::new(addr, return_addr_tx).await?;
+        let mac_addr = device.mac().await?;
+        Ok((mac_addr, device))
+    }).await?
 }
-    
-    
-    

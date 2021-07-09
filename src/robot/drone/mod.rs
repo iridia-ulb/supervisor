@@ -16,7 +16,7 @@ pub struct Drone(JoinHandle<Uuid>);
 impl Drone {
     pub fn new(device: xbee::Device) -> (Uuid, Sender, Self) {
         let uuid = Uuid::new_v4();
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(32);
         let handle = tokio::spawn(task::new(uuid, rx, device));
         (uuid, tx, Self(handle))
     }
