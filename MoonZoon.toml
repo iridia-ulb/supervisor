@@ -1,0 +1,18 @@
+port = 3030
+https = false
+cache_busting = true
+backend_log_level = "warn" # "error" / "warn" / "info" / "debug" / "trace"
+
+[redirect]
+port = 3031
+enabled = false
+
+[watch]
+frontend = [
+    "frontend/Cargo.toml",
+    "frontend/src",
+]
+backend = [
+    "backend/Cargo.toml",
+    "backend/src",
+]

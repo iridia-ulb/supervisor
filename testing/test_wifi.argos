@@ -1,0 +1,27 @@
+<?xml version="1.0" ?>
+<argos-configuration>
+
+  <!-- ************************* -->
+  <!-- * General configuration * -->
+  <!-- ************************* -->
+  <framework>
+    <system threads="0" />
+    <experiment length="25" ticks_per_second="5" random_seed="0" />
+  </framework>
+  
+  <!-- *************** -->
+  <!-- * Controllers * -->
+  <!-- *************** -->
+  <controllers>
+    <lua_controller id="robot">
+      <actuators>
+        <wifi implementation="default" />
+      </actuators>
+      <sensors>
+        <wifi implementation="default" />
+      </sensors>
+      <params script="test_wifi.lua" />
+    </lua_controller>
+  </controllers>
+
+</argos-configuration>

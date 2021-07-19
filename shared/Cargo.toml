@@ -1,0 +1,15 @@
+[package]
+version = "0.1.0"
+name = "shared"
+repository = "https://github.com/iridia-ulb/supervisor"
+authors = ["Michael Allwright <allsey87@gmail.com>"]
+description = "Supervisor Sommon"
+license = "MIT"
+edition = "2018"
+
+[dependencies]
+moonlight = { path = "../crates/moonlight" }
+
+[features]
+frontend = ["moonlight/frontend"]
+backend = ["moonlight/backend"]

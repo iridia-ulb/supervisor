@@ -1,0 +1,55 @@
+[package]
+name = "zoon"
+version = "0.1.0"
+authors = ["Martin Kavík <martin@kavik.cz>"]
+edition = "2018"
+
+[dependencies]
+wasm-bindgen = { version = "0.2.74", default-features = false }
+wasm-bindgen-futures = { version = "0.4.24", default-features = false }
+js-sys = { version = "0.3.51", default-features = false }
+futures-signals = { version = "0.3.22", default-features = false }
+dominator = { version = "0.5.19", default-features = false }
+paste = { version = "1.0.5", default-features = false }
+send_wrapper = { version = "0.5.0", default-features = false }
+pin-project = { version = "1.0.7", default-features = false }
+
+static_ref_macro = { path = "../static_ref_macro", optional = true }
+moonlight = { path = "../moonlight", features = ["frontend"], optional = true }
+once_cell = { version = "1.8.0", features = ["alloc"], default-features = false, optional = true }
+
+console_error_panic_hook = { version = "0.1.6", default-features = false, optional = true }
+wee_alloc = { version = "0.4.5", default-features = false, optional = true }
+# wasm-tracing-allocator = { version = "0.1.1", default-features = false, optional = true }
+enclose = { version = "1.1.8", default-features = false, optional = true }
+apply = { version = "0.3.0", default-features = false, optional = true }
+
+ufmt = { version = "0.1.0", features = ["std"], default-features = false, optional = true }
+lexical = { git = "https://github.com/Alexhuszagh/rust-lexical", rev = "7010efd", features = ["std"], default-features = false, optional = true }
+
+[dependencies.web-sys]
+version = "0.3.51"
+features = [
+  'Element',
+  'Headers',
+  'HtmlButtonElement',
+  'HtmlCanvasElement',
+  'HtmlDivElement',
+  'HtmlInputElement',
+  'HtmlLabelElement',
+  'Response',
+  'Request',
+  'RequestInit',
+]
+default-features = false
+
+[features]
+default = ["static_ref", "panic_hook", "small_alloc", "clone", "apply", "connection"]
+connection = ["moonlight"]
+static_ref = ["static_ref_macro", "once_cell"]
+panic_hook = ["console_error_panic_hook"]
+small_alloc = ["wee_alloc"]
+fast_alloc = []
+# tracing_alloc = ["wasm-tracing-allocator"]
+clone = ["enclose"]
+fmt = ["ufmt", "lexical"]
