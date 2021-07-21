@@ -124,8 +124,17 @@ pub type Result<T> = std::result::Result<T, Error>;
 struct Codec;
 
 pub struct Device {
-    request_tx: mpsc::UnboundedSender<Request>,
-    pub addr: Ipv4Addr
+    request_tx: mpsc::Sender<Request>,
+    addr: Ipv4Addr,
+    return_addr_tx: Option<oneshot::Sender<Ipv4Addr>>,
+}
+
+impl Drop for Device {
+    fn drop(&mut self) {
+        if let Some(return_addr_tx) = self.return_addr_tx.take() {
+            return_addr_tx.send(self.addr);
+        }
+    }
 }
 
 enum Request {
@@ -220,7 +229,7 @@ impl Device {
         type RemoteRequest = (Instant, Option<oneshot::Sender<Result<BytesMut>>>, Command, usize);
         /* bind to a random port on any interface */
         let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
-        let (request_tx, mut request_rx) = mpsc::unbounded_channel();
+        let (request_tx, mut request_rx) = mpsc::channel(8);
         tokio::spawn(async move {
             let socket_addr = SocketAddr::new(addr.into(), 0xBEE);
             let mut framed = UdpFramed::new(socket, Codec);
@@ -305,22 +314,19 @@ impl Device {
                                 }
                             }
                         },
-                        /* this should cause this task to shutdown as soon as Device is dropped */
-                        None => {
-                            let _ = return_addr_tx.send(addr);
-                            break
-                        },
+                        /* When Device is dropped the mpsc::Sender is closed  */
+                        None => break,
                     }
                 }
             }
         });
-        Ok(Device { request_tx, addr })
+        Ok(Device { request_tx, addr, return_addr_tx: Some(return_addr_tx) })
     }
 
     pub async fn ip(&self) -> Result<Ipv4Addr> {
         let (response_tx, response_rx) = oneshot::channel();
         let request = Request::GetParameter([b'M',b'Y'], response_tx);
-        self.request_tx.send(request).map_err(|_| Error::RequestFailed)?;
+        self.request_tx.send(request).await.map_err(|_| Error::RequestFailed)?;
         let value = response_rx.await.map_err(|_| Error::NoResponse)??;
         <[u8; 4]>::try_from(&value[..])
             .map_err(|_| Error::DecodeError)
@@ -331,12 +337,12 @@ impl Device {
         /* get the upper 16 bits */
         let (response_tx, response_rx) = oneshot::channel();
         let request = Request::GetParameter([b'S',b'H'], response_tx);
-        self.request_tx.send(request).map_err(|_| Error::RequestFailed)?;
+        self.request_tx.send(request).await.map_err(|_| Error::RequestFailed)?;
         let mut value = response_rx.await.map_err(|_| Error::NoResponse)??;
         /* get the lower 32 bits */
         let (response_tx, response_rx) = oneshot::channel();
         let request = Request::GetParameter([b'S',b'L'], response_tx);
-        self.request_tx.send(request).map_err(|_| Error::RequestFailed)?;
+        self.request_tx.send(request).await.map_err(|_| Error::RequestFailed)?;
         value.extend_from_slice(&response_rx.await.map_err(|_| Error::NoResponse)??);
         /* try build a MacAddr6 from the responses */
         <[u8; 6]>::try_from(&value[..])
@@ -347,7 +353,7 @@ impl Device {
     pub async fn link_margin(&self) -> Result<i32> {
         let (response_tx, response_rx) = oneshot::channel();
         let request = Request::GetParameter([b'L',b'M'], response_tx);
-        self.request_tx.send(request).map_err(|_| Error::RequestFailed)?;
+        self.request_tx.send(request).await.map_err(|_| Error::RequestFailed)?;
         let value = response_rx.await.map_err(|_| Error::NoResponse)??;
         value.first().cloned().map(|state| state as i32).ok_or(Error::DecodeError)
     }
@@ -355,7 +361,7 @@ impl Device {
     pub async fn pin_states(&self) -> Result<Vec<(Pin, bool)>> {
         let (response_tx, response_rx) = oneshot::channel();
         let request = Request::GetParameter([b'I',b'S'], response_tx);
-        self.request_tx.send(request).map_err(|_| Error::RequestFailed)?;
+        self.request_tx.send(request).await.map_err(|_| Error::RequestFailed)?;
         let mut value = response_rx.await.map_err(|_| Error::NoResponse)??;
         if value.len() < SAMPLE_CMD_RESP_LEN {
             return Err(Error::DecodeError);
@@ -392,12 +398,12 @@ impl Device {
             [b'O', b'M'], 
             BytesMut::from(&om_config.to_be_bytes()[..]),
             true
-        )).map_err(|_| Error::RequestFailed)?;
+        )).await.map_err(|_| Error::RequestFailed)?;
         self.request_tx.send(Request::SetParameter(
             [b'I', b'O'],
             BytesMut::from(&io_config.to_be_bytes()[..]),
             false
-        )).map_err(|_| Error::RequestFailed)?;
+        )).await.map_err(|_| Error::RequestFailed)?;
 
         /* read back the pin states */
         let pin_states = self.pin_states().await?;
@@ -419,9 +425,9 @@ impl Device {
                 Request::SetParameter(<[u8; 2]>::from(*pin),
                                       BytesMut::from(&[*mode as u8][..]),
                                       true);
-            self.request_tx.send(request).map_err(|_| Error::RequestFailed)?
+            self.request_tx.send(request).await.map_err(|_| Error::RequestFailed)?
         }
-        self.request_tx.send(Request::ApplyChanges).map_err(|_| Error::RequestFailed)?;
+        self.request_tx.send(Request::ApplyChanges).await.map_err(|_| Error::RequestFailed)?;
         /* check if the modes were actually applied */
         modes.into_iter()
             .map(|(pin, mode)| {
@@ -429,7 +435,7 @@ impl Device {
                 let request = Request::GetParameter(<[u8; 2]>::from(pin), response_tx);
                 let result = self.request_tx.send(request);
                 async move {
-                    (match result {
+                    (match result.await {
                         Ok(_) => response_rx.await
                             .map_err(|_| Error::RequestFailed)
                             .and_then(|inner| inner),
@@ -459,10 +465,10 @@ impl Device {
             [b'I', b'P'],
             BytesMut::from(&(tcp as u8).to_be_bytes()[..]),
             false
-        )).map_err(|_| Error::RequestFailed)?;
+        )).await.map_err(|_| Error::RequestFailed)?;
         let (response_tx, response_rx) = oneshot::channel();
         let request = Request::GetParameter([b'I',b'P'], response_tx);
-        self.request_tx.send(request).map_err(|_| Error::RequestFailed)?;
+        self.request_tx.send(request).await.map_err(|_| Error::RequestFailed)?;
         let mut response = response_rx.await.map_err(|_| Error::NoResponse)??;
         match response.len() {
             1 => match response.get_u8() == (tcp as u8) {
@@ -478,10 +484,10 @@ impl Device {
             [b'B', b'D'],
             BytesMut::from(&baud_rate.to_be_bytes()[..]),
             false
-        )).map_err(|_| Error::RequestFailed)?;
+        )).await.map_err(|_| Error::RequestFailed)?;
         let (response_tx, response_rx) = oneshot::channel();
         let request = Request::GetParameter([b'B',b'D'], response_tx);
-        self.request_tx.send(request).map_err(|_| Error::RequestFailed)?;
+        self.request_tx.send(request).await.map_err(|_| Error::RequestFailed)?;
         let mut response = response_rx.await.map_err(|_| Error::NoResponse)??;
         match response.len() {
             4 => {

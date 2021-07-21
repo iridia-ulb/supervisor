@@ -18,7 +18,7 @@ id=${1:-15}
 
 # check if the id is in range
 if ((${id} >= 0 && ${id} < 15)); then
-   gpiobase=`grep -lr "of:Ngpi1TCnxp,pca9554" /sys/class/gpio/*/device/modalias | grep -o [0-9]*`
+   gpiobase=`grep -lr "of:NgpioTCnxp,pca9554" /sys/class/gpio/*/device/modalias | grep -o [0-9]*`
    for index in `seq 0 3`
    do
       # export the gpios

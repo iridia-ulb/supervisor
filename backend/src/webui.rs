@@ -1,13 +1,14 @@
+use moon::*;
+use shared::{DownMsg, DroneStatus, PiPuckStatus, UpMsg};
+
 use tokio_stream::wrappers::ReceiverStream;
 use warp::ws;
 
-use std::{
-    time::Duration
-};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use futures::{FutureExt, StreamExt};
 
-use tokio::{sync::{mpsc, oneshot}, time::timeout};
+use tokio::{sync::{Mutex, mpsc, oneshot}, time::timeout};
 
 use regex::Regex;
 
@@ -19,25 +20,88 @@ use crate::{
     robot::pipuck,
 };
 
-use serde::{Deserialize, Serialize};
+const HTML_HEAD_TITLE: &str = "Supervisor";
 
-use log;
+const HTML_HEAD_STYLESHEETS: &str = r#"
+    <link rel="stylesheet" href="/_api/public/fonts.css">
+    <link rel="stylesheet" href="/_api/public/icons.css">
+    <link rel="stylesheet" href="/_api/public/theme.css">
+    <link rel="stylesheet" href="/_api/public/styles.css">
+"#;
 
-use itertools::Itertools;
+const HTML_BODY: &str = r#"
+    <div class="mdl-layout__container" id="main"></div>
+    <script src="/_api/public/theme.js"></script>
+"#;
 
-/// MDL HTML for icons
-const OK_ICON: &str = "<i class=\"material-icons mdl-list__item-icon\" style=\"color:green; vertical-align: middle;\">check_circle</i>";
-const ERROR_ICON: &str = "<i class=\"material-icons mdl-list__item-icon\" style=\"color:red; vertical-align: middle;\">error</i>";
+lazy_static::lazy_static! {
+    // Note that Mutex is here because we want to modify the Option in the
+    // run function. Perhaps it could/should be wrapped in an Arc?
+    static ref HACK: Mutex<Option<mpsc::Sender<arena::Request>>> = {
+        Mutex::new(None)
+    };
+}
 
-const WIFI1_IMG: &str = "<img src=\"images/wifi1.svg\" style=\"height:2em;padding-right:10px\" />";
-const WIFI2_IMG: &str = "<img src=\"images/wifi2.svg\" style=\"height:2em;padding-right:10px\" />";
-const WIFI3_IMG: &str = "<img src=\"images/wifi3.svg\" style=\"height:2em;padding-right:10px\" />";
-const WIFI4_IMG: &str = "<img src=\"images/wifi4.svg\" style=\"height:2em;padding-right:10px\" />";
+pub enum Request {
+    UpdateDrone(DroneStatus),
+}
 
-const BATT1_IMG: &str = "<img src=\"images/batt1.svg\" style=\"height:2.5em\" />";
-const BATT2_IMG: &str = "<img src=\"images/batt2.svg\" style=\"height:2.5em\" />";
-const BATT3_IMG: &str = "<img src=\"images/batt3.svg\" style=\"height:2.5em\" />";
-const BATT4_IMG: &str = "<img src=\"images/batt4.svg\" style=\"height:2.5em\" />";
+// down message (from backend to the client)
+// up message (from client to the backend)
+
+pub async fn run(socket: SocketAddr, mut rx: mpsc::Receiver<Request>, tx: &mpsc::Sender<arena::Request>) -> std::io::Result<()> {
+    let frontend = || async {
+        Frontend::new()
+            .title(HTML_HEAD_TITLE)
+            .append_to_head(HTML_HEAD_STYLESHEETS)
+            .body_content(HTML_BODY)
+    };
+    // HACK put the sender inside the static option
+    HACK.lock().await.replace(tx.clone());
+    // HACK
+    let handler = |req: UpMsgRequest<UpMsg>| async move {
+        let UpMsgRequest { up_msg, .. } = req;
+        let arena_request = match up_msg {
+            UpMsg::Refresh => arena::Request::Refresh,
+            UpMsg::DroneAction(_, _) => todo!(),
+        };
+        // HACK
+        HACK.lock().await.unwrap().send(arena_request).await;
+        // HACK
+    };
+
+    let config = Config::default();
+    config.port = socket.port();
+    config.address = socket.ip();
+
+    let backend = start(config, frontend, handler, |_| {});
+    tokio::pin!(backend);
+    loop {
+        tokio::select! {
+            result = &mut backend => break result,
+            result = rx.recv() => match result {
+                Some(request) => match request {
+                    Request::UpdateDrone(update) => {
+                        sessions::broadcast_down_msg(&DownMsg::DroneUpdate(update), CorId::new()).await;
+                    },
+                },
+                /* None occurs when all senders have gone away (probably shutdown) */
+                None => break Ok(()),
+            }
+        }
+    }
+}
+
+
+// the logic behind UI has changed significantly. Updates should now be sent only when there is something to update
+// this means that the drone actor itself should instigate the update, perhaps by sending a message.
+// actually, what we need is bidirectional communication, the webui needs to send messages to actors
+// (execute command, send update), but it also needs to recieve the updates and send them back to the client
+
+// UpMsgRequest<UpMsg> is message from the client such as UpMsg::Refresh or UpMesg::DroneExecuteAction
+// UpMsg::Refresh can use local state, i.e., we keep a Vec<DroneStatus> etc in this module which is updated by the actors
+// UpMsg::DroneExecuteAction needs to forwarded back to the actor, hence, we need `mpsc::Sender<arena::Request>` inside
+// up_message_handler
 
 // "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 fn generate_image_node(mime: &str, data: &[u8], style: &str) -> String {
@@ -79,41 +143,6 @@ pub enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-// TODO remove serialize
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(rename_all = "lowercase", tag = "type")]
-enum Request {
-    Arena {
-        action: arena::Action,
-        uuid: uuid::Uuid,
-    }, 
-    Drone {
-        action: drone::Action,
-        uuid: uuid::Uuid
-    },
-    PiPuck {
-        action: pipuck::Action,
-        uuid: uuid::Uuid
-    },
-    Update {
-        tab: String
-    },
-    Software {
-        action: software::Action,
-        file: Option<(String, String)>,
-        uuid: uuid::Uuid
-    }
-}
-
-#[derive(Serialize, Debug)]
-#[serde(rename_all = "lowercase", tag = "type", content = "action")]
-enum Action {
-    Drone(drone::Action),
-    PiPuck(pipuck::Action),
-    Arena(arena::Action),
-    Software(software::Action),
-}
-
 #[derive(Serialize, Debug)]
 struct Card {
     uuid: uuid::Uuid,
@@ -125,188 +154,156 @@ struct Card {
 
 type Cards = Vec<Card>;
 
-// TODO, Reply will probably need to be wrapped in a enum soon Reply::Update, Reply::XXX
-#[derive(Serialize)]
-struct Reply {
-    title: String,
-    cards: Cards,
-}
 
-lazy_static::lazy_static! {
-    /* UUIDs */
-    static ref NAMESPACE_CONNECTIONS: uuid::Uuid =
-        uuid::Uuid::new_v3(&uuid::Uuid::NAMESPACE_OID, "connections".as_bytes());
-    static ref NAMESPACE_ARENA: uuid::Uuid =
-        uuid::Uuid::new_v3(&uuid::Uuid::NAMESPACE_OID, "arena".as_bytes());
-    static ref NAMESPACE_OPTITRACK: uuid::Uuid =
-        uuid::Uuid::new_v3(&uuid::Uuid::NAMESPACE_OID, "optitrack".as_bytes());
-    static ref NAMESPACE_ERROR: uuid::Uuid =
-        uuid::Uuid::new_v3(&uuid::Uuid::NAMESPACE_OID, "error".as_bytes());
+// pub async fn run(ws: ws::WebSocket,
+//                  arena_request_tx: mpsc::Sender<arena::Request>) {
+//     log::info!("Client connected");
+//     /* split the socket into a sender and receive of messages */
+//     let (websocket_tx, mut websocket_rx) = ws.split();
 
-    static ref UUID_ARENA_DRONES: uuid::Uuid =
-        uuid::Uuid::new_v3(&NAMESPACE_ARENA, "drones".as_bytes());
-    static ref UUID_ARENA_PIPUCKS: uuid::Uuid =
-        uuid::Uuid::new_v3(&NAMESPACE_ARENA, "pipucks".as_bytes());
-    static ref UUID_ARENA_DASHBOARD: uuid::Uuid =
-        uuid::Uuid::new_v3(&NAMESPACE_ARENA, "dashboard".as_bytes());
-    
-    /* other */
-    static ref IIO_CHECKS: Vec<(String, String)> =
-            ["epuck-groundsensors", "epuck-motors", "epuck-leds", "epuck-rangefinders"].iter()
-            .map(|dev| (String::from(*dev), format!("grep ^{} /sys/bus/iio/devices/*/name", dev)))
-            .collect::<Vec<_>>();
-    static ref REGEX_IIO_DEVICE: Regex = Regex::new(r"iio:device[[:digit:]]+").unwrap();
-}
+//     // TODO is this multiplexing necessary?
+//     let (tx, rx) = mpsc::channel(32);
+//     let rx_stream = ReceiverStream::new(rx);
 
-pub async fn run(ws: ws::WebSocket,
-                 arena_request_tx: mpsc::Sender<arena::Request>) {
-    log::info!("Client connected");
-    /* split the socket into a sender and receive of messages */
-    let (websocket_tx, mut websocket_rx) = ws.split();
+//     // TODO is it desirable to spawn here?
+//     tokio::task::spawn(rx_stream.forward(websocket_tx).map(|result| {
+//         if let Err(error) = result {
+//             log::error!("Sending data over WebSocket failed: {}", error);
+//         }
+//     }));
 
-    // TODO is this multiplexing necessary?
-    let (tx, rx) = mpsc::channel(32);
-    let rx_stream = ReceiverStream::new(rx);
-
-    // TODO is it desirable to spawn here?
-    tokio::task::spawn(rx_stream.forward(websocket_tx).map(|result| {
-        if let Err(error) = result {
-            log::error!("Sending data over WebSocket failed: {}", error);
-        }
-    }));
-
-    /* this loop is update task for a webui client */
-    while let Some(data) = websocket_rx.next().await {
-        let request : ws::Message = match data {
-            Ok(request) => request,
-            Err(error) => {
-                log::error!("websocket receive failed: {}", error);
-                break;
-            }
-        };
-        if let Ok(request) = request.to_str() {
-            /*
-            let t1 = Request::Upload{ target: "irobot".to_owned(), filename: "control.lua".to_owned(), data: "4591345879dsfsd908g".to_owned()};
-            let t2 = Request::PiPuck{ action: pipuck::Action::RpiReboot, uuid: uuid::Uuid::new_v4()};
-            let t3 = Request::Update{ tab: "Connections".to_owned() };
-            eprintln!("t1 = {}", serde_json::to_string(&t1).unwrap());
-            eprintln!("t2 = {}", serde_json::to_string(&t2).unwrap());
-            eprintln!("t3 = {}", serde_json::to_string(&t3).unwrap());
-            */
-            if let Ok(action) = serde_json::from_str::<Request>(request) {
-                match action {
-                    Request::Arena{action, ..} => {
-                        let request = arena::Request::Execute(action);
-                        if let Err(error) = arena_request_tx.send(request).await {
-                            log::error!("Could not execute action on arena: {}", error);
-                        }
-                    },
-                    Request::Drone{uuid, action} => {
-                        let request = arena::Request::ForwardDroneAction(uuid, action);
-                        if let Err(error) = arena_request_tx.send(request).await {
-                            log::error!("Could not forward drone action to arena: {}", error);
-                        }
-                    },
-                    Request::PiPuck{uuid, action} => {
-                        let request = arena::Request::ForwardPiPuckAction(uuid, action);
-                        if let Err(error) = arena_request_tx.send(request).await {
-                            log::error!("Could not forward Pi-Puck action to arena: {}", error);
-                        }
-                    },
-                    Request::Update{tab} => {
-                        let result = match &tab[..] {
-                            "Connections" => connections_tab(&arena_request_tx).await,
-                            "Experiment" => experiment_tab(&arena_request_tx).await,
-                            "Optitrack" => optitrack_tab().await,
-                            _ => Err(Error::BadRequest),
-                        };
-                        let reply = match result {
-                            Ok(cards) => Reply { title: tab, cards },
-                            Err(error) => {
-                                let error_message = format!("{}", error);
-                                let card = Card {
-                                    uuid: uuid::Uuid::new_v3(&NAMESPACE_ERROR, error_message.as_bytes()),
-                                    span: 4,
-                                    title: "Error".to_owned(),
-                                    content: vec![Content::Text(error_message)],
-                                    actions: vec![],
-                                };
-                                Reply { title: tab, cards: vec![ card ] }
-                            }
-                        };
-                        match serde_json::to_string(&reply) {
-                            Ok(content) => {
-                                let message = Ok(ws::Message::text(content));
-                                if let Err(_) = tx.send(message).await {
-                                    log::error!("Could not reply to client");
-                                }
-                            },
-                            Err(_) => log::error!("Could not serialize reply"),
-                        }
-                    },
-                    Request::Software{action, uuid, file} => {
-                        match action {
-                            software::Action::Upload => {
-                                let file = file.and_then(|(name, content)| {
-                                    match content.split(',').tuples::<(_,_)>().next() {
-                                        Some((_, data)) => {
-                                            match base64::decode(data) {
-                                                Ok(data) => Some((name, data)),
-                                                Err(error) => {
-                                                    log::error!("Could not decode {}: {}", name, error);
-                                                    None
-                                                }
-                                            }
-                                        },
-                                        None => None
-                                    }
-                                });
-                                if let Some((filename, contents)) = file {
-                                    if uuid == *UUID_ARENA_DRONES {
-                                        let request = arena::Request::AddDroneSoftware(filename, contents);
-                                        if let Err(error) = arena_request_tx.send(request).await {
-                                            log::error!("Could not add drone software: {}", error);
-                                        }
-                                    }
-                                    else if uuid == *UUID_ARENA_PIPUCKS {
-                                        let request = arena::Request::AddPiPuckSoftware(filename, contents);
-                                        if let Err(error) = arena_request_tx.send(request).await {
-                                            log::error!("Could not add Pi-Puck software: {}", error);
-                                        }
-                                    }
-                                    else {
-                                        log::error!("Target {} does not support adding software", uuid);
-                                    }
-                                }
-                            }
-                            software::Action::Clear => {
-                                if uuid == *UUID_ARENA_DRONES {
-                                    let request = arena::Request::ClearDroneSoftware;
-                                    if let Err(error) = arena_request_tx.send(request).await {
-                                        log::error!("Could not clear drone software: {}", error);
-                                    }
-                                }
-                                else if uuid == *UUID_ARENA_PIPUCKS {
-                                    let request = arena::Request::ClearPiPuckSoftware;
-                                    if let Err(error) = arena_request_tx.send(request).await {
-                                        log::error!("Could not clear Pi-Puck software: {}", error);
-                                    }
-                                }
-                                else {
-                                    log::error!("Target {} does not support clearing software", uuid);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            else {
-                log::error!("Could not deserialize request");
-            }
-        }
-    }
-    log::info!("Client disconnected");
-}
+//     /* this loop is update task for a webui client */
+//     while let Some(data) = websocket_rx.next().await {
+//         let request : ws::Message = match data {
+//             Ok(request) => request,
+//             Err(error) => {
+//                 log::error!("websocket receive failed: {}", error);
+//                 break;
+//             }
+//         };
+//         if let Ok(request) = request.to_str() {
+//             /*
+//             let t1 = Request::Upload{ target: "irobot".to_owned(), filename: "control.lua".to_owned(), data: "4591345879dsfsd908g".to_owned()};
+//             let t2 = Request::PiPuck{ action: pipuck::Action::RpiReboot, uuid: uuid::Uuid::new_v4()};
+//             let t3 = Request::Update{ tab: "Connections".to_owned() };
+//             eprintln!("t1 = {}", serde_json::to_string(&t1).unwrap());
+//             eprintln!("t2 = {}", serde_json::to_string(&t2).unwrap());
+//             eprintln!("t3 = {}", serde_json::to_string(&t3).unwrap());
+//             */
+//             if let Ok(action) = serde_json::from_str::<Request>(request) {
+//                 match action {
+//                     Request::Arena{action, ..} => {
+//                         let request = arena::Request::Execute(action);
+//                         if let Err(error) = arena_request_tx.send(request).await {
+//                             log::error!("Could not execute action on arena: {}", error);
+//                         }
+//                     },
+//                     Request::Drone{uuid, action} => {
+//                         let request = arena::Request::ForwardDroneAction(uuid, action);
+//                         if let Err(error) = arena_request_tx.send(request).await {
+//                             log::error!("Could not forward drone action to arena: {}", error);
+//                         }
+//                     },
+//                     Request::PiPuck{uuid, action} => {
+//                         let request = arena::Request::ForwardPiPuckAction(uuid, action);
+//                         if let Err(error) = arena_request_tx.send(request).await {
+//                             log::error!("Could not forward Pi-Puck action to arena: {}", error);
+//                         }
+//                     },
+//                     Request::Update{tab} => {
+//                         let result = match &tab[..] {
+//                             "Connections" => connections_tab(&arena_request_tx).await,
+//                             "Experiment" => experiment_tab(&arena_request_tx).await,
+//                             "Optitrack" => optitrack_tab().await,
+//                             _ => Err(Error::BadRequest),
+//                         };
+//                         let reply = match result {
+//                             Ok(cards) => Reply { title: tab, cards },
+//                             Err(error) => {
+//                                 let error_message = format!("{}", error);
+//                                 let card = Card {
+//                                     uuid: uuid::Uuid::new_v3(&NAMESPACE_ERROR, error_message.as_bytes()),
+//                                     span: 4,
+//                                     title: "Error".to_owned(),
+//                                     content: vec![Content::Text(error_message)],
+//                                     actions: vec![],
+//                                 };
+//                                 Reply { title: tab, cards: vec![ card ] }
+//                             }
+//                         };
+//                         match serde_json::to_string(&reply) {
+//                             Ok(content) => {
+//                                 let message = Ok(ws::Message::text(content));
+//                                 if let Err(_) = tx.send(message).await {
+//                                     log::error!("Could not reply to client");
+//                                 }
+//                             },
+//                             Err(_) => log::error!("Could not serialize reply"),
+//                         }
+//                     },
+//                     Request::Software{action, uuid, file} => {
+//                         match action {
+//                             software::Action::Upload => {
+//                                 let file = file.and_then(|(name, content)| {
+//                                     match content.split(',').tuples::<(_,_)>().next() {
+//                                         Some((_, data)) => {
+//                                             match base64::decode(data) {
+//                                                 Ok(data) => Some((name, data)),
+//                                                 Err(error) => {
+//                                                     log::error!("Could not decode {}: {}", name, error);
+//                                                     None
+//                                                 }
+//                                             }
+//                                         },
+//                                         None => None
+//                                     }
+//                                 });
+//                                 if let Some((filename, contents)) = file {
+//                                     if uuid == *UUID_ARENA_DRONES {
+//                                         let request = arena::Request::AddDroneSoftware(filename, contents);
+//                                         if let Err(error) = arena_request_tx.send(request).await {
+//                                             log::error!("Could not add drone software: {}", error);
+//                                         }
+//                                     }
+//                                     else if uuid == *UUID_ARENA_PIPUCKS {
+//                                         let request = arena::Request::AddPiPuckSoftware(filename, contents);
+//                                         if let Err(error) = arena_request_tx.send(request).await {
+//                                             log::error!("Could not add Pi-Puck software: {}", error);
+//                                         }
+//                                     }
+//                                     else {
+//                                         log::error!("Target {} does not support adding software", uuid);
+//                                     }
+//                                 }
+//                             }
+//                             software::Action::Clear => {
+//                                 if uuid == *UUID_ARENA_DRONES {
+//                                     let request = arena::Request::ClearDroneSoftware;
+//                                     if let Err(error) = arena_request_tx.send(request).await {
+//                                         log::error!("Could not clear drone software: {}", error);
+//                                     }
+//                                 }
+//                                 else if uuid == *UUID_ARENA_PIPUCKS {
+//                                     let request = arena::Request::ClearPiPuckSoftware;
+//                                     if let Err(error) = arena_request_tx.send(request).await {
+//                                         log::error!("Could not clear Pi-Puck software: {}", error);
+//                                     }
+//                                 }
+//                                 else {
+//                                     log::error!("Target {} does not support clearing software", uuid);
+//                                 }
+//                             }
+//                         }
+//                     }
+//                 }
+//             }
+//             else {
+//                 log::error!("Could not deserialize request");
+//             }
+//         }
+//     }
+//     log::info!("Client disconnected");
+// }
 
 async fn experiment_tab(arena_request_tx: &mpsc::Sender<arena::Request>) -> Result<Cards> {
     let mut cards = Cards::default();

@@ -31,6 +31,7 @@ pub struct State {
 }
 
 pub enum Request {
+    AssociateFernbedienung(fernbedienung::Device),
     State(oneshot::Sender<State>),
     Execute(Action),
     ExperimentStart {
@@ -86,7 +87,7 @@ pub async fn poll_rpi_link_strength(device: &fernbedienung::Device) -> Result<i3
         .and_then(|inner| inner.map_err(|error| Error::FernbedienungError(error)))
 }
 
-pub async fn new(uuid: Uuid, mut arena_rx: Receiver, device: fernbedienung::Device) -> Uuid {
+pub async fn new(mut arena_rx: Receiver) {
     let mut argos_stop_tx = None;
     let argos_task = futures::future::pending().left_future();
     tokio::pin!(argos_task);

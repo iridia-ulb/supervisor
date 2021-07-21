@@ -1,8 +1,6 @@
 use std::{net::SocketAddr, path::{Path, PathBuf}};
 use ipnet::Ipv4Net;
-use macaddr::{MacAddr6, MacAddr8};
 use tokio::sync::mpsc;
-use warp::Filter;
 use structopt::StructOpt;
 use anyhow::Context;
 
@@ -37,41 +35,39 @@ async fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(environment).format_timestamp_millis().init();
     /* parse the configuration file */
     let options = Options::from_args();
-    let config = parse_config(&options.config)
-        .context("Could not parse configuration file")?;
-
-    log::info!("Configuration = {:?}", config);
+    let Configuration {
+        router_socket,
+        webui_socket,
+        robot_network,
+        pipucks,
+        drones,
+    } = parse_config(&options.config)
+            .context("Could not parse configuration file")?;
     /* create a task for tracking the robots and state of the experiment */
-    let (arena_requests_tx, arena_requests_rx) = mpsc::channel(32);
-    let (journal_requests_tx, journal_requests_rx) = mpsc::channel(32);
+    let (arena_requests_tx, arena_requests_rx) = mpsc::channel(8);
+    let (journal_requests_tx, journal_requests_rx) = mpsc::channel(8);
+    let (webui_requests_tx, webui_requests_rx) = mpsc::channel(8);
     /* listen for the ctrl-c shutdown signal */
     let sigint_task = tokio::signal::ctrl_c();
     /* create journal task */
     let journal_task = journal::new(journal_requests_rx);
     /* create arena task */
-    let arena_task = arena::new(arena_requests_rx, &journal_requests_tx);
+    let arena_task =
+        arena::new(arena_requests_rx,
+                   &journal_requests_tx,
+                   &webui_requests_tx,
+                   pipucks,
+                   drones);
     /* create network task */
-    let network_task = network::new(config.robot_network, &arena_requests_tx);
+    let network_task = network::new(robot_network, &arena_requests_tx);
     /* create message router task */
-    let router_addr = config.router_socket
+    let router_addr = router_socket
         .ok_or(anyhow::anyhow!("A socket for the message router must be provided"))?;
     let router_task = router::new(router_addr, journal_requests_tx.clone());
-    /* create webui task */
-    /* clone arena requests tx for moving into the closure */
-    let arena_requests_tx = arena_requests_tx.clone();
-    let arena_channel = warp::any().map(move || arena_requests_tx.clone());
-    let socket_route = warp::path("socket")
-        .and(warp::ws())
-        .and(arena_channel)
-        .map(|websocket: warp::ws::Ws, arena_requests_tx| {
-            websocket.on_upgrade(move |socket| webui::run(socket, arena_requests_tx))
-        });
-    let static_route = warp::get()
-        .and(static_dir::static_dir!("static"));
-    //    .and(warp::fs::dir("/home/mallwright/Workspace/mns-supervisor/static"));
-    let webui_addr = config.webui_socket
-        .ok_or(anyhow::anyhow!("A socket for the message router must be provided"))?;
-    let webui_task = warp::serve(socket_route.or(static_route)).run(webui_addr);
+    /* create the backend task */
+    let webui_socket = webui_socket
+        .ok_or(anyhow::anyhow!("A socket for the web interface must be provided"))?;
+    let webui_task = webui::run(webui_socket, webui_requests_rx, &arena_requests_tx);
     /* pin the futures so that they can be polled via &mut */
     tokio::pin!(arena_task);
     tokio::pin!(journal_task);
@@ -82,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
     let mut router_task = tokio::spawn(router_task);
     /* no point in implementing automatic browser opening */
     /* https://bugzilla.mozilla.org/show_bug.cgi?id=1512438 */
-    let server_addr = format!("http://{}/", webui_addr);
+    let server_addr = format!("http://{}/", webui_socket);
     if let Err(_) = webbrowser::open(&server_addr) {
         log::warn!("Could not start browser");
         log::info!("Please open this URL manually: {}", server_addr);
@@ -127,27 +123,12 @@ async fn main() -> anyhow::Result<()> {
  */
 
 #[derive(Debug)]
-enum RobotTableEntry {
-    Drone {
-        id: String,
-        xbee_macaddr: MacAddr8,
-        upcore_macaddr: MacAddr6,
-        optitrack_id: i32,
-    },
-    PiPuck {
-        id: String,
-        rpi_macaddr: MacAddr6,
-        optitrack_id: i32,
-        apriltag_id: u8,
-    }
-}
-
-#[derive(Debug)]
 struct Configuration {
     router_socket: Option<SocketAddr>,
     webui_socket: Option<SocketAddr>,
     robot_network: Ipv4Net,
-    robot_table: Vec<RobotTableEntry>,
+    pipucks: Vec<robot::pipuck::Descriptor>,
+    drones: Vec<robot::drone::Descriptor>,
 }
 
 fn parse_config(config: &Path) -> anyhow::Result<Configuration> {
@@ -188,58 +169,53 @@ fn parse_config(config: &Path) -> anyhow::Result<Configuration> {
         .ok_or(anyhow::anyhow!("Could not find attribute \"network\" in <robots>"))?
         .parse::<Ipv4Net>()
         .context("Could not parse attribute \"network\" in <robots>")?;
-    let mut robot_table = Vec::new();
-    for robot in robots.descendants() {
-        match robot.tag_name().name() {
-            "pipuck" => {
-                let pipuck = RobotTableEntry::PiPuck {
-                    id: robot
-                        .attribute("id")
-                        .ok_or(anyhow::anyhow!("Could not find attribute \"id\" for <pipuck>"))?
-                        .to_owned(),
-                    rpi_macaddr: robot.attribute("rpi_macaddr")
-                        .ok_or(anyhow::anyhow!("Could not find attribute \"rpi_macaddr\" for <pipuck>"))?
-                        .parse()
-                        .context("Could not parse attribute \"rpi_macaddr\" for <pipuck>")?,
-                    optitrack_id: robot.attribute("optitrack_id")
-                        .ok_or(anyhow::anyhow!("Could not find attribute \"optitrack_id\" for <pipuck>"))?
-                        .parse()
-                        .context("Could not parse attribute \"optitrack_id\" for <pipuck>")?,
-                    apriltag_id: robot.attribute("apriltag_id")
-                        .ok_or(anyhow::anyhow!("Could not find attribute \"apriltag_id\" for <pipuck>"))?
-                        .parse()
-                        .context("Could not parse attribute \"apriltag_id\" for <pipuck>")?,
-                };
-                robot_table.push(pipuck);
-            },
-            "drone" => {
-                let drone = RobotTableEntry::Drone {
-                    id: robot
-                        .attribute("id")
-                        .ok_or(anyhow::anyhow!("Could not find attribute \"id\" for <drone>"))?
-                        .to_owned(),
-                    xbee_macaddr: robot.attribute("xbee_macaddr")
-                        .ok_or(anyhow::anyhow!("Could not find attribute \"xbee_macaddr\" for <drone>"))?
-                        .parse()
-                        .context("Could not parse attribute \"xbee_macaddr\" for <drone>")?,
-                    upcore_macaddr: robot.attribute("upcore_macaddr")
-                        .ok_or(anyhow::anyhow!("Could not find attribute \"upcore_macaddr\" for <drone>"))?
-                        .parse()
-                        .context("Could not parse attribute \"upcore_macaddr\" for <drone>")?,
-                    optitrack_id: robot.attribute("optitrack_id")
-                        .ok_or(anyhow::anyhow!("Could not find attribute \"optitrack_id\" for <drone>"))?
-                        .parse()
-                        .context("Could not parse attribute \"optitrack_id\" for <drone>")?,
-                };
-                robot_table.push(drone);
-            },
-            _ => continue,
-        }
-    }
+    let pipucks = robots
+        .descendants()
+        .filter(|node| node.tag_name().name() == "pipuck")
+        .map(|node| anyhow::Result::<_>::Ok(robot::pipuck::Descriptor {
+            id: node.attribute("id")
+                .ok_or(anyhow::anyhow!("Could not find attribute \"id\" for <pipuck>"))?
+                .to_owned(),
+            rpi_macaddr: node.attribute("rpi_macaddr")
+                .ok_or(anyhow::anyhow!("Could not find attribute \"rpi_macaddr\" for <pipuck>"))?
+                .parse()
+                .context("Could not parse attribute \"rpi_macaddr\" for <pipuck>")?,
+            optitrack_id: node.attribute("optitrack_id")
+                .map(|value| value.parse())
+                .transpose()
+                .context("Could not parse attribute \"optitrack_id\" for <pipuck>")?,
+            apriltag_id: node.attribute("apriltag_id")
+                .map(|value| value.parse())
+                .transpose()
+                .context("Could not parse attribute \"apriltag_id\" for <pipuck>")?,
+        }))
+        .collect::<Result<Vec<_>, _>>()?;
+    let drones = robots
+        .descendants()
+        .filter(|node| node.tag_name().name() == "drone")
+        .map(|node| anyhow::Result::<_>::Ok(robot::drone::Descriptor {
+            id: node.attribute("id")
+                .ok_or(anyhow::anyhow!("Could not find attribute \"id\" for <drone>"))?
+                .to_owned(),
+            xbee_macaddr: node.attribute("xbee_macaddr")
+                .ok_or(anyhow::anyhow!("Could not find attribute \"xbee_macaddr\" for <drone>"))?
+                .parse()
+                .context("Could not parse attribute \"xbee_macaddr\" for <drone>")?,
+            upcore_macaddr: node.attribute("upcore_macaddr")
+                .ok_or(anyhow::anyhow!("Could not find attribute \"upcore_macaddr\" for <drone>"))?
+                .parse()
+                .context("Could not parse attribute \"upcore_macaddr\" for <drone>")?,                
+            optitrack_id: node.attribute("optitrack_id")
+                .map(|value| value.parse())
+                .transpose()
+                .context("Could not parse attribute \"optitrack_id\" for <pipuck>")?,
+        }))
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Configuration { 
         router_socket,
         webui_socket,
         robot_network,
-        robot_table,
+        pipucks,
+        drones,
     })
 }

@@ -22,7 +22,7 @@ pub async fn new(network: Ipv4Net, arena_request_tx: &mpsc::Sender<arena::Reques
             (return_addr_rx, probe_xbee(return_addr_tx, addr))
         }).unzip();
     /* empty collections for the fernbedienung tasks */
-    let fernbedienung_returned_addrs : FuturesUnordered<oneshot::Receiver<Ipv4Addr>> = Default::default();
+    let mut fernbedienung_returned_addrs : FuturesUnordered<oneshot::Receiver<Ipv4Addr>> = Default::default();
     let mut probe_fernbedienung_queue: FuturesUnordered<_> = Default::default();
     /* main task loop */
     loop {

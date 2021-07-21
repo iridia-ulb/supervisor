@@ -57,7 +57,16 @@ pub type RemoteRequests = SymmetricallyFramed<
 
 pub struct Device {
     request_tx: mpsc::Sender<Request>,
-    pub addr: Ipv4Addr
+    addr: Ipv4Addr,
+    return_addr_tx: Option<oneshot::Sender<Ipv4Addr>>,
+}
+
+impl Drop for Device {
+    fn drop(&mut self) {
+        if let Some(return_addr_tx) = self.return_addr_tx.take() {
+            return_addr_tx.send(self.addr);
+        }
+    }
 }
 
 enum Request {
@@ -208,11 +217,7 @@ impl Device {
                             };
                             tasks.push(task);
                         },
-                        None => {
-                            /* terminate this task when the struct is dropped */
-                            let _ = return_addr_tx.send(addr);
-                            break
-                        },
+                        None => break,
                     },
                     Some(uuid) = tasks.next() => {
                         status_txs.remove(&uuid);
@@ -221,7 +226,7 @@ impl Device {
                 }
             }
         });
-        Ok(Device { request_tx: local_request_tx, addr })
+        Ok(Device { request_tx: local_request_tx, addr, return_addr_tx: Some(return_addr_tx) })
     }
 
     async fn handle_run_request(uuid: Uuid,

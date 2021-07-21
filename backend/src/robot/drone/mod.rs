@@ -1,8 +1,5 @@
-use futures::FutureExt;
-use uuid::Uuid;
-use std::{future::Future, pin::Pin, task::{Context, Poll}};
+use macaddr::MacAddr6;
 use tokio::{sync::mpsc, task::JoinHandle};
-use crate::network::xbee;
 
 mod task;
 mod codec;
@@ -11,21 +8,28 @@ pub use task::{
     Action, Error, Receiver, Request, Sender, State
 };
 
-pub struct Drone(JoinHandle<Uuid>);
-
-impl Drone {
-    pub fn new(device: xbee::Device) -> (Uuid, Sender, Self) {
-        let uuid = Uuid::new_v4();
-        let (tx, rx) = mpsc::channel(32);
-        let handle = tokio::spawn(task::new(uuid, rx, device));
-        (uuid, tx, Self(handle))
-    }
+#[derive(Debug)]
+pub struct Descriptor {
+    pub id: String,
+    pub xbee_macaddr: MacAddr6,
+    pub upcore_macaddr: MacAddr6,
+    pub optitrack_id: Option<i32>,
 }
 
-impl Future for Drone {
-    type Output = Result<Uuid, tokio::task::JoinError>;
+pub struct Instance {
+    pub descriptor: Descriptor,
+    pub request_tx: mpsc::Sender<Request>,
+    task: JoinHandle<()>
+}
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.get_mut().0.poll_unpin(cx)
+impl Instance {
+    pub fn new(descriptor: Descriptor) -> Self {
+        let (request_tx, request_rx) = mpsc::channel(8);
+        let task = tokio::spawn(task::new(request_rx));       
+        Self { 
+            descriptor,
+            request_tx,
+            task
+        }
     }
 }
