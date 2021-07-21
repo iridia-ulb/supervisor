@@ -133,7 +133,7 @@ where
     };
     let reload_sse = ReloadSSE(SSE::start());
     let message_sse = MessageSSE(SSE::start());
-    let address = SocketAddr::from(([0, 0, 0, 0], config.port));
+    let address = SocketAddr::from((config.address, config.port));
 
     let redirect_enabled = config.redirect.enabled;
     let redirect = Redirect::new()
@@ -192,7 +192,7 @@ where
     lazy_message_writer.server_is_running(&address, &config)?;
 
     server = if config.redirect.enabled {
-        let address = SocketAddr::from(([0, 0, 0, 0], config.redirect.port));
+        let address = SocketAddr::from((config.address, config.redirect.port));
         lazy_message_writer.redirect_from(&address, &config)?;
         server.bind(address)?
     } else {
