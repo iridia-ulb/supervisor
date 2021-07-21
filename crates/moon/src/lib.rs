@@ -201,7 +201,7 @@ where
     lazy_message_writer.write_all()?;
     server.await?;
 
-    Ok(println!("Stop Moon"))
+    Ok(())
 }
 
 async fn backend_build_id() -> u128 {
@@ -229,12 +229,12 @@ fn rustls_server_config() -> io::Result<RustlsServerConfig> {
 // ------ ------
 
 fn internal_server_error_handler<B>(res: ServiceResponse<B>) -> Result<ErrorHandlerResponse<B>> {
-    eprintln!("INTERNAL_SERVER_ERROR: {:?}", res.request().uri());
+    log::warn!("INTERNAL_SERVER_ERROR: {:?}", res.request().uri());
     Ok(ErrorHandlerResponse::Response(res))
 }
 
 fn render_not_found_handler<B>(res: ServiceResponse<B>) -> Result<ErrorHandlerResponse<B>> {
-    eprintln!("NOT_FOUND: {:?}", res.request().uri());
+    log::warn!("NOT_FOUND: {:?}", res.request().uri());
     Ok(ErrorHandlerResponse::Response(res))
 }
 
