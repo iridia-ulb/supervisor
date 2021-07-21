@@ -1,0 +1,30 @@
+[package]
+name = "mzoon"
+version = "0.1.0"
+authors = ["Martin Kavík <martin@kavik.cz>"]
+edition = "2018"
+
+[dependencies]
+structopt = { version = "0.3", default-features = false }
+toml = { version = "0.5", default-features = false }
+serde = { version = "1.0", features = ["derive"], default-features = false }
+notify = { version = "5.0.0-pre.9", default-features = false }
+reqwest = { version = "0.11.3", features = ["default-tls"], default-features = false }
+rcgen = { version = "0.8.9", features = ["pem"], default-features = false }
+open = { version = "1.7.0", default-features = false }
+uuid = { version = "0.8", features = ["v4"], default-features = false }
+tokio = { version = "1.6.1", features = ["rt-multi-thread", "macros", "fs", "signal", "sync", "time", "io-util", "process"], default-features = false }
+anyhow = { version = "1.0.40", features = ["std"], default-features = false }
+cargo_metadata = { version = "0.13.1", default-features = false } 
+parking_lot = { version = "0.11.1", default-features = false }
+log = { version = "0.4.14", features = ["serde"], default-features = false }
+futures = { version = "0.3.13", features = ["std"], default-features = false }
+brotli = { version = "3.3.0", features = ["std"], default-features = false }
+flate2 = { version = "1.0.20", features = ["rust_backend"], default-features = false }
+tar = { version = "0.4.35", default-features = false }
+const_format = { version = "0.2.14", default-features = false }
+async-trait = { version = "0.1.50", default-features = false }
+fehler = { version = "1.0.0", default-features = false }
+apply = { version = "0.3.0", default-features = false }
+bool_ext = { version = "0.5.1", default-features = false }
+cfg-if = { version = "1.0.0", default-features = false }
