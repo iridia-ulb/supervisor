@@ -1,5 +1,4 @@
 use crate::from_env_vars::FromEnvVars;
-use log::LevelFilter;
 use serde::Deserialize;
 use std::net::IpAddr;
 
