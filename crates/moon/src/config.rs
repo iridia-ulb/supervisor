@@ -16,8 +16,6 @@ pub struct Config {
     pub compressed_pkg: bool,
     // CACHE_BUSTING
     pub cache_busting: bool,
-    // BACKEND_LOG_LEVEL
-    pub backend_log_level: LevelFilter,
 
     #[serde(default = "Redirect::from_env_vars")]
     pub redirect: Redirect,
@@ -35,7 +33,6 @@ impl Default for Config {
             https: false,
             compressed_pkg: true,
             cache_busting: true,
-            backend_log_level: LevelFilter::Warn,
             redirect: Redirect::default(),
         }
     }

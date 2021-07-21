@@ -120,10 +120,6 @@ where
 {
     // ------ Init ------
 
-    env_logger::builder()
-        .filter_level(config.backend_log_level)
-        .init();
-
     let shared_data = SharedData {
         backend_build_id: backend_build_id().await,
         frontend_build_id: Frontend::build_id().await,
