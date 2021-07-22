@@ -9,6 +9,8 @@ edition = "2018"
 
 [dependencies]
 moonlight = { path = "../crates/moonlight" }
+base64 = { version = "0.13" }
+bytes = { version = "1.0" }
 
 [features]
 frontend = ["moonlight/frontend"]

@@ -56,8 +56,8 @@ pub type RemoteRequests = SymmetricallyFramed<
     SymmetricalJson<protocol::Request>>;
 
 pub struct Device {
+    pub addr: Ipv4Addr,
     request_tx: mpsc::Sender<Request>,
-    addr: Ipv4Addr,
     return_addr_tx: Option<oneshot::Sender<Ipv4Addr>>,
 }
 

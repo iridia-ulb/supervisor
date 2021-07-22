@@ -32,8 +32,13 @@ pub struct State {
 
 pub enum Request {
     AssociateFernbedienung(fernbedienung::Device),
-    State(oneshot::Sender<State>),
-    Execute(Action),
+
+    // when this message is recv, all updates are sent and then
+    // updates are sent only on changes
+    SetUpdateEndpoint(mpsc::Sender<Update>),
+
+
+
     ExperimentStart {
         software: software::Software,
         journal: mpsc::Sender<journal::Request>,
@@ -45,6 +50,7 @@ pub enum Request {
 pub type Sender = mpsc::Sender<Request>;
 pub type Receiver = mpsc::Receiver<Request>;
 
+//
 #[derive(Copy, Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub enum Action {
     #[serde(rename = "Halt Raspberry Pi")]
@@ -68,6 +74,10 @@ pub enum Error {
     #[error("Did not receive response")]
     ResponseError,
 
+    // drone will also have a 
+    #[error("A Fernbedienung instance has not been associated")]
+    FernbedienungNotAssociated,
+
     #[error(transparent)]
     FernbedienungError(#[from] fernbedienung::Error),
     #[error(transparent)]
@@ -87,7 +97,94 @@ pub async fn poll_rpi_link_strength(device: &fernbedienung::Device) -> Result<i3
         .and_then(|inner| inner.map_err(|error| Error::FernbedienungError(error)))
 }
 
-pub async fn new(mut arena_rx: Receiver) {
+// theory of operation
+// how are changes detected? in part by polling -- these changes need to be sent to the
+// webui -- when a change in state occurs this should be pushed via a channel to the webui
+
+// perhaps make two sub-actors -- one for handling xbee requests, when it has been added,
+// the other for handling ferbedienung requests
+
+// let mut fernbedienung: Option<Arc<fernbedienung::Device>> = None;
+// let poll_upcore_link_strength_task = future::pending().left_future();
+
+
+mod argos {
+    enum Request {
+        Start,
+        Stop
+    }
+}
+
+enum FernbedienungRequest {
+    StreamCameras(mpsc::Sender<Vec<Bytes>>),
+    StartArgos,
+    StopArgos,
+
+}
+
+async fn fernbedienung(
+    device: fernbedienung::Device,
+    rx: mpsc::Receiver<FernbedienungRequest>
+) -> anyhow::Result<()> {
+
+    Ok(())
+}
+
+// arena sends drone a request StreamUpdates(mpsc::Sender<Updates>)
+// sender can be cloned and passed into fernbedienung/xbee tasks
+// the webui is the only recieving end
+
+// TODO: I think actions and requests can be merged
+
+pub async fn new(mut request_rx: Receiver) {
+    let fernbedienung_task = futures::future::pending().left_future();
+    let mut fernbedienung_tx = Option::default();
+    tokio::pin!(fernbedienung_task);
+
+    loop {
+        tokio::select! {
+            Some(request) = request_rx.recv() => match request {
+                Request::AssociateFernbedienung(device) => {
+                    let (tx, rx) = mpsc::channel(8);
+                    let state_change = StateChange::FernbedienungConnection(Some(device.addr));
+                    updates_tx.send(state_change).await;
+                    fernbedienung_tx = Some(tx);
+                    fernbedienung_task.set(fernbedienung(device, rx).right_future());
+
+                },
+                Request::RefreshState => {
+                    let updates = vec![
+                        Update::FernbedienungConnection(None),
+                        Update::FernbedienungSignal(0),
+                        Update::Cameras(vec![]),
+                        Update::Actions(vec![])
+                    ];
+                    let result = updates
+                        .into_iter()
+                        .map(|update| updates_tx.send(update))
+                        .collect::<FuturesUnordered<_>>()
+                        .try_collect::<Vec<_>>().await;
+                    if let Err(error) = result {
+                        log::error!("Could not send state update")
+                    }
+                },
+                Request::Execute(action) => todo!(),
+                Request::ExperimentStart { software, journal, callback } => todo!(),
+                Request::ExperimentStop => todo!(),
+            },
+            result = &mut fernbedienung_task => {
+                fernbedienung_tx = None;
+                fernbedienung_task.set(futures::future::pending().left_future());
+                if let Err(error) = result {
+                    log::info!("Fernbedienung task terminated: {}", error);
+                }
+            }
+        }
+    }
+}
+
+
+pub async fn old_code_new(mut arena_rx: Receiver) {
     let mut argos_stop_tx = None;
     let argos_task = futures::future::pending().left_future();
     tokio::pin!(argos_task);

@@ -124,8 +124,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 struct Codec;
 
 pub struct Device {
+    pub addr: Ipv4Addr,
     request_tx: mpsc::Sender<Request>,
-    addr: Ipv4Addr,
     return_addr_tx: Option<oneshot::Sender<Ipv4Addr>>,
 }
 

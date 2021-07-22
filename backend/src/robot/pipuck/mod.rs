@@ -7,6 +7,8 @@ pub use task::{
     Action, Error, Receiver, Request, Sender, State
 };
 
+pub use shared::pipuck::Update;
+
 #[derive(Debug)]
 pub struct Descriptor {
     pub id: String,

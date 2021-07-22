@@ -1,5 +1,8 @@
 use moonlight::serde_lite::{self, Deserialize, Serialize};
 
+pub mod drone;
+pub mod pipuck;
+
 // ------ UpMsg ------
 
 // frontend to backend,
@@ -17,22 +20,11 @@ pub enum UpMsg {
 #[derive(Serialize, Deserialize, Debug)]
 pub enum DownMsg {
     // broadcast, trigger by change in actual drone
-    DroneUpdate(DroneStatus),
-    PiPuckUpdate(PiPuckStatus),
+    UpdateDrone(String, drone::Update),
+    UpdatePiPuck(String, pipuck::Update),
 }
 
 // ------ Message ------
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct DroneStatus {
-    pub id: String,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct PiPuckStatus {
-    pub id: String,
-}
-
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ExperimentStatus {
     pub pipucks: u32,

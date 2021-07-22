@@ -1,6 +1,70 @@
-use shared::{DownMsg, DroneStatus, ExperimentStatus, PiPuckStatus, UpMsg};
+use shared::{DownMsg, ExperimentStatus, UpMsg};
 use zoon::{*, format, eprintln, web_sys::HtmlElement};
-use std::array;
+use std::{array, mem, net::Ipv4Addr};
+
+
+#[derive(Clone, Debug)]
+pub struct DroneStatus {
+    id: String,
+    cameras: Vec<bytes::Bytes>,
+    ferbedienung_connection: Option<Ipv4Addr>,
+    ferbedienung_signal: u8,
+}
+
+impl DroneStatus {
+    fn new(id: String) -> Self {
+        Self {
+            id: id,
+            cameras: Default::default(),
+            ferbedienung_connection: Default::default(),
+            ferbedienung_signal: Default::default(),
+        }
+    }
+
+    fn update(mut self, update: shared::drone::Update) -> Self {
+        match update {
+            shared::drone::Update::Cameras(mut data) => 
+                mem::swap(&mut self.cameras, &mut data),
+            shared::drone::Update::FernbedienungConnection(mut connection) => 
+                mem::swap(&mut self.ferbedienung_connection, &mut connection),
+            shared::drone::Update::FernbedienungSignal(mut signal) => 
+                mem::swap(&mut self.ferbedienung_signal, &mut signal),
+        }
+        self
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PiPuckStatus {
+    id: String,
+    cameras: Vec<bytes::Bytes>,
+    ferbedienung_connection: Option<Ipv4Addr>,
+    ferbedienung_signal: u8,
+}
+
+impl PiPuckStatus {
+    fn new(id: String) -> Self {
+        Self {
+            id: id,
+            cameras: Default::default(),
+            ferbedienung_connection: Default::default(),
+            ferbedienung_signal: Default::default(),
+        }
+    }
+
+    fn update(mut self, update: shared::pipuck::Update) -> Self {
+        match update {
+            shared::pipuck::Update::Cameras(mut data) => 
+                mem::swap(&mut self.cameras, &mut data),
+            shared::pipuck::Update::FernbedienungConnection(mut connection) => 
+                mem::swap(&mut self.ferbedienung_connection, &mut connection),
+            shared::pipuck::Update::FernbedienungSignal(mut signal) => 
+                mem::swap(&mut self.ferbedienung_signal, &mut signal),
+        }
+        self
+    }
+}
+
 
 // https://getmdl.io/started/
 
@@ -213,31 +277,40 @@ fn experiment() -> &'static Mutable<ExperimentStatus> {
 fn connection() -> &'static Connection<UpMsg, DownMsg> {
     Connection::new(|down_message, _| {
         match down_message {
-            DownMsg::DroneUpdate(status) => {
+            DownMsg::UpdateDrone(id, update) => {
                 let mut lock = drones().lock_mut();
-                match lock.iter().position(|drone| drone.id == status.id) {
+                match lock.iter().position(|drone| drone.id == id) {
                     Some(index) => {
+                        let status = lock
+                            .get(index)
+                            .map(|inner| inner.clone().update(update))
+                            .unwrap();
                         lock.set_cloned(index, status);
                     }
                     None => {
-                        lock.push_cloned(status);
+                        lock.push_cloned(DroneStatus::new(id).update(update));
                     }
                 }
             },
-            DownMsg::PiPuckUpdate(status) => {
+            DownMsg::UpdatePiPuck(id, update) => {
                 let mut lock = pipucks().lock_mut();
-                match lock.iter().position(|pipuck| pipuck.id == status.id) {
+                match lock.iter().position(|pipuck| pipuck.id == id) {
                     Some(index) => {
+                        let status = lock
+                            .get(index)
+                            .map(|inner| inner.clone().update(update))
+                            .unwrap();
                         lock.set_cloned(index, status);
                     }
                     None => {
-                        lock.push_cloned(status);
+                        lock.push_cloned(PiPuckStatus::new(id).update(update));
                     }
                 }
             }
         };
     })
 }
+
 
 
 // fn jumbotron() -> RawHtmlEl {

@@ -1,12 +1,13 @@
+use anyhow::Context;
 use moon::*;
 use shared::{DownMsg, DroneStatus, PiPuckStatus, UpMsg};
 
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::{StreamMap, wrappers::ReceiverStream};
 use warp::ws;
 
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
-use futures::{FutureExt, StreamExt};
+use futures::{FutureExt, StreamExt, TryFutureExt, TryStreamExt, stream::FuturesUnordered};
 
 use tokio::{sync::{Mutex, mpsc, oneshot}, time::timeout};
 
@@ -49,7 +50,7 @@ pub enum Request {
 // down message (from backend to the client)
 // up message (from client to the backend)
 
-pub async fn run(socket: SocketAddr, mut rx: mpsc::Receiver<Request>, tx: &mpsc::Sender<arena::Request>) -> std::io::Result<()> {
+pub async fn run(socket: SocketAddr, mut rx: mpsc::Receiver<Request>, arena_tx: &mpsc::Sender<arena::Request>) -> anyhow::Result<()> {
     let frontend = || async {
         Frontend::new()
             .title(HTML_HEAD_TITLE)
@@ -66,16 +67,64 @@ pub async fn run(socket: SocketAddr, mut rx: mpsc::Receiver<Request>, tx: &mpsc:
             UpMsg::DroneAction(_, _) => todo!(),
         };
         // HACK
-        HACK.lock().await.unwrap().send(arena_request).await;
+        if let Some(ref hack) = *HACK.lock().await {
+            hack.send(arena_request).await;
+        }
         // HACK
     };
 
-    let config = Config::default();
+    let mut config = Config::default();
     config.port = socket.port();
     config.address = socket.ip();
 
-    let backend = start(config, frontend, handler, |_| {});
+    let backend = start(frontend, handler, config, |_| {});
     tokio::pin!(backend);
+
+    // the first thing we need to do here is get all robots and set up the update channels
+
+    /* subscribe to Pi-Puck updates */
+    let (pipuck_ids_tx, pipuck_ids_rx) = oneshot::channel();
+    arena_tx.send(arena::Request::GetPiPuckIds(pipuck_ids_tx)).await;
+    let update_streams = pipuck_ids_rx.await
+        .context("Could not get Pi-Puck identifers")?
+        .into_iter()
+        .map(|pipuck_id| {
+            let (update_tx, update_rx) = mpsc::channel(8);
+            let request = pipuck::Request::SetUpdateChannel(update_tx);
+            arena_tx
+                .send(arena::Request::ForwardPiPuckRequest(pipuck_id, request))
+                .map_ok(|_| (pipuck_id, ReceiverStream::new(update_rx)))
+                .map_err(|_| anyhow::anyhow!("Could not subscribe to Pi-Puck updates"))
+        })
+        .collect::<FuturesUnordered<_>>()
+        .try_collect::<Vec<_>>().await?;
+    let mut pipuck_update_stream_map = StreamMap::new();
+    for (id, update_stream) in update_streams {
+        pipuck_update_stream_map.insert(id, update_stream);
+    }
+
+    /* subscribe to drone updates */
+    let (drone_ids_tx, drone_ids_rx) = oneshot::channel();
+    arena_tx.send(arena::Request::GetDroneIds(drone_ids_tx)).await;
+    let update_streams = drone_ids_rx.await
+        .context("Could not get drone identifers")?
+        .into_iter()
+        .map(|drone_id| {
+            let (update_tx, update_rx) = mpsc::channel(8);
+            let request = drone::Request::SetUpdateChannel(update_tx);
+            arena_tx
+                .send(arena::Request::ForwardDroneRequest(drone_id, request))
+                .map_ok(|_| (drone_id, ReceiverStream::new(update_rx)))
+                .map_err(|_| anyhow::anyhow!("Could not subscribe to drone updates"))
+        })
+        .collect::<FuturesUnordered<_>>()
+        .try_collect::<Vec<_>>().await?;
+    let mut drone_update_stream_map = StreamMap::new();
+    for (id, update_stream) in update_streams {
+        drone_update_stream_map.insert(id, update_stream);
+    }
+
+    /* loop and select over the different tasks */
     loop {
         tokio::select! {
             result = &mut backend => break result,
@@ -87,6 +136,14 @@ pub async fn run(socket: SocketAddr, mut rx: mpsc::Receiver<Request>, tx: &mpsc:
                 },
                 /* None occurs when all senders have gone away (probably shutdown) */
                 None => break Ok(()),
+            },
+            Some((id, update)) = pipuck_update_stream_map.next() => {
+                let message = DownMsg::UpdatePiPuck(id, update);
+                sessions::broadcast_down_msg(&message, CorId::new()).await;
+            }
+            Some((id, update)) = drone_update_stream_map.next() => {
+                let message = DownMsg::UpdateDrone(id, update);
+                sessions::broadcast_down_msg(&message, CorId::new()).await;
             }
         }
     }

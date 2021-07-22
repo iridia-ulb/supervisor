@@ -15,6 +15,7 @@ zoon = { path = "../crates/zoon" }
 rand = { version = "0.8.3", features = ["small_rng", "getrandom"], default-features = false }
 getrandom = { version = "0.2", features = ["js"], default-features = false }
 shared = { path = "../shared", features = ["frontend"] }
+bytes = { version = "1.0" }
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = ['-Oz']

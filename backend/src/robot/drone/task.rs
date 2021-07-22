@@ -32,13 +32,29 @@ pub struct State {
     pub kernel_messages: Option<String>,
 }
 
+// these messages are sent on a channel for rendering in a UI
+pub enum Update {
+    // sends camera footage
+    Cameras(Vec<Bytes>),
+    // sends a list of actions
+    Actions(Vec<Action>),
+
+    // indicates whether the connection is up or down
+    FernbedienungConnection(Option<Ipv4Addr>),
+
+    // indicates the signal strength
+    FernbedienungSignal(u8)
+}
+
 pub enum Request {
     AssociateFernbedienung(fernbedienung::Device),
     AssociateXbee(xbee::Device),
 
-    // this message should probably be removed since state is now
-    // sent when it is updated
-    GetState(oneshot::Sender<State>),
+    // when this message is recv, all updates are sent and then
+    // updates are sent only on changes
+    StreamUpdates(mpsc::Sender<Update>),
+
+    
     GetId(oneshot::Sender<u8>),
     Execute(Action),
     ExperimentStart {

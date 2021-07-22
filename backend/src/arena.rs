@@ -61,7 +61,8 @@ pub enum Request {
     AddDroneSoftware(String, Vec<u8>),
     ClearDroneSoftware,
     CheckDroneSoftware(oneshot::Sender<(software::Checksums, software::Result<()>)>),
-    ForwardDroneAction(String, drone::Action),
+    ForwardDroneRequest(String, drone::Request),
+    GetDroneIds(oneshot::Sender<Vec<String>>),
     //ForwardDroneActionAll(drone::Action),
     ///GetDrones(oneshot::Sender<HashMap<String, drone::State>>),
 
@@ -69,7 +70,8 @@ pub enum Request {
     AddPiPuckSoftware(String, Vec<u8>),
     ClearPiPuckSoftware,
     CheckPiPuckSoftware(oneshot::Sender<(software::Checksums, software::Result<()>)>),
-    ForwardPiPuckAction(String, pipuck::Action),
+    ForwardPiPuckRequest(String, pipuck::Request),
+    GetPiPuckIds(oneshot::Sender<Vec<String>>),
     //ForwardPiPuckActionAll(pipuck::Action),
     //GetPiPucks(oneshot::Sender<HashMap<String, pipuck::State>>),
 }
@@ -174,12 +176,14 @@ pub async fn new(
                     log::error!("Could not respond with drone software check");
                 }
             },
-            Request::ForwardDroneAction(id, action) => match drones.get(&id) {
+            Request::ForwardDroneRequest(id, request) => match drones.get(&id) {
                 Some(instance) => {
-                    let _ = instance.request_tx
-                        .send(drone::Request::Execute(action)).await;
+                    let _ = instance.request_tx.send(request).await;
                 }
                 None => log::warn!("Could not find {}", id),
+            }
+            Request::GetDroneIds(callback) => {
+                callback.send(drones.keys().map(String::to_owned).collect::<Vec<_>>());
             }
             /* Pi-Puck requests */
             Request::AddPiPuckSoftware(path, contents) =>
@@ -190,12 +194,14 @@ pub async fn new(
                 let _ = callback
                     .send((pipuck_software.checksums(), pipuck_software.check_config()));
             },
-            Request::ForwardPiPuckAction(id, action) => match pipucks.get(&id) {
+            Request::ForwardPiPuckRequest(id, request) => match pipucks.get(&id) {
                 Some(instance) => {
-                    let _ = instance.request_tx
-                        .send(pipuck::Request::Execute(action)).await;
+                    let _ = instance.request_tx.send(request).await;
                 }
                 None => log::warn!("Could not find {}", id),
+            },
+            Request::GetPiPuckIds(callback) => {
+                callback.send(pipucks.keys().map(String::to_owned).collect::<Vec<_>>());
             }
         }
     }
