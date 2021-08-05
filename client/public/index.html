@@ -1,6 +1,5 @@
 <!doctype html>
 <html lang="en">
-
 <head>
   <meta charset="utf-8" />
   <title>Supervisor</title>
@@ -10,13 +9,8 @@
   <link rel="stylesheet" href="/styles/styles.css">
   <script src="/theme.js"></script>
   <script type="module">
-    import init, { launch } from './client.js';
-    async function run() {
-      await init();
-      launch();
-    }
-    run();
+    import init from './client.js';
+    init().then(client => client.launch());
   </script>
 </head>
-
 </html>

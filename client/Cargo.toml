@@ -1,8 +1,8 @@
 [package]
-name = "frontend"
+name = "client"
 repository = "https://github.com/iridia-ulb/supervisor"
 authors = ["Michael Allwright <mallwright@learnrobotics.io>"]
-description = "Supervisor Frontend"
+description = "WebAssembly client for the Supervisor"
 license = "MIT"
 edition = "2018"
 version = "0.1.0"
