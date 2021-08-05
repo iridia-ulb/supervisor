@@ -3,10 +3,10 @@ use std::fs::File;
 use std::io::BufWriter;
 use bytes::BytesMut;
 use serde::Serialize;
-use tokio::sync::{mpsc, oneshot};
-use uuid::Uuid;
-use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use std::time::{SystemTime, SystemTimeError};
+
+use tokio::sync::{mpsc, oneshot};
+use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -31,7 +31,7 @@ pub enum Request {
 #[derive(Debug, Serialize)]
 pub enum Event {
     //Optitrack {},
-    Robot(Uuid, Robot),
+    Robot(String, Robot),
     Broadcast(SocketAddr, crate::router::LuaType),
 }
 

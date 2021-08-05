@@ -2,10 +2,11 @@
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use software::Software;
-use std::{collections::HashMap, time::Duration};
-use futures::{StreamExt, TryStreamExt, stream::FuturesUnordered};
+use std::{collections::HashMap};
 use log;
+
 use tokio::sync::{mpsc, oneshot};
+use futures::{TryStreamExt, stream::FuturesUnordered};
 
 use crate::robot::{pipuck, drone};
 use crate::software;

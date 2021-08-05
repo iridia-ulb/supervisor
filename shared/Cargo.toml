@@ -1,17 +1,12 @@
 [package]
-version = "0.1.0"
 name = "shared"
 repository = "https://github.com/iridia-ulb/supervisor"
-authors = ["Michael Allwright <allsey87@gmail.com>"]
-description = "Supervisor Sommon"
+authors = ["Michael Allwright <mallwright@learnrobotics.io>"]
+description = "Supervisor Common"
 license = "MIT"
 edition = "2018"
+version = "0.1.0"
 
 [dependencies]
-moonlight = { path = "../crates/moonlight" }
 base64 = { version = "0.13" }
 bytes = { version = "1.0" }
-
-[features]
-frontend = ["moonlight/frontend"]
-backend = ["moonlight/backend"]

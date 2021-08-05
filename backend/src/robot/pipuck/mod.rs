@@ -4,10 +4,8 @@ use tokio::{sync::mpsc, task::JoinHandle};
 mod task;
 
 pub use task::{
-    Action, Error, Receiver, Request, Sender, State
+    Action, Error, Receiver, Request, Sender, Update
 };
-
-pub use shared::pipuck::Update;
 
 #[derive(Debug)]
 pub struct Descriptor {
@@ -26,8 +24,8 @@ pub struct Instance {
 impl Instance {
     pub fn new(descriptor: Descriptor) -> Self {
         let (request_tx, request_rx) = mpsc::channel(8);
-        let task = tokio::spawn(task::new(request_rx));       
-        Self { 
+        let task = tokio::spawn(task::new(request_rx));
+        Self {
             descriptor,
             request_tx,
             task

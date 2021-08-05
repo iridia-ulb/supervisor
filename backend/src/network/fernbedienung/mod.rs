@@ -1,19 +1,16 @@
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
-
 use std::collections::HashMap;
 
 use bytes::BytesMut;
 use macaddr::MacAddr6;
-use tokio_stream::wrappers::ReceiverStream;
-use tokio::sync::{mpsc, oneshot};
-use uuid::Uuid;
-use futures::{self, FutureExt, StreamExt, stream::FuturesUnordered};
-
-use tokio::net::TcpStream;
-use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
-use tokio_serde::{SymmetricallyFramed, formats::SymmetricalJson};
 use regex::Regex;
+
+use futures::{self, FutureExt, StreamExt, stream::FuturesUnordered};
+use tokio::{net::TcpStream, sync::{mpsc, oneshot}};
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_serde::{SymmetricallyFramed, formats::SymmetricalJson};
+use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
 mod protocol;
 

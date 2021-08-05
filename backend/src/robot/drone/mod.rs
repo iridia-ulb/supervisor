@@ -1,5 +1,5 @@
 use macaddr::MacAddr6;
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{self, sync::mpsc, task::JoinHandle};
 
 mod task;
 mod codec;
@@ -7,8 +7,6 @@ mod codec;
 pub use task::{
     Action, Error, Receiver, Request, Sender, State
 };
-
-pub use shared::drone::Update;
 
 #[derive(Debug)]
 pub struct Descriptor {

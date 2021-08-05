@@ -6,7 +6,7 @@
     </supervisor>
     <robots network="192.168.1.0/24">
         <drone  id="drone1"
-                xbee_macaddr="FF:FF:FF:FF:FF:FF:FF:FF"
+                xbee_macaddr="FF:FF:FF:FF:FF:FF"
                 upcore_macaddr="FFFFFF:FFFFFF"
                 optitrack_id="1" />
         <pipuck id="pipuck1" 

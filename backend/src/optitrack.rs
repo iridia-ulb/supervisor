@@ -1,5 +1,4 @@
 use bytes::{Buf, BytesMut};
-use futures::StreamExt;
 use natnet_decode::{
     NatNet,
     NatNetResponse,
@@ -13,11 +12,10 @@ use std::{
     },
     net::Ipv4Addr,
 };
+
+use futures::StreamExt;
 use tokio::net::UdpSocket;
-use tokio_util::{
-    udp::UdpFramed,
-    codec::Decoder,
-};
+use tokio_util::{udp::UdpFramed, codec::Decoder};
 
 #[derive(Debug)]
 struct NatNetCodec {

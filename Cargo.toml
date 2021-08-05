@@ -3,11 +3,6 @@ members = [
     "frontend",
     "backend",
     "shared",
-    "crates/mzoon",
-    "crates/moon",
-    "crates/zoon",
-    "crates/moonlight",
-    "crates/static_ref_macro"
 ]
 
 [profile.release]

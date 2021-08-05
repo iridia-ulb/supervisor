@@ -1,14 +1,13 @@
 use bytes::{BytesMut, Buf, BufMut};
 use bitvec::view::BitView;
+use macaddr::MacAddr6;
+use std::{collections::HashMap, convert::TryFrom, net::SocketAddr, ops::BitXor, time::Duration};
+use std::net::Ipv4Addr;
 
 use futures::{SinkExt, stream::FuturesUnordered};
-use macaddr::MacAddr6;
 use tokio::{net::UdpSocket, sync::{oneshot, mpsc}, time::Instant};
 use tokio_stream::StreamExt;
 use tokio_util::{codec::{Decoder, Encoder}, udp::UdpFramed};
-
-use std::{collections::HashMap, convert::TryFrom, net::SocketAddr, ops::BitXor, time::Duration};
-use std::net::Ipv4Addr;
 
 const CONFIG_CMD_LEN: usize = 12;
 const CONFIG_CMD_HDR: u16 = 0x4242;

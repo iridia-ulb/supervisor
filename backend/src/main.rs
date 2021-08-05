@@ -1,8 +1,8 @@
 use std::{net::SocketAddr, path::{Path, PathBuf}};
 use ipnet::Ipv4Net;
-use tokio::sync::mpsc;
 use structopt::StructOpt;
 use anyhow::Context;
+use tokio::sync::mpsc;
 
 mod arena;
 mod robot;
@@ -42,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
         pipucks,
         drones,
     } = parse_config(&options.config)
-            .context("Could not parse configuration file")?;
+            .context(format!("Could not parse configuration file {:?}", options.config))?;
     /* create a task for tracking the robots and state of the experiment */
     let (arena_requests_tx, arena_requests_rx) = mpsc::channel(8);
     let (journal_requests_tx, journal_requests_rx) = mpsc::channel(8);
@@ -74,8 +74,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::pin!(network_task);
     tokio::pin!(webui_task);
     tokio::pin!(sigint_task);
-
-    let mut router_task = tokio::spawn(router_task);
+    tokio::pin!(router_task);
     /* no point in implementing automatic browser opening */
     /* https://bugzilla.mozilla.org/show_bug.cgi?id=1512438 */
     let server_addr = format!("http://{}/", webui_socket);
