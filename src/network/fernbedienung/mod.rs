@@ -11,6 +11,7 @@ use tokio::{net::TcpStream, sync::{mpsc, oneshot}};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_serde::{SymmetricallyFramed, formats::SymmetricalJson};
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
+use uuid::Uuid;
 
 mod protocol;
 
@@ -61,7 +62,7 @@ pub struct Device {
 impl Drop for Device {
     fn drop(&mut self) {
         if let Some(return_addr_tx) = self.return_addr_tx.take() {
-            return_addr_tx.send(self.addr);
+            let _ = return_addr_tx.send(self.addr);
         }
     }
 }
@@ -89,10 +90,12 @@ enum Request {
 
 impl Device {
     pub async fn new(addr: Ipv4Addr, return_addr_tx: oneshot::Sender<Ipv4Addr>) -> Result<Self> {
-        let stream = TcpStream::connect((addr, 17653)).await
-            .map_err(|error| Error::IoError(error))?;
-        let (local_request_tx, mut local_request_rx) = mpsc::channel(32);
+        let (local_request_tx, mut local_request_rx) = mpsc::channel(8);
         tokio::spawn(async move {
+            let stream = match TcpStream::connect((addr, 17653)).await {
+                Ok(stream) => stream,
+                Err(_) => return,
+            };
             /* requests and responses from remote */
             let (read, write) = tokio::io::split(stream);
             let remote_requests: RemoteRequests = SymmetricallyFramed::new(

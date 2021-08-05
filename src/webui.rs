@@ -1,9 +1,13 @@
 use anyhow::Context;
+use headers::HeaderMapExt;
 use std::{net::SocketAddr, time::Duration};
 
 use tokio_stream::{StreamMap, wrappers::ReceiverStream};
 use futures::{FutureExt, StreamExt, TryFutureExt, TryStreamExt, stream::FuturesUnordered};
 use tokio::{self, sync::{Mutex, mpsc, oneshot}, time::timeout};
+
+use warp::{Filter};
+use warp::reply::Response;
 
 use crate::{
     arena,
@@ -18,9 +22,62 @@ pub struct Request;
 // down message (from backend to the client)
 // up message (from client to the backend)
 
-pub async fn run(socket: SocketAddr, mut rx: mpsc::Receiver<Request>, arena_tx: &mpsc::Sender<arena::Request>) -> anyhow::Result<()> {
-    // TODO add warp code
+const CLIENT_WASM_BYTES: &'static [u8] = include_bytes!(env!("CLIENT_WASM"));
+const CLIENT_JS_BYTES: &'static [u8] = include_bytes!(env!("CLIENT_JS"));
 
+pub async fn run(
+    server_addr: SocketAddr,
+    mut rx: mpsc::Receiver<Request>,
+    arena_tx: mpsc::Sender<arena::Request>
+) {
+    let wasm_route = warp::path("client_bg.wasm")
+        .and(warp::path::end())
+        .map(|| warp::reply::with_header(CLIENT_WASM_BYTES, "content-type", "application/wasm"));
+        // .map(|| {
+        //     let mut response = Response::new(CLIENT_WASM_BYTES.into());
+        //     let headers = response.headers_mut();
+        //     headers.typed_insert(headers::ContentLength(CLIENT_WASM_BYTES.len() as u64));
+        //     headers.typed_insert(headers::ContentType::octet_stream());
+        //     response
+        // });
+    let js_route = warp::path("client.js")
+        .and(warp::path::end())
+        .map(|| warp::reply::with_header(CLIENT_JS_BYTES, "content-type", "application/javascript"));
+        // .map(|| {
+        //     let mut response = Response::new(CLIENT_JS_BYTES.into());
+        //     let headers = response.headers_mut();
+        //     headers.typed_insert(headers::ContentLength(CLIENT_JS_BYTES.len() as u64));
+        //     headers.typed_insert(headers::ContentType::octet_stream());
+        //     response
+        // });
+    let arena_channel = warp::any().map(move || arena_tx.clone());
+    let socket_route = warp::path("socket")
+        .and(warp::path::end())
+        .and(warp::ws())
+        .and(arena_channel)
+        .map(|websocket: warp::ws::Ws, arena_tx| {
+            websocket.on_upgrade(move |socket| handle_client(socket, arena_tx))
+        });
+    
+    let static_route = warp::get()
+        .and(static_dir::static_dir!("client/public/"));
+    //    .and(warp::fs::dir("/home/mallwright/Workspace/mns-supervisor/static"));
+    warp::serve(js_route
+        .or(wasm_route)
+        .or(socket_route)
+        .or(static_route))
+        .run(server_addr).await
+}
+
+async fn handle_client(
+    ws: warp::ws::WebSocket,
+    arena_tx: mpsc::Sender<arena::Request>
+) {}
+
+async fn handle_client2(
+    ws: warp::ws::WebSocket,
+    arena_tx: mpsc::Sender<arena::Request>
+) -> anyhow::Result<()> {
     /* subscribe to Pi-Puck updates */
     let (pipuck_ids_tx, pipuck_ids_rx) = oneshot::channel();
     arena_tx.send(arena::Request::GetPiPuckIds(pipuck_ids_tx)).await
@@ -68,16 +125,14 @@ pub async fn run(socket: SocketAddr, mut rx: mpsc::Receiver<Request>, arena_tx: 
     /* loop and select over the different tasks */   
     loop {
         tokio::select! {
-            // run the backends
-            //result = &mut backend => break result.context("Backend task stopped"),
             // response to requests from the arena?
-            result = rx.recv() => match result {
-                Some(request) => match request {
-                    _ => todo!()
-                },
-                /* None occurs when all senders have gone away (i.e., shutdown) */
-                None => break Ok(()),
-            },
+            // result = rx.recv() => match result {
+            //     Some(request) => match request {
+            //         _ => todo!()
+            //     },
+            //     /* None occurs when all senders have gone away (i.e., shutdown) */
+            //     None => break Ok(()),
+            // },
             // handle state changes from pipucks
             Some((id, update)) = pipuck_update_stream_map.next() => {
                 // send id and update

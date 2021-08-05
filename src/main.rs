@@ -67,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
     /* create the backend task */
     let webui_socket = webui_socket
         .ok_or(anyhow::anyhow!("A socket for the web interface must be provided"))?;
-    let webui_task = webui::run(webui_socket, webui_requests_rx, &arena_requests_tx);
+    let webui_task = webui::run(webui_socket, webui_requests_rx, arena_requests_tx.clone());
     /* pin the futures so that they can be polled via &mut */
     tokio::pin!(arena_task);
     tokio::pin!(journal_task);

@@ -13,7 +13,7 @@ pub enum UpMessage {
 }
 
 // backend to frontend, status updates
-#[derive(Serialize, Deserialize, Debug)]
+//#[derive(Serialize, Deserialize, Debug)]
 pub enum DownMessage {
     // broadcast, trigger by change in actual drone
     UpdateDrone(String, drone::Update),

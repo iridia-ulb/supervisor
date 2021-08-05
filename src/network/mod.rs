@@ -42,7 +42,7 @@ pub async fn new(network: Ipv4Net, arena_request_tx: &mpsc::Sender<arena::Reques
                     probe_fernbedienung_queue.push(probe_fernbedienung(return_addr_tx, addr));
                 },
                 Err(_) => {
-                    log::error!("IPV4 address not returned");
+                    log::error!("xbee::Device did not return its IP address");
                 }
             },
             Some(result) = probe_fernbedienung_queue.next() => {
@@ -57,7 +57,7 @@ pub async fn new(network: Ipv4Net, arena_request_tx: &mpsc::Sender<arena::Reques
                     probe_xbee_queue.push(probe_xbee(return_addr_tx, addr));
                 },
                 Err(_) => {
-                    log::error!("IPV4 address not returned");
+                    log::error!("fernbedienung::Device did not return its IP address");
                 }
             },
             else => break

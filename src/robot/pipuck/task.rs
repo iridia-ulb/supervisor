@@ -225,82 +225,82 @@ pub async fn new(mut request_rx: Receiver) {
 }
 
 
-async fn handle_experiment_start<'d>(uuid: Uuid,
-                                     device: &'d fernbedienung::Device,
-                                     software: software::Software,
-                                     journal: mpsc::Sender<journal::Request>) 
-    -> Result<(impl Future<Output = fernbedienung::Result<()>> + 'd, oneshot::Sender<()>), Error> {
-    /* extract the name of the config file */
-    let (argos_config, _) = software.argos_config()?;
-    let argos_config = argos_config.to_owned();
-    /* get the relevant ip address of this machine */
-    let message_router_addr = async {
-        let socket = UdpSocket::bind("0.0.0.0:0").await?;
-        socket.connect((device.addr, 80)).await?;
-        socket.local_addr().map(|mut socket| {
-            socket.set_port(4950);
-            socket
-        })
-    }.await?;
+// async fn handle_experiment_start<'d>(uuid: Uuid,
+//                                      device: &'d fernbedienung::Device,
+//                                      software: software::Software,
+//                                      journal: mpsc::Sender<journal::Request>) 
+//     -> Result<(impl Future<Output = fernbedienung::Result<()>> + 'd, oneshot::Sender<()>), Error> {
+//     /* extract the name of the config file */
+//     let (argos_config, _) = software.argos_config()?;
+//     let argos_config = argos_config.to_owned();
+//     /* get the relevant ip address of this machine */
+//     let message_router_addr = async {
+//         let socket = UdpSocket::bind("0.0.0.0:0").await?;
+//         socket.connect((device.addr, 80)).await?;
+//         socket.local_addr().map(|mut socket| {
+//             socket.set_port(4950);
+//             socket
+//         })
+//     }.await?;
 
-    /* upload the control software */
-    let software_upload_path = device.create_temp_dir()
-        .map_err(|error| Error::FernbedienungError(error))
-        .and_then(|path: String| software.0.into_iter()
-            .map(|(filename, contents)| {
-                let path = PathBuf::from(&path);
-                let filename = PathBuf::from(&filename);
-                device.upload(path, filename, contents)
-            })
-            .collect::<FuturesUnordered<_>>()
-            .map_err(|error| Error::FernbedienungError(error))
-            .try_collect::<Vec<_>>()
-            .map_ok(|_| path)
-        ).await?;
+//     /* upload the control software */
+//     let software_upload_path = device.create_temp_dir()
+//         .map_err(|error| Error::FernbedienungError(error))
+//         .and_then(|path: String| software.0.into_iter()
+//             .map(|(filename, contents)| {
+//                 let path = PathBuf::from(&path);
+//                 let filename = PathBuf::from(&filename);
+//                 device.upload(path, filename, contents)
+//             })
+//             .collect::<FuturesUnordered<_>>()
+//             .map_err(|error| Error::FernbedienungError(error))
+//             .try_collect::<Vec<_>>()
+//             .map_ok(|_| path)
+//         ).await?;
 
-    /* create a remote instance of ARGoS3 */
-    let process = fernbedienung::Process {
-        target: "argos3".into(),
-        working_dir: Some(software_upload_path.into()),
-        args: vec![
-            "--config".to_owned(), argos_config.to_owned(),
-            "--router".to_owned(), message_router_addr.to_string(),
-            "--id".to_owned(), uuid.to_string(),
-        ],
-    };
+//     /* create a remote instance of ARGoS3 */
+//     let process = fernbedienung::Process {
+//         target: "argos3".into(),
+//         working_dir: Some(software_upload_path.into()),
+//         args: vec![
+//             "--config".to_owned(), argos_config.to_owned(),
+//             "--router".to_owned(), message_router_addr.to_string(),
+//             "--id".to_owned(), uuid.to_string(),
+//         ],
+//     };
 
-    /* channel for terminating ARGoS */
-    let (terminate_tx, terminate_rx) = oneshot::channel();
+//     /* channel for terminating ARGoS */
+//     let (terminate_tx, terminate_rx) = oneshot::channel();
 
-    /* create future for running ARGoS */
-    let argos_task_future = async move {
-        /* channels for routing stdout and stderr to the journal */
-        let (stdout_tx, mut stdout_rx) = mpsc::channel(8);
-        let (stderr_tx, mut stderr_rx) = mpsc::channel(8);
-        /* run argos remotely */
-        let argos = device.run(process, Some(terminate_rx), None, Some(stdout_tx), Some(stderr_tx));
-        tokio::pin!(argos);
-        loop {
-            tokio::select! {
-                Some(data) = stdout_rx.recv() => {
-                    let message = journal::Robot::StandardOutput(data);
-                    let event = journal::Event::Robot(uuid, message);
-                    let request = journal::Request::Record(event);
-                    if let Err(error) = journal.send(request).await {
-                        log::warn!("Could not forward standard output of {} to journal: {}", uuid, error);
-                    }
-                },
-                Some(data) = stderr_rx.recv() => {
-                    let message = journal::Robot::StandardError(data);
-                    let event = journal::Event::Robot(uuid, message);
-                    let request = journal::Request::Record(event);
-                    if let Err(error) = journal.send(request).await {
-                        log::warn!("Could not forward standard error of {} to journal: {}", uuid, error);
-                    }
-                },
-                exit_status = &mut argos => break exit_status,
-            }
-        }
-    };
-    Ok((argos_task_future, terminate_tx)) 
-}
+//     /* create future for running ARGoS */
+//     let argos_task_future = async move {
+//         /* channels for routing stdout and stderr to the journal */
+//         let (stdout_tx, mut stdout_rx) = mpsc::channel(8);
+//         let (stderr_tx, mut stderr_rx) = mpsc::channel(8);
+//         /* run argos remotely */
+//         let argos = device.run(process, Some(terminate_rx), None, Some(stdout_tx), Some(stderr_tx));
+//         tokio::pin!(argos);
+//         loop {
+//             tokio::select! {
+//                 Some(data) = stdout_rx.recv() => {
+//                     let message = journal::Robot::StandardOutput(data);
+//                     let event = journal::Event::Robot(uuid.to_string(), message);
+//                     let request = journal::Request::Record(event);
+//                     if let Err(error) = journal.send(request).await {
+//                         log::warn!("Could not forward standard output of {} to journal: {}", uuid, error);
+//                     }
+//                 },
+//                 Some(data) = stderr_rx.recv() => {
+//                     let message = journal::Robot::StandardError(data);
+//                     let event = journal::Event::Robot(uuid.to_string(), message);
+//                     let request = journal::Request::Record(event);
+//                     if let Err(error) = journal.send(request).await {
+//                         log::warn!("Could not forward standard error of {} to journal: {}", uuid, error);
+//                     }
+//                 },
+//                 exit_status = &mut argos => break exit_status,
+//             }
+//         }
+//     };
+//     Ok((argos_task_future, terminate_tx)) 
+// }

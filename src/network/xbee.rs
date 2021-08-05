@@ -131,7 +131,7 @@ pub struct Device {
 impl Drop for Device {
     fn drop(&mut self) {
         if let Some(return_addr_tx) = self.return_addr_tx.take() {
-            return_addr_tx.send(self.addr);
+            let _ = return_addr_tx.send(self.addr);
         }
     }
 }
@@ -227,9 +227,12 @@ impl Device {
     pub async fn new(addr: Ipv4Addr, return_addr_tx: oneshot::Sender<Ipv4Addr>) -> Result<Device> {
         type RemoteRequest = (Instant, Option<oneshot::Sender<Result<BytesMut>>>, Command, usize);
         /* bind to a random port on any interface */
-        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
         let (request_tx, mut request_rx) = mpsc::channel(8);
         tokio::spawn(async move {
+            let socket = match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await {
+                Ok(socket) => socket,
+                Err(_) => return,
+            };
             let socket_addr = SocketAddr::new(addr.into(), 0xBEE);
             let mut framed = UdpFramed::new(socket, Codec);
             let mut remote_requests: HashMap<u8, RemoteRequest> = HashMap::new();
