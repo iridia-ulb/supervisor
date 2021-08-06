@@ -2,9 +2,9 @@ use anyhow::Context;
 use headers::HeaderMapExt;
 use std::{net::SocketAddr, time::Duration};
 
-use tokio_stream::{StreamMap, wrappers::ReceiverStream};
-use futures::{FutureExt, StreamExt, TryFutureExt, TryStreamExt, stream::FuturesUnordered};
-use tokio::{self, sync::{Mutex, mpsc, oneshot}, time::timeout};
+use tokio_stream::{StreamMap, wrappers::{BroadcastStream, errors::BroadcastStreamRecvError}};
+use futures::{FutureExt, SinkExt, StreamExt, TryFutureExt, TryStreamExt, stream::FuturesUnordered};
+use tokio::{self, sync::{broadcast, mpsc, oneshot}, time::timeout};
 
 use warp::{Filter};
 use warp::reply::Response;
@@ -22,34 +22,22 @@ pub struct Request;
 // down message (from backend to the client)
 // up message (from client to the backend)
 
+/* embed the client js and wasm into this binary */
 const CLIENT_WASM_BYTES: &'static [u8] = include_bytes!(env!("CLIENT_WASM"));
 const CLIENT_JS_BYTES: &'static [u8] = include_bytes!(env!("CLIENT_JS"));
 
 pub async fn run(
     server_addr: SocketAddr,
-    mut rx: mpsc::Receiver<Request>,
+    mut rx: mpsc::Receiver<Request>, // maybe unused?
     arena_tx: mpsc::Sender<arena::Request>
 ) {
+    /* start the server */
     let wasm_route = warp::path("client_bg.wasm")
         .and(warp::path::end())
         .map(|| warp::reply::with_header(CLIENT_WASM_BYTES, "content-type", "application/wasm"));
-        // .map(|| {
-        //     let mut response = Response::new(CLIENT_WASM_BYTES.into());
-        //     let headers = response.headers_mut();
-        //     headers.typed_insert(headers::ContentLength(CLIENT_WASM_BYTES.len() as u64));
-        //     headers.typed_insert(headers::ContentType::octet_stream());
-        //     response
-        // });
     let js_route = warp::path("client.js")
         .and(warp::path::end())
         .map(|| warp::reply::with_header(CLIENT_JS_BYTES, "content-type", "application/javascript"));
-        // .map(|| {
-        //     let mut response = Response::new(CLIENT_JS_BYTES.into());
-        //     let headers = response.headers_mut();
-        //     headers.typed_insert(headers::ContentLength(CLIENT_JS_BYTES.len() as u64));
-        //     headers.typed_insert(headers::ContentType::octet_stream());
-        //     response
-        // });
     let arena_channel = warp::any().map(move || arena_tx.clone());
     let socket_route = warp::path("socket")
         .and(warp::path::end())
@@ -58,93 +46,128 @@ pub async fn run(
         .map(|websocket: warp::ws::Ws, arena_tx| {
             websocket.on_upgrade(move |socket| handle_client(socket, arena_tx))
         });
-    
     let static_route = warp::get()
         .and(static_dir::static_dir!("client/public/"));
-    //    .and(warp::fs::dir("/home/mallwright/Workspace/mns-supervisor/static"));
-    warp::serve(js_route
-        .or(wasm_route)
-        .or(socket_route)
-        .or(static_route))
-        .run(server_addr).await
+    warp::serve(js_route.or(wasm_route).or(socket_route).or(static_route))
+        .run(server_addr).await   
 }
 
 async fn handle_client(
     ws: warp::ws::WebSocket,
     arena_tx: mpsc::Sender<arena::Request>
-) {}
-
-async fn handle_client2(
-    ws: warp::ws::WebSocket,
-    arena_tx: mpsc::Sender<arena::Request>
-) -> anyhow::Result<()> {
-    /* subscribe to Pi-Puck updates */
-    let (pipuck_ids_tx, pipuck_ids_rx) = oneshot::channel();
-    arena_tx.send(arena::Request::GetPiPuckIds(pipuck_ids_tx)).await
-        .map_err(|_| anyhow::anyhow!("Could not request Pi-Puck identifers"))?;
-    let update_streams = pipuck_ids_rx.await
-        .context("Could not get Pi-Puck identifers")?
-        .into_iter()
-        .map(|pipuck_id| {
-            let (update_tx, update_rx) = mpsc::channel(8);
-            let request = pipuck::Request::SetUpdateChannel(update_tx);
-            arena_tx
-                .send(arena::Request::ForwardPiPuckRequest(pipuck_id.clone(), request))
-                .map_ok(|_| (pipuck_id, ReceiverStream::new(update_rx)))
-                .map_err(|_| anyhow::anyhow!("Could not subscribe to Pi-Puck updates"))
-        })
-        .collect::<FuturesUnordered<_>>()
-        .try_collect::<Vec<_>>().await?;
-    let mut pipuck_update_stream_map = StreamMap::new();
-    for (id, update_stream) in update_streams {
-        pipuck_update_stream_map.insert(id, update_stream);
-    }
-
+) {
     /* subscribe to drone updates */
-    let (drone_ids_tx, drone_ids_rx) = oneshot::channel();
-    arena_tx.send(arena::Request::GetDroneIds(drone_ids_tx)).await
-        .map_err(|_| anyhow::anyhow!("Could not request drone identifers"))?;
-    let update_streams = drone_ids_rx.await
-        .context("Could not get drone identifers")?
-        .into_iter()
-        .map(|drone_id| {
-            let (update_tx, update_rx) = mpsc::channel(8);
-            let request = drone::Request::SetUpdateChannel(update_tx);
-            arena_tx
-                .send(arena::Request::ForwardDroneRequest(drone_id.clone(), request))
-                .map_ok(|_| (drone_id, ReceiverStream::new(update_rx)))
-                .map_err(|_| anyhow::anyhow!("Could not subscribe to drone updates"))
-        })
-        .collect::<FuturesUnordered<_>>()
-        .try_collect::<Vec<_>>().await?;
-    let mut drone_update_stream_map = StreamMap::new();
-    for (id, update_stream) in update_streams {
-        drone_update_stream_map.insert(id, update_stream);
-    }
-
-    /* loop and select over the different tasks */   
+    let mut drone_updates = match subscribe_drone_updates(&arena_tx).await {
+        Ok(stream) => stream
+        // TODO update be that we missed messages, report and continue
+            .map(|(id, update)| shared::DownMessage::UpdateDrone(id, update))
+            .map(|message| bincode::serialize(&message)
+                .context("Could not serialize drone message"))
+            .map_ok(|encoded| warp::ws::Message::binary(encoded)),
+        Err(error) => {
+            log::error!("Could not initialize client: {}", error);
+            return;
+        }
+    };
+    /* subscribe to Pi-Puck updates */
+    let mut pipuck_updates = match subscribe_pipuck_updates(&arena_tx).await {
+        Ok(stream) => stream
+        // TODO update be that we missed messages, report and continue
+            .map(|(id, update)| shared::DownMessage::UpdatePiPuck(id, update))
+            .map(|message| bincode::serialize(&message)
+                .context("Could not serialize Pi-Puck message"))
+            .map_ok(|encoded| warp::ws::Message::binary(encoded)),
+        Err(error) => {
+            log::error!("Could not initialize client: {}", error);
+            return;
+        }
+    };
+    /* response to client requests and forward updates to client */
+    let (mut websocket_tx, mut websocket_rx) = ws.split();
     loop {
         tokio::select! {
-            // response to requests from the arena?
-            // result = rx.recv() => match result {
-            //     Some(request) => match request {
-            //         _ => todo!()
-            //     },
-            //     /* None occurs when all senders have gone away (i.e., shutdown) */
-            //     None => break Ok(()),
-            // },
             // handle state changes from pipucks
-            Some((id, update)) = pipuck_update_stream_map.next() => {
-                // send id and update
-            }
-            // handle state changes from drones
-            Some((id, update)) = drone_update_stream_map.next() => {
-                // send id and update
+            // result around update is from the broadcast stream
+            Some(message) = websocket_rx.next() => {
+                
+            },
+            /* send pipuck updates to client */
+            Some(result) = pipuck_updates.next() => match result {
+                Ok(message) => {
+                    if let Err(error) = websocket_tx.send(message).await {
+                        log::error!("Could not send message to client: {}", error);
+                    }
+                },
+                Err(error) => log::error!("{}", error),                
+            },
+            /* send drone updates to client */
+            Some(result) = drone_updates.next() => match result {
+                Ok(message) => {
+                    if let Err(error) = websocket_tx.send(message).await {
+                        log::error!("Could not send message to client: {}", error);
+                    }
+                },
+                Err(error) => log::error!("{}", error),                
             }
         }
     }
 }
 
+async fn subscribe_drone_updates(
+    arena_tx: &mpsc::Sender<arena::Request>
+) -> anyhow::Result<StreamMap<String, BroadcastStream<drone::Update>>> {
+    let (callback_tx, callback_rx) = oneshot::channel();
+    let update_streams = arena_tx.send(arena::Request::GetDroneIds(callback_tx))
+        .map_err(|_| anyhow::anyhow!("Could not request drone identifers"))
+        .and_then(|_| callback_rx
+            .map(|result| result.context("Could not get drone identifers")))
+        .and_then(|drone_ids| drone_ids.into_iter()
+            .map(|drone_id| {
+                let (callback_tx, callback_rx) = oneshot::channel();
+                let request = drone::Request::Subscribe(callback_tx);
+                arena_tx.send(arena::Request::ForwardDroneRequest(drone_id.clone(), request))
+                    .map_err(|_| anyhow::anyhow!("Could not request drone updates"))
+                    .and_then(|_| callback_rx
+                        .map(|result| result.context("Could not subscribe to drone updates"))
+                        .map_ok(|receiver| (drone_id, BroadcastStream::new(receiver))))
+            })
+            .collect::<FuturesUnordered<_>>()
+            .try_collect::<Vec<_>>()
+        ).await?;
+    let mut drone_update_stream_map = StreamMap::new();
+    for (id, update_stream) in update_streams {
+        drone_update_stream_map.insert(id, update_stream);
+    }
+    Ok(drone_update_stream_map)
+}
+
+async fn subscribe_pipuck_updates(
+    arena_tx: &mpsc::Sender<arena::Request>
+) -> anyhow::Result<StreamMap<String, BroadcastStream<pipuck::Update>>> {
+    let (callback_tx, callback_rx) = oneshot::channel();
+    let update_streams = arena_tx.send(arena::Request::GetPiPuckIds(callback_tx))
+        .map_err(|_| anyhow::anyhow!("Could not request Pi-Puck identifers"))
+        .and_then(|_| callback_rx
+            .map(|result| result.context("Could not get Pi-Puck identifers")))
+        .and_then(|pipuck_ids| pipuck_ids.into_iter()
+            .map(|pipuck_id| {
+                let (callback_tx, callback_rx) = oneshot::channel();
+                let request = pipuck::Request::Subscribe(callback_tx);
+                arena_tx.send(arena::Request::ForwardPiPuckRequest(pipuck_id.clone(), request))
+                    .map_err(|_| anyhow::anyhow!("Could not request Pi-Puck updates"))
+                    .and_then(|_| callback_rx
+                        .map(|result| result.context("Could not subscribe to Pi-Puck updates"))
+                        .map_ok(|receiver| (pipuck_id, BroadcastStream::new(receiver))))
+            })
+            .collect::<FuturesUnordered<_>>()
+            .try_collect::<Vec<_>>()
+        ).await?;
+    let mut pipuck_update_stream_map = StreamMap::new();
+    for (id, update_stream) in update_streams {
+        pipuck_update_stream_map.insert(id, update_stream);
+    }
+    Ok(pipuck_update_stream_map)
+}
 
 // the logic behind UI has changed significantly. Updates should now be sent only when there is something to update
 // this means that the drone actor itself should instigate the update, perhaps by sending a message.

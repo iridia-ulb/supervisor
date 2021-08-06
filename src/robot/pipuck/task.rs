@@ -3,7 +3,7 @@ use uuid::Uuid;
 use std::{convert::TryInto, num::TryFromIntError, path::PathBuf, time::Duration};
 use std::result::Result;
 
-use tokio::{net::UdpSocket, sync::{mpsc, oneshot}};
+use tokio::{net::UdpSocket, sync::{broadcast, mpsc, oneshot}};
 use futures::{Future, FutureExt, Stream, StreamExt, TryFutureExt, TryStreamExt, stream::{FuturesUnordered}};
 use tokio_stream;
 
@@ -32,7 +32,7 @@ pub enum Request {
 
     // when this message is recv, all updates are sent and then
     // updates are sent only on changes
-    SetUpdateChannel(mpsc::Sender<Update>),
+    Subscribe(oneshot::Sender<broadcast::Receiver<Update>>),
 
 
 
@@ -96,7 +96,6 @@ pub enum Error {
 // let poll_upcore_link_strength_task = future::pending().left_future();
 
 enum FernbedienungRequest {
-    SetUpdateChannel(mpsc::Sender<Update>),
     StartCameraStream,
     StopCameraStream,
     //StartArgos,
@@ -120,7 +119,8 @@ fn link_strength_stream<'dev>(
 
 async fn fernbedienung(
     device: fernbedienung::Device,
-    mut rx: mpsc::Receiver<FernbedienungRequest>
+    mut rx: mpsc::Receiver<FernbedienungRequest>,
+    updates_tx: broadcast::Sender<Update>
 ) -> anyhow::Result<()> {
     /* link strength */
     let link_strength_stream = link_strength_stream(&device)
@@ -131,34 +131,18 @@ async fn fernbedienung(
     /* handle for the camera stream */
     let mut cameras_stream: tokio_stream::StreamMap<String, _> =
         tokio_stream::StreamMap::new();
-    let mut updates_tx: Option<mpsc::Sender<Update>>
-        = Default::default();
     loop {
         tokio::select! {
             Some((camera, result)) = cameras_stream.next() => {
                 let result: reqwest::Result<bytes::Bytes> = result;
-                if let Some(ref updates_tx) = updates_tx {
-                    let update = Update::Camera(camera, result.map_err(|e| e.to_string()));
-                    let _ = updates_tx.send(update).await;
-                }
+                let update = Update::Camera { camera, result: result.map_err(|e| e.to_string()) };
+                let _ = updates_tx.send(update);
             },
             Some(update) = link_strength_stream_throttled.next() => {
-                if let Some(ref updates_tx) = updates_tx {
-                    let _ = updates_tx.send(update).await;
-                }
+                let _ = updates_tx.send(update);
             },
             recv = rx.recv() => match recv {
                 Some(request) => match request {
-                    FernbedienungRequest::SetUpdateChannel(channel) => {
-                        // TODO revisit the logic here, what updates need to be sent?
-                        let updates = vec![];
-                        let _ = updates
-                            .into_iter()
-                            .map(|update| channel.send(update))
-                            .collect::<FuturesUnordered<_>>()
-                            .try_collect::<Vec<_>>().await;
-                        updates_tx.replace(channel);
-                    },
                     FernbedienungRequest::StartCameraStream => {
                         cameras_stream.clear();
                         for &(camera, width, height, port) in PIPUCK_CAMERAS_CONFIG {
@@ -186,29 +170,25 @@ async fn fernbedienung(
 
 pub async fn new(mut request_rx: Receiver) {
     let fernbedienung_task = futures::future::pending().left_future();
+    /* fernbedienung_tx is for forwarding requests to the fernbedienung task */
     let mut fernbedienung_tx = Option::default();
-    let mut updates_tx: Option<mpsc::Sender<Update>> = Default::default();
+    /* updates_tx is for sending changes in state to subscribers such as the webui */
+    let (updates_tx, _) = broadcast::channel(16);
     tokio::pin!(fernbedienung_task);
 
+    // TODO: for a clean shutdown we may want to consider the case where updates_tx hangs up
     loop {
         tokio::select! {
             Some(request) = request_rx.recv() => match request {
                 Request::AssociateFernbedienung(device) => {
                     let (tx, rx) = mpsc::channel(8);
-                    if let Some(ref updates_tx) = updates_tx {
-                        tx.send(FernbedienungRequest::SetUpdateChannel(updates_tx.clone())).await;
-                    }
                     fernbedienung_tx = Some(tx);
-                    fernbedienung_task.set(fernbedienung(device, rx).right_future());
+                    fernbedienung_task.set(fernbedienung(device, rx, updates_tx.clone()).right_future());
                 },
-                Request::SetUpdateChannel(tx) => {
-                    /* send all update variants (not associated with fernbedienung) */
-                    /* add the channel to the fernbedienung process if it is active */                    
-                    if let Some(ref fernbedienung_tx) = fernbedienung_tx {
-                        let request = FernbedienungRequest::SetUpdateChannel(tx.clone());
-                        let _ = fernbedienung_tx.send(request).await;
-                    }
-                    updates_tx.replace(tx);
+                Request::Subscribe(callback) => {
+                    /* note that upon subscribing all updates should be sent to ensure
+                       that new clients are in sync */
+                    callback.send(updates_tx.subscribe());
                 },
                 Request::ExperimentStart { software, journal, callback } => log::warn!("not implemented"),
                 Request::ExperimentStop => log::warn!("not implemented"),

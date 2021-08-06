@@ -1,10 +1,11 @@
 pub mod drone;
 pub mod pipuck;
 
+use serde::{Serialize, Deserialize};
 // ------ UpMsg ------
 
 // frontend to backend,
-//#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub enum UpMessage {
     //send me all drones/pipucks
     Refresh,
@@ -13,7 +14,7 @@ pub enum UpMessage {
 }
 
 // backend to frontend, status updates
-//#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub enum DownMessage {
     // broadcast, trigger by change in actual drone
     UpdateDrone(String, drone::Update),
@@ -21,7 +22,7 @@ pub enum DownMessage {
 }
 
 
-//#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ExperimentStatus {
     pub pipucks: u32,
     pub drones: u32,

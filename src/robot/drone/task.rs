@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, net::Ipv4Addr, path::PathBuf, sync::Arc, time::Duration};
 
 use futures::{Future, FutureExt, StreamExt, TryFutureExt, TryStreamExt, future::{self, Either}, stream::{FuturesOrdered, FuturesUnordered}};
-use tokio::{self, net::{TcpStream, UdpSocket}, sync::{mpsc, oneshot}};
+use tokio::{self, net::{TcpStream, UdpSocket}, sync::{broadcast, mpsc, oneshot}};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::codec::FramedRead;
 
@@ -40,7 +40,7 @@ pub enum Request {
     AssociateXbee(xbee::Device),
     // when this message is recv, all variants of Update must be sent
     // and then updates are sent only on changes
-    SetUpdateChannel(mpsc::Sender<Update>),
+    Subscribe(oneshot::Sender<broadcast::Receiver<Update>>),
 
     
     

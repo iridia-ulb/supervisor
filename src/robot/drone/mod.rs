@@ -5,7 +5,7 @@ mod task;
 mod codec;
 
 pub use task::{
-    Action, Error, Receiver, Request, Sender, State
+    Action, Error, Receiver, Request, Sender, State, Update
 };
 
 #[derive(Debug)]
