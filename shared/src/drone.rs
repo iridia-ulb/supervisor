@@ -11,9 +11,22 @@ pub enum Update {
     },
     // indicates whether the connection is up or down
     FernbedienungConnection(Option<Ipv4Addr>),
-    // indicates the signal strength
-    FernbedienungSignal(u8)
+    // indicates the fernbedienung signal strength
+    FernbedienungSignal(Result<i32, String>),
+    // indicates the xbee signal strength
+    XbeeSignal(Result<i32, String>)
 }
 
-
-
+#[derive(Debug, Deserialize, Serialize)]
+pub enum Action {
+    UpCorePowerOn,
+    UpCoreHalt,
+    UpCorePowerOff,
+    UpCoreReboot,
+    PixhawkPowerOn,
+    PixhawkPowerOff,
+    StartCameraStream,
+    StopCameraStream,
+    GetKernelMessages,
+    Identify,
+}

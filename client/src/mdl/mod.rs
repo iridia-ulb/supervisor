@@ -10,7 +10,7 @@ pub mod tabs;
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = componentHandler, js_name = upgradeElement)]
-    fn upgrade_element(element: HtmlElement);
+    pub fn upgrade_element(element: HtmlElement);
 }
 
 // #[wasm_bindgen]

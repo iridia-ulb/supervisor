@@ -1,10 +1,8 @@
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
-use std::{convert::TryInto, num::TryFromIntError, path::PathBuf, time::Duration};
+use std::{convert::TryInto, num::TryFromIntError, time::Duration};
 use std::result::Result;
 
-use tokio::{net::UdpSocket, sync::{broadcast, mpsc, oneshot}};
-use futures::{Future, FutureExt, Stream, StreamExt, TryFutureExt, TryStreamExt, stream::{FuturesUnordered}};
+use tokio::{sync::{broadcast, mpsc, oneshot}};
+use futures::{Future, FutureExt, Stream, StreamExt, TryFutureExt, TryStreamExt};
 use tokio_stream;
 
 use crate::network::fernbedienung;
@@ -12,7 +10,7 @@ use crate::network::fernbedienung_ext::MjpegStreamerStream;
 use crate::journal;
 use crate::software;
 
-pub use shared::pipuck::Update;
+pub use shared::pipuck::{Action, Update};
 
 //const PIPUCK_BATT_FULL_MV: f32 = 4050.0;
 //const PIPUCK_BATT_EMPTY_MV: f32 = 3500.0;
@@ -46,21 +44,6 @@ pub enum Request {
 
 pub type Sender = mpsc::Sender<Request>;
 pub type Receiver = mpsc::Receiver<Request>;
-
-//
-#[derive(Copy, Clone, Serialize, Deserialize, Debug, PartialEq)]
-pub enum Action {
-    #[serde(rename = "Halt Raspberry Pi")]
-    RpiHalt,
-    #[serde(rename = "Reboot Raspberry Pi")]
-    RpiReboot,
-    #[serde(rename = "Start camera stream")]
-    StartCameraStream,
-    #[serde(rename = "Stop camera stream")]
-    StopCameraStream,
-    #[serde(rename = "Get kernel messages")]
-    GetKernelMessages,
-}
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -105,13 +88,11 @@ enum FernbedienungRequest {
 
 fn link_strength_stream<'dev>(
     device: &'dev fernbedienung::Device
-) -> impl Stream<Item = Result<u64, String>> + 'dev {
+) -> impl Stream<Item = Result<i32, String>> + 'dev {
     async_stream::stream! {
         loop {
-            let strength: Result<u64, String> = device.link_strength().await
-                .map_err(|error| error.to_string())
-                .and_then(|value| value.try_into()
-                    .map_err(|error: TryFromIntError| error.to_string()));
+            let strength: Result<i32, String> = device.link_strength().await
+                .map_err(|error| error.to_string());
             yield strength;
         }
     }

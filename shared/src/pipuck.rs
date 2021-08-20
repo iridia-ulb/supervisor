@@ -12,8 +12,15 @@ pub enum Update {
     // indicates whether the connection is up or down
     FernbedienungConnection(Option<Ipv4Addr>),
     // indicates the signal strength
-    FernbedienungSignal(Result<u64, String>)
+    FernbedienungSignal(Result<i32, String>)
 }
 
-
+#[derive(Debug, Deserialize, Serialize)]
+pub enum Action {
+    RpiHalt,
+    RpiReboot,
+    StartCameraStream,
+    StopCameraStream,
+    GetKernelMessages,
+}
 

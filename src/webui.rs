@@ -56,11 +56,20 @@ async fn handle_client(
     ws: warp::ws::WebSocket,
     arena_tx: mpsc::Sender<arena::Request>
 ) {
-    /* subscribe to drone updates */
-    let mut drone_updates = match subscribe_drone_updates(&arena_tx).await {
+    /* subscribe to drone updates and map them to websocket messages */
+    let drone_updates = match subscribe_drone_updates(&arena_tx).await {
         Ok(stream) => stream
-        // TODO update be that we missed messages, report and continue
-            .map(|(id, update)| shared::DownMessage::UpdateDrone(id, update))
+            .filter_map(|(id, update)| async {
+                match update {
+                    Ok(update) => {
+                        Some(shared::DownMessage::UpdateDrone(id, update))
+                    }
+                    Err(BroadcastStreamRecvError::Lagged(count)) => {
+                        log::warn!("Client missed {} messages for {}", count, id);
+                        None
+                    }
+                }
+            })
             .map(|message| bincode::serialize(&message)
                 .context("Could not serialize drone message"))
             .map_ok(|encoded| warp::ws::Message::binary(encoded)),
@@ -69,11 +78,20 @@ async fn handle_client(
             return;
         }
     };
-    /* subscribe to Pi-Puck updates */
-    let mut pipuck_updates = match subscribe_pipuck_updates(&arena_tx).await {
+    /* subscribe to Pi-Puck updates and map them to websocket messages */
+    let pipuck_updates = match subscribe_pipuck_updates(&arena_tx).await {
         Ok(stream) => stream
-        // TODO update be that we missed messages, report and continue
-            .map(|(id, update)| shared::DownMessage::UpdatePiPuck(id, update))
+            .filter_map(|(id, update)| async {
+                match update {
+                    Ok(update) => {
+                        Some(shared::DownMessage::UpdatePiPuck(id, update))
+                    }
+                    Err(BroadcastStreamRecvError::Lagged(count)) => {
+                        log::warn!("Client missed {} messages for {}", count, id);
+                        None
+                    }
+                }
+            })
             .map(|message| bincode::serialize(&message)
                 .context("Could not serialize Pi-Puck message"))
             .map_ok(|encoded| warp::ws::Message::binary(encoded)),
@@ -83,22 +101,37 @@ async fn handle_client(
         }
     };
     /* response to client requests and forward updates to client */
+    tokio::pin!(pipuck_updates);
+    tokio::pin!(drone_updates);
     let (mut websocket_tx, mut websocket_rx) = ws.split();
+
+
     loop {
         tokio::select! {
-            // handle state changes from pipucks
-            // result around update is from the broadcast stream
-            Some(message) = websocket_rx.next() => {
-                
+            /* requests from client */
+            Some(rx) = websocket_rx.next() => match rx {
+                Ok(message) => {
+                    if message.is_close() {
+                        break;
+                    }
+                    let message = bincode::deserialize::<shared::UpMessage>(message.as_bytes());
+                    // TODO
+                    log::info!("{:?}", message);
+                }
+                Err(error) => {
+                    log::warn!("{}", error);
+                }
             },
             /* send pipuck updates to client */
-            Some(result) = pipuck_updates.next() => match result {
-                Ok(message) => {
-                    if let Err(error) = websocket_tx.send(message).await {
-                        log::error!("Could not send message to client: {}", error);
-                    }
-                },
-                Err(error) => log::error!("{}", error),                
+            Some(result) = pipuck_updates.next() => {
+                match result {
+                    Ok(message) => {
+                        if let Err(error) = websocket_tx.send(message).await {
+                            log::error!("Could not send message to client: {}", error);
+                        }
+                    },
+                    Err(error) => log::error!("{}", error),
+                }
             },
             /* send drone updates to client */
             Some(result) = drone_updates.next() => match result {

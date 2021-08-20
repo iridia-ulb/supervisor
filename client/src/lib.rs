@@ -3,13 +3,51 @@ use yew::services::websocket::{WebSocketService, WebSocketStatus, WebSocketTask}
 use yew::services::ConsoleService;
 use wasm_bindgen::prelude::*;
 
-pub mod mdl;
+mod mdl;
+
+struct Drone {
+    id: String,
+}
+
+impl Drone {
+    fn new(id: String) -> Self {
+        Self { id }
+    }
+
+    fn update(&mut self, update: shared::drone::Update) {
+
+    }
+}
 
 struct UserInterface {
     link: ComponentLink<Self>,
     socket: Option<WebSocketTask>,
+    drones: Vec<Drone>,
 }
 
+impl UserInterface {
+    fn view_drone(&self, drone: &Drone) -> Html {
+        html! {
+            <mdl::card::Card
+                class=classes!("mdl-shadow--4dp", "mdl-cell", "mdl-cell--4-col")>
+                <mdl::card::title::Title class=classes!("mdl-card--expand","mdl-color--grey-300")>
+                    <mdl::card::title_text::TitleText text={ drone.id.clone() }/>
+                </mdl::card::title::Title>
+                <mdl::card::supporting_text::SupportingText
+                    class=classes!("mdl-color-text--grey-600")>
+                    { "Non dolore elit adipisicing ea reprehenderit consectetur culpa." }
+                </mdl::card::supporting_text::SupportingText>
+                <mdl::card::actions::Actions
+                    class=classes!("mdl-card--border")>
+                    <mdl::button::Button label="click" class=classes!("mdl-js-button") />
+                    <mdl::button::Button label="here" class=classes!("mdl-js-button") />
+                </mdl::card::actions::Actions>
+            </mdl::card::Card>
+        }
+    }
+}
+
+#[derive(Debug)]
 enum Msg {
 
     // TODO: handle disconnects by matching against WebSocketStatus::Closed or WebSocketStatus::Error
@@ -44,20 +82,50 @@ impl Component for UserInterface {
                     ConsoleService::log("Could not connect to socket");
                     None
                 }
-            }
+            },
+            drones: Default::default(),
         }
     }
 
-    fn update(&mut self, msg: Self::Message) -> ShouldRender {
-        match msg {
-            Msg::Data(data) => {
-                ConsoleService::log(&format!("{:?}", data));
-            }
+    // pub enum DownMessage {
+    //     // broadcast, trigger by change in actual drone
+    //     UpdateDrone(String, drone::Update),
+    //     UpdatePiPuck(String, pipuck::Update),
+    // }
+    
+
+    fn update(&mut self, message: Self::Message) -> ShouldRender {
+        match message {
+            Msg::Data(data) => match data {
+                Ok(data) => match bincode::deserialize::<shared::DownMessage>(&data) {
+                    Ok(decoded) => match decoded {
+                        shared::DownMessage::UpdateDrone(id, update) => {
+                            match self.drones.iter_mut().find(|drone| drone.id == id) {
+                                Some(drone) => {
+                                    drone.update(update);
+                                }
+                                None => {
+                                    let mut drone = Drone::new(id);
+                                    drone.update(update);
+                                    self.drones.push(drone);
+                                }
+                            }
+                        },
+                        shared::DownMessage::UpdatePiPuck(id, update) => {},
+                    },
+                    Err(error) => {
+                        ConsoleService::log(&format!("1. {:?}", error));
+                    }
+                },
+                Err(err) => {
+                    ConsoleService::log(&format!("2. {:?}", err));
+                },
+            },
             Msg::Notifcation(notification) => {
                 ConsoleService::log(&format!("{:?}", notification));
             }
         }
-        false
+        true
     }
 
 
@@ -78,8 +146,7 @@ impl Component for UserInterface {
                     <mdl::tabs::Tabs
                         class=classes!("mdl-js-tabs")>
                         <mdl::tabs::tab_bar::TabBar>
-                            <mdl::tabs::tab::Tab
-                                class=classes!("is-active")
+                            <mdl::tabs::tab::Tab class=classes!("is-active")
                                 target="#drones"
                                 icon="settings_ethernet"
                                 label="Drones" />
@@ -92,24 +159,9 @@ impl Component for UserInterface {
                                 icon="play_arrow"
                                 label="Experiment" />
                         </mdl::tabs::tab_bar::TabBar >
-                        <mdl::tabs::panel::Panel id="drones"
-                            class=classes!("is-active")>
+                        <mdl::tabs::panel::Panel id="drones" class=classes!("is-active")>
                             <mdl::grid::Grid>
-                                <mdl::card::Card
-                                    class=classes!("mdl-shadow--4dp", "mdl-cell", "mdl-cell--4-col")>
-                                    <mdl::card::title::Title class=classes!("mdl-card--expand","mdl-color--grey-300")>
-                                        <mdl::card::title_text::TitleText text="Hello world"/>
-                                    </mdl::card::title::Title>
-                                    <mdl::card::supporting_text::SupportingText
-                                        class=classes!("mdl-color-text--grey-600")>
-                                        { "Non dolore elit adipisicing ea reprehenderit consectetur culpa." }
-                                    </mdl::card::supporting_text::SupportingText>
-                                    <mdl::card::actions::Actions
-                                        class=classes!("mdl-card--border")>
-                                        <mdl::button::Button label="click" class=classes!("mdl-js-button") />
-                                        <mdl::button::Button label="here" class=classes!("mdl-js-button") />
-                                    </mdl::card::actions::Actions>
-                                </mdl::card::Card>
+                                { for self.drones.iter().map(|drone| self.view_drone(drone)) }
                             </mdl::grid::Grid>
                         </mdl::tabs::panel::Panel>
                         <mdl::tabs::panel::Panel id="pipucks">

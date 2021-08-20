@@ -77,7 +77,6 @@ pub enum Request {
     //GetPiPucks(oneshot::Sender<HashMap<String, pipuck::State>>),
 }
 
-// TODO the table of known robots should be passed here
 pub async fn new(
     mut arena_request_rx: mpsc::Receiver<Request>,
     journal_requests_tx: &mpsc::Sender<journal::Request>,

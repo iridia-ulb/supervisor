@@ -4,7 +4,7 @@ use tokio::{sync::mpsc, task::JoinHandle};
 mod task;
 
 pub use task::{
-    Action, Error, Receiver, Request, Sender, Update
+    Error, Receiver, Request, Sender, Update
 };
 
 #[derive(Debug)]
