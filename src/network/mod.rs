@@ -32,7 +32,7 @@ pub async fn new(network: Ipv4Net, arena_request_tx: &mpsc::Sender<arena::Reques
         tokio::select!{
             Some(result) = probe_xbee_queue.next() => {
                 if let Ok((mac_addr, device)) = result {
-                    let _ = arena_request_tx.send(arena::Request::AddXbee(device, mac_addr));
+                    let _ = arena_request_tx.send(arena::Request::AddXbee(device, mac_addr)).await;
                 }
             },
             Some(result) = xbee_returned_addrs.next() => match result {
@@ -47,7 +47,7 @@ pub async fn new(network: Ipv4Net, arena_request_tx: &mpsc::Sender<arena::Reques
             },
             Some(result) = probe_fernbedienung_queue.next() => {
                 if let Ok((mac_addr, device)) = result {
-                    let _ = arena_request_tx.send(arena::Request::AddFernbedienung(device, mac_addr));
+                    let _ = arena_request_tx.send(arena::Request::AddFernbedienung(device, mac_addr)).await;
                 }
             },
             Some(result) = fernbedienung_returned_addrs.next() => match result {

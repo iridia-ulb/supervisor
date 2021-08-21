@@ -42,9 +42,12 @@ pub enum LuaType {
 fn decode_lua_usertype(buf: &mut impl Buf) -> Result<LuaType> {
     if buf.has_remaining() {
         match buf.get_u8() {
-            LUA_TUSERDATA_VECTOR2 => decode_lua_vector2(buf),
-            LUA_TUSERDATA_VECTOR3 => decode_lua_vector3(buf),
-            LUA_TUSERDATA_QUATERNION => decode_lua_quaternion(buf),
+            LUA_TUSERDATA_VECTOR2 => decode_lua_vector2(buf)
+                .context("Could not decode vector2"),
+            LUA_TUSERDATA_VECTOR3 => decode_lua_vector3(buf)
+                .context("Could not decode vector3"),
+            LUA_TUSERDATA_QUATERNION => decode_lua_quaternion(buf)
+                .context("Could not decode quaternion"),
             _ => Err(anyhow::anyhow!("Could not decode Lua user type"))
         }
     }

@@ -1,6 +1,6 @@
 
 use anyhow::{Result, Context};
-use futures::StreamExt;
+use futures::{StreamExt, TryFutureExt};
 use serde::{Deserialize, Serialize};
 use software::Software;
 use std::{collections::HashMap};
@@ -82,13 +82,15 @@ pub async fn new(
             Request::Refresh => {
                 todo!("Request all devices to sync there state");
             }
-            Request::AddXbee(device, macaddr) => match &associate_xbee_device(macaddr, &drones).await[..] {
-                [instance] => {
-                    let request = drone::Request::AssociateXbee(device);
-                    let _ = instance.request_tx.send(request).await;
-                },
-                [_, _, ..] => log::error!("Fernbedienung {} is associated with multiple drones", macaddr),
-                [] => log::warn!("Fernbedienung {} is not associated with any drone", macaddr),
+            Request::AddXbee(device, macaddr) => {
+                match &associate_xbee_device(macaddr, &drones).await[..] {
+                    [instance] => {
+                        let request = drone::Request::AssociateXbee(device);
+                        let _ = instance.request_tx.send(request).await;
+                    },
+                    [_, _, ..] => log::error!("Xbee {} is associated with multiple drones", macaddr),
+                    [] => log::warn!("Xbee {} is not associated with any drone", macaddr),
+                }
             },
             Request::AddFernbedienung(device, macaddr) => {
                 /* first: attempt to associate fernbedienung with a drone */
@@ -190,13 +192,17 @@ async fn associate_xbee_device(
         .map(|instance| {
             let (callback_tx, callback_rx) = oneshot::channel();
             let request = drone::Request::GetDescriptor(callback_tx);
-            let _ = instance.request_tx.send(request);
-            async move { (callback_rx.await, instance) }
+            instance.request_tx
+                .send(request)
+                .map_err(|_| anyhow::anyhow!("Could not request descriptor"))
+                .and_then(move |_| callback_rx
+                    .map_err(|_| anyhow::anyhow!("Could not recieve descriptor"))
+                    .map_ok(move |descriptor| (descriptor, instance)))
         })
         .collect::<FuturesUnordered<_>>()
-        .filter_map(|(response, instance)| async move {
-            if let Ok(xbee_macaddr) = response.map(|descriptor| descriptor.xbee_macaddr) {
-                if xbee_macaddr == macaddr {
+        .filter_map(|response| async move {
+            if let Ok((descriptor, instance)) = response {
+                if descriptor.xbee_macaddr == macaddr {
                     return Some(instance)
                 }
             }
@@ -214,13 +220,17 @@ async fn associate_fernbedienung_device_with_drone(
         .map(|instance| {
             let (callback_tx, callback_rx) = oneshot::channel();
             let request = drone::Request::GetDescriptor(callback_tx);
-            let _ = instance.request_tx.send(request);
-            async move { (callback_rx.await, instance) }
+            instance.request_tx
+                .send(request)
+                .map_err(|_| anyhow::anyhow!("Could not request descriptor"))
+                .and_then(move |_| callback_rx
+                    .map_err(|_| anyhow::anyhow!("Could not recieve descriptor"))
+                    .map_ok(move |descriptor| (descriptor, instance)))
         })
         .collect::<FuturesUnordered<_>>()
-        .filter_map(|(response, instance)| async move {
-            if let Ok(upcore_macaddr) = response.map(|descriptor| descriptor.upcore_macaddr) {
-                if upcore_macaddr == macaddr {
+        .filter_map(|response| async move {
+            if let Ok((descriptor, instance)) = response {
+                if descriptor.upcore_macaddr == macaddr {
                     return Some(instance)
                 }
             }
@@ -231,20 +241,24 @@ async fn associate_fernbedienung_device_with_drone(
 
 async fn associate_fernbedienung_device_with_pipuck(
     macaddr: macaddr::MacAddr6,
-    drones: &HashMap<String, pipuck::Instance>,
+    pipucks: &HashMap<String, pipuck::Instance>,
 ) -> Vec<&pipuck::Instance> {
-    drones
+    pipucks
         .values()
         .map(|instance| {
             let (callback_tx, callback_rx) = oneshot::channel();
             let request = pipuck::Request::GetDescriptor(callback_tx);
-            let _ = instance.request_tx.send(request);
-            async move { (callback_rx.await, instance) }
+            instance.request_tx
+                .send(request)
+                .map_err(|_| anyhow::anyhow!("Could not request descriptor"))
+                .and_then(move |_| callback_rx
+                    .map_err(|_| anyhow::anyhow!("Could not recieve descriptor"))
+                    .map_ok(move |descriptor| (descriptor, instance)))
         })
         .collect::<FuturesUnordered<_>>()
-        .filter_map(|(response, instance)| async move {
-            if let Ok(rpi_macaddr) = response.map(|descriptor| descriptor.rpi_macaddr) {
-                if rpi_macaddr == macaddr {
+        .filter_map(|response| async move {
+            if let Ok((descriptor, instance)) = response {
+                if descriptor.rpi_macaddr == macaddr {
                     return Some(instance)
                 }
             }
