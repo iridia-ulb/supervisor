@@ -10,7 +10,7 @@ use crate::network::fernbedienung_ext::MjpegStreamerStream;
 use crate::journal;
 use crate::software;
 
-pub use shared::pipuck::{Action, Update};
+pub use shared::pipuck::{Action, Descriptor, Update};
 
 //const PIPUCK_BATT_FULL_MV: f32 = 4050.0;
 //const PIPUCK_BATT_EMPTY_MV: f32 = 3500.0;
@@ -32,14 +32,14 @@ pub enum Request {
     // updates are sent only on changes
     Subscribe(oneshot::Sender<broadcast::Receiver<Update>>),
 
+    GetDescriptor(oneshot::Sender<Descriptor>),
 
-
-    ExperimentStart {
+    StartExperiment {
         software: software::Software,
         journal: mpsc::Sender<journal::Request>,
         callback: oneshot::Sender<Result<(), Error>>
     },
-    ExperimentStop,
+    StopExperiment,
 }
 
 pub type Sender = mpsc::Sender<Request>;
@@ -149,7 +149,7 @@ async fn fernbedienung(
 
 // TODO: I think actions and requests can be merged
 
-pub async fn new(mut request_rx: Receiver) {
+pub async fn new(mut request_rx: Receiver, descriptor: Descriptor) {
     let fernbedienung_task = futures::future::pending().left_future();
     /* fernbedienung_tx is for forwarding requests to the fernbedienung task */
     let mut fernbedienung_tx = Option::default();
@@ -166,13 +166,19 @@ pub async fn new(mut request_rx: Receiver) {
                     fernbedienung_tx = Some(tx);
                     fernbedienung_task.set(fernbedienung(device, rx, updates_tx.clone()).right_future());
                 },
+                Request::GetDescriptor(callback) => {
+                    let _ = callback.send(descriptor.clone());
+                },
                 Request::Subscribe(callback) => {
                     /* note that upon subscribing all updates should be sent to ensure
                        that new clients are in sync */
-                    callback.send(updates_tx.subscribe());
+                    if let Ok(_) = callback.send(updates_tx.subscribe()) {
+                        let _ = updates_tx.send(Update::Descriptor(descriptor.clone()));
+                    }
                 },
-                Request::ExperimentStart { software, journal, callback } => log::warn!("not implemented"),
-                Request::ExperimentStop => log::warn!("not implemented"),
+                Request::StartExperiment { software, journal, callback } => log::warn!("not implemented"),
+                Request::StopExperiment => log::warn!("not implemented"),
+                
             },
             result = &mut fernbedienung_task => {
                 fernbedienung_tx = None;

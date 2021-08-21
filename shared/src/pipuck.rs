@@ -3,16 +3,11 @@ use bytes::Bytes;
 use serde::{Serialize, Deserialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub enum Update {
-    // sends camera footage
-    Camera {
-        camera: String,
-        result: Result<Bytes, String>
-    },
-    // indicates whether the connection is up or down
-    FernbedienungConnection(Option<Ipv4Addr>),
-    // indicates the signal strength
-    FernbedienungSignal(Result<i32, String>)
+pub struct Descriptor {
+    pub id: String,
+    pub rpi_macaddr: macaddr::MacAddr6,
+    pub optitrack_id: Option<i32>,
+    pub apriltag_id: Option<u8>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -23,4 +18,21 @@ pub enum Action {
     StopCameraStream,
     GetKernelMessages,
 }
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum Update {
+    // sends camera footage
+    Camera {
+        camera: String,
+        result: Result<Bytes, String>
+    },
+    // describes static information about Pi-Puck
+    Descriptor(Descriptor),
+    // indicates whether the connection is up or down
+    FernbedienungConnection(Option<Ipv4Addr>),
+    // indicates the signal strength
+    FernbedienungSignal(Result<i32, String>)
+}
+
+
 

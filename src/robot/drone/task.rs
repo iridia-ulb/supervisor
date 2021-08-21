@@ -7,7 +7,7 @@ use crate::network::{fernbedienung, fernbedienung_ext::MjpegStreamerStream, xbee
 use crate::journal;
 use crate::software;
 
-pub use shared::drone::{Action, Update};
+pub use shared::drone::{Action, Descriptor, Update};
 
 const DRONE_BATT_FULL_MV: f32 = 4050.0;
 const DRONE_BATT_EMPTY_MV: f32 = 3500.0;
@@ -23,18 +23,20 @@ pub enum Request {
     AssociateFernbedienung(fernbedienung::Device),
     AssociateXbee(xbee::Device),
 
+
+    GetDescriptor(oneshot::Sender<Descriptor>),
     // when this message is recv, all updates are sent and then
     // updates are sent only on changes
     Subscribe(oneshot::Sender<broadcast::Receiver<Update>>),
 
 
 
-    ExperimentStart {
+    StartExperiment {
         software: software::Software,
         journal: mpsc::Sender<journal::Request>,
         callback: oneshot::Sender<Result<(), Error>>
     },
-    ExperimentStop,
+    StopExperiment,
 }
 
 
@@ -174,7 +176,7 @@ async fn fernbedienung(
     Ok(())
 }
 
-pub async fn new(mut request_rx: Receiver) {
+pub async fn new(mut request_rx: Receiver, descriptor: Descriptor) {
     /* fernbedienung task state */
     let fernbedienung_task = futures::future::pending().left_future();
     let mut fernbedienung_tx = Option::default();
@@ -201,15 +203,18 @@ pub async fn new(mut request_rx: Receiver) {
                     xbee_tx = Some(tx);
                     xbee_task.set(xbee(device, rx, updates_tx.clone()).right_future());
                 },
+                Request::GetDescriptor(callback) => {
+                    let _ = callback.send(descriptor.clone());
+                },
                 Request::Subscribe(callback) => {
                     /* note that upon subscribing all updates should be sent to ensure
                        that new clients are in sync */
-                    let _ = callback.send(updates_tx.subscribe());
-                    // Test
-                    let _ = updates_tx.send(Update::FernbedienungSignal(Ok(42)));
+                    if let Ok(_) = callback.send(updates_tx.subscribe()) {
+                        let _ = updates_tx.send(Update::Descriptor(descriptor.clone()));
+                    }
                 },
-                Request::ExperimentStart { software, journal, callback } => log::warn!("not implemented"),
-                Request::ExperimentStop => log::warn!("not implemented"),
+                Request::StartExperiment { software, journal, callback } => log::warn!("not implemented"),
+                Request::StopExperiment => log::warn!("not implemented"),
             },
             result = &mut fernbedienung_task => {
                 fernbedienung_tx = None;

@@ -1,5 +1,6 @@
 
-use anyhow::Context;
+use anyhow::{Result, Context};
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use software::Software;
 use std::{collections::HashMap};
@@ -14,25 +15,6 @@ use crate::journal;
 use crate::network::{xbee, fernbedienung};
 use crate::webui;
 
-
-#[derive(thiserror::Error, Debug)]
-pub enum Error {
-    #[error("PiPuck {0} error: {1}")]
-    PiPuckError(String, pipuck::Error),
-    
-    #[error("Drone {0} error: {1}")]
-    DroneError(String, drone::Error),
-
-    #[error(transparent)]
-    JournalError(#[from] journal::Error),
-    
-    #[error(transparent)]
-    SoftwareError(#[from] software::Error),
-
-    #[error(transparent)]
-    FernbedienungError(#[from] fernbedienung::Error),
-}
-
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum Action {
     #[serde(rename = "Start Experiment")]
@@ -40,8 +22,6 @@ pub enum Action {
     #[serde(rename = "Stop Experiment")]
     StopExperiment,
 }
-
-pub type Result<T> = std::result::Result<T, Error>;
 
 enum State {
     Standby,
@@ -102,38 +82,30 @@ pub async fn new(
             Request::Refresh => {
                 todo!("Request all devices to sync there state");
             }
-            Request::AddXbee(device, macaddr) => {
-                let instance = drones
-                    .values()
-                    .find(|instance| instance.descriptor.xbee_macaddr == macaddr);
-                if let Some(instance) = instance {
+            Request::AddXbee(device, macaddr) => match &associate_xbee_device(macaddr, &drones).await[..] {
+                [instance] => {
                     let request = drone::Request::AssociateXbee(device);
                     let _ = instance.request_tx.send(request).await;
-                }
-                else {
-                    log::warn!("Xbee {} detected but not specified in the configuration file", macaddr)
-                }
+                },
+                [_, _, ..] => log::error!("Fernbedienung {} is associated with multiple drones", macaddr),
+                [] => log::warn!("Fernbedienung {} is not associated with any drone", macaddr),
             },
             Request::AddFernbedienung(device, macaddr) => {
-                /* first: attempt to associate it with a drone */
-                let instance = drones
-                    .values()
-                    .find(|instance| instance.descriptor.upcore_macaddr == macaddr);
-                if let Some(instance) = instance {
-                    let request = drone::Request::AssociateFernbedienung(device);
-                    let _ = instance.request_tx.send(request).await;
-                }
-                else {
-                    /* second: attempt to associate it with a pipuck */
-                    let instance = pipucks
-                        .values()
-                        .find(|instance| instance.descriptor.rpi_macaddr == macaddr);
-                    if let Some(instance) = instance {
-                        let request = pipuck::Request::AssociateFernbedienung(device);
+                /* first: attempt to associate fernbedienung with a drone */
+                match &associate_fernbedienung_device_with_drone(macaddr, &drones).await[..] {
+                    [instance] => {
+                        let request = drone::Request::AssociateFernbedienung(device);
                         let _ = instance.request_tx.send(request).await;
-                    }
-                    else {
-                        log::warn!("Fernbedienung {} detected but not specified in the configuration file", macaddr)
+                    },
+                    [_, _, ..] => log::error!("Fernbedienung {} is associated with multiple drones", macaddr),
+                    /* second: attempt to associate fernbedienung with a Pi-Puck */
+                    [] => match &associate_fernbedienung_device_with_pipuck(macaddr, &pipucks).await[..] {
+                        [instance] => {
+                            let request = pipuck::Request::AssociateFernbedienung(device);
+                            let _ = instance.request_tx.send(request).await;
+                        },
+                        [_, _, ..] => log::error!("Fernbedienung {} is associated with multiple Pi-Pucks", macaddr),
+                        [] => log::warn!("Fernbedienung {} is not associated with any drone or Pi-Puck", macaddr),
                     }
                 }
             },
@@ -183,7 +155,8 @@ pub async fn new(
                 None => log::warn!("Could not find {}", id),
             }
             Request::GetDroneIds(callback) => {
-                callback.send(drones.keys().map(String::to_owned).collect::<Vec<_>>());
+                let _ = callback
+                    .send(drones.keys().map(String::to_owned).collect::<Vec<_>>());
             }
             /* Pi-Puck requests */
             Request::AddPiPuckSoftware(path, contents) =>
@@ -201,10 +174,83 @@ pub async fn new(
                 None => log::warn!("Could not find {}", id),
             },
             Request::GetPiPuckIds(callback) => {
-                callback.send(pipucks.keys().map(String::to_owned).collect::<Vec<_>>());
+                let _ = callback
+                    .send(pipucks.keys().map(String::to_owned).collect::<Vec<_>>());
             }
         }
     }
+}
+
+async fn associate_xbee_device(
+    macaddr: macaddr::MacAddr6,
+    drones: &HashMap<String, drone::Instance>,
+) -> Vec<&drone::Instance> {
+    drones
+        .values()
+        .map(|instance| {
+            let (callback_tx, callback_rx) = oneshot::channel();
+            let request = drone::Request::GetDescriptor(callback_tx);
+            let _ = instance.request_tx.send(request);
+            async move { (callback_rx.await, instance) }
+        })
+        .collect::<FuturesUnordered<_>>()
+        .filter_map(|(response, instance)| async move {
+            if let Ok(xbee_macaddr) = response.map(|descriptor| descriptor.xbee_macaddr) {
+                if xbee_macaddr == macaddr {
+                    return Some(instance)
+                }
+            }
+            None
+        })
+        .collect::<Vec<_>>().await
+}
+
+async fn associate_fernbedienung_device_with_drone(
+    macaddr: macaddr::MacAddr6,
+    drones: &HashMap<String, drone::Instance>,
+) -> Vec<&drone::Instance> {
+    drones
+        .values()
+        .map(|instance| {
+            let (callback_tx, callback_rx) = oneshot::channel();
+            let request = drone::Request::GetDescriptor(callback_tx);
+            let _ = instance.request_tx.send(request);
+            async move { (callback_rx.await, instance) }
+        })
+        .collect::<FuturesUnordered<_>>()
+        .filter_map(|(response, instance)| async move {
+            if let Ok(upcore_macaddr) = response.map(|descriptor| descriptor.upcore_macaddr) {
+                if upcore_macaddr == macaddr {
+                    return Some(instance)
+                }
+            }
+            None
+        })
+        .collect::<Vec<_>>().await
+}
+
+async fn associate_fernbedienung_device_with_pipuck(
+    macaddr: macaddr::MacAddr6,
+    drones: &HashMap<String, pipuck::Instance>,
+) -> Vec<&pipuck::Instance> {
+    drones
+        .values()
+        .map(|instance| {
+            let (callback_tx, callback_rx) = oneshot::channel();
+            let request = pipuck::Request::GetDescriptor(callback_tx);
+            let _ = instance.request_tx.send(request);
+            async move { (callback_rx.await, instance) }
+        })
+        .collect::<FuturesUnordered<_>>()
+        .filter_map(|(response, instance)| async move {
+            if let Ok(rpi_macaddr) = response.map(|descriptor| descriptor.rpi_macaddr) {
+                if rpi_macaddr == macaddr {
+                    return Some(instance)
+                }
+            }
+            None
+        })
+        .collect::<Vec<_>>().await
 }
 
 async fn stop_experiment(
@@ -215,12 +261,12 @@ async fn stop_experiment(
     let _ = journal_requests_tx.send(journal::Request::Stop).await;
     let drone_requests = drones
         .values()
-        .map(|instance| instance.request_tx.send(drone::Request::ExperimentStop))
+        .map(|instance| instance.request_tx.send(drone::Request::StopExperiment))
         .collect::<FuturesUnordered<_>>()
         .try_collect::<Vec<_>>();
     let pipuck_requests = pipucks
         .values()
-        .map(|instance| instance.request_tx.send(pipuck::Request::ExperimentStop))
+        .map(|instance| instance.request_tx.send(pipuck::Request::StopExperiment))
         .collect::<FuturesUnordered<_>>()
         .try_collect::<Vec<_>>();
     let (drone_result, pipuck_result) = tokio::join!(drone_requests, pipuck_requests);
@@ -257,11 +303,11 @@ async fn start_experiment(
     /* start the experiment */
     /* start pi-pucks first since they are less dangerous */
     pipucks
-        .values()
-        .map(|instance| {
+        .iter()
+        .map(|(id, instance)| {
             let journal_requests_tx = journal_requests_tx.clone();
             let (response_tx, response_rx) = oneshot::channel();
-            let request = pipuck::Request::ExperimentStart {
+            let request = pipuck::Request::StartExperiment {
                 software: pipuck_software.clone(),
                 journal: journal_requests_tx,
                 callback: response_tx
@@ -269,7 +315,7 @@ async fn start_experiment(
             async move {
                 let _ = instance.request_tx.send(request).await;
                 let error_msg = ||
-                    format!("Could not start experiment on {}", instance.descriptor.id);
+                    format!("Could not start experiment on {}", id);
                 response_rx.await
                     .context(error_msg())
                     .and_then(|inner| inner.context(error_msg()))
@@ -279,11 +325,11 @@ async fn start_experiment(
         .try_collect::<Vec<_>>().await?;
     /* now start the drones */
     drones
-        .values()
-        .map(|instance| {
+        .iter()
+        .map(|(id, instance)| {
             let journal_requests_tx = journal_requests_tx.clone();
             let (response_tx, response_rx) = oneshot::channel();
-            let request = drone::Request::ExperimentStart {
+            let request = drone::Request::StartExperiment {
                 software: drone_software.clone(),
                 journal: journal_requests_tx,
                 callback: response_tx
@@ -291,7 +337,7 @@ async fn start_experiment(
             async move {
                 let _ = instance.request_tx.send(request).await;
                 let error_msg = ||
-                    format!("Could not start experiment on {}", instance.descriptor.id);
+                    format!("Could not start experiment on {}", id);
                 response_rx.await
                     .context(error_msg())
                     .and_then(|inner| inner.context(error_msg()))
@@ -302,47 +348,3 @@ async fn start_experiment(
     /* experiment started successfully */
     Ok(())
 }
-
-// async fn handle_get_pipucks_request(pipuck_tx_map: &HashMap<Uuid, pipuck::Sender>,
-//                                     callback: oneshot::Sender<HashMap<Uuid, pipuck::State>>) {
-//     let pipuck_states = pipuck_tx_map
-//         .into_iter()
-//         .filter_map(|(uuid, tx)| {
-//             let uuid = uuid.clone();
-//             let (response_tx, response_rx) = oneshot::channel();
-//             let request = pipuck::Request::State(response_tx);
-//             tx.send(request).await.map(|_| async move {
-//                 (uuid, response_rx.await)
-//             }).ok()
-//         })
-//         .collect::<FuturesUnordered<_>>()
-//         .filter_map(|(uuid, result)| async move {
-//             result.ok().map(|state| (uuid, state))
-//         })
-//         .collect::<HashMap<_,_>>().await;
-//     if let Err(_) = callback.send(pipuck_states) {
-//         log::error!("Could not respond with Pi-Puck states")
-//     }
-// }
-
-// async fn handle_get_drones_request(drone_tx_map: &HashMap<Uuid, drone::Sender>,
-//                                    callback: oneshot::Sender<HashMap<Uuid, drone::State>>) {
-//     let drone_states = drone_tx_map
-//         .into_iter()
-//         .filter_map(|(uuid, tx)| {
-//             let uuid = uuid.clone();
-//             let (response_tx, response_rx) = oneshot::channel();
-//             let request = drone::Request::GetState(response_tx);
-//             tx.send(request).await.map(|_| async move {
-//                 (uuid, response_rx.await)
-//             }).ok()
-//         })
-//         .collect::<FuturesUnordered<_>>()
-//         .filter_map(|(uuid, result)| async move {
-//             result.ok().map(|state| (uuid, state))
-//         })
-//         .collect::<HashMap<_,_>>().await;
-//     if let Err(_) = callback.send(drone_states) {
-//         log::error!("Could not respond with drone states")
-//     }
-// }

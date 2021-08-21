@@ -146,6 +146,8 @@ async fn handle_client(
     }
 }
 
+// TODO after subscribing request drone update with descriptor?
+
 async fn subscribe_drone_updates(
     arena_tx: &mpsc::Sender<arena::Request>
 ) -> anyhow::Result<StreamMap<String, BroadcastStream<drone::Update>>> {

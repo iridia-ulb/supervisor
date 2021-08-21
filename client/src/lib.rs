@@ -1,3 +1,4 @@
+use shared::{drone, pipuck};
 use yew::prelude::*;
 use yew::services::websocket::{WebSocketService, WebSocketStatus, WebSocketTask};
 use yew::services::ConsoleService;
@@ -7,15 +8,18 @@ mod mdl;
 
 struct Drone {
     id: String,
+    descriptor: Option<drone::Descriptor>
 }
 
 impl Drone {
     fn new(id: String) -> Self {
-        Self { id }
+        Self { id, descriptor: None }
     }
 
     fn update(&mut self, update: shared::drone::Update) {
-
+        if let drone::Update::Descriptor(descriptor) = update {
+            self.descriptor.insert(descriptor);
+        }
     }
 }
 
@@ -33,9 +37,20 @@ impl UserInterface {
                 <mdl::card::title::Title class=classes!("mdl-card--expand","mdl-color--grey-300")>
                     <mdl::card::title_text::TitleText text={ drone.id.clone() }/>
                 </mdl::card::title::Title>
-                <mdl::card::supporting_text::SupportingText
-                    class=classes!("mdl-color-text--grey-600")>
-                    { "Non dolore elit adipisicing ea reprehenderit consectetur culpa." }
+                <mdl::card::supporting_text::SupportingText class=classes!("mdl-color-text--grey-600")> {
+                    if let Some(ref descriptor) = drone.descriptor {
+                        html! {
+                            <>
+                            <p>{ format!("ID: {}", descriptor.id) }</p>
+                            <p>{ format!("Xbee: {}", descriptor.xbee_macaddr) }</p>
+                            <p>{ format!("Upcore: {}", descriptor.upcore_macaddr) }</p>
+                            </>
+                        }
+                    }
+                    else {
+                        html! {}
+                    }
+                }
                 </mdl::card::supporting_text::SupportingText>
                 <mdl::card::actions::Actions
                     class=classes!("mdl-card--border")>

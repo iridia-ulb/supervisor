@@ -1,3 +1,4 @@
+use anyhow::{Context, Result};
 use bytes::{BytesMut, Bytes, BufMut, Buf};
 use std::{io, collections::HashMap, sync::Arc, net::SocketAddr};
 use log;
@@ -38,66 +39,66 @@ pub enum LuaType {
     Table(Vec<(LuaType, LuaType)>),
 }
 
-#[derive(thiserror::Error, Debug)]
-enum Error {
-    #[error("Could not decode message")]
-    DecodeError,
-   
-    #[error(transparent)]
-    IoError(#[from] io::Error),
-}
-
-fn decode_lua_usertype(buf: &mut impl Buf) -> Result<LuaType, Error> {
+fn decode_lua_usertype(buf: &mut impl Buf) -> Result<LuaType> {
     if buf.has_remaining() {
         match buf.get_u8() {
             LUA_TUSERDATA_VECTOR2 => decode_lua_vector2(buf),
             LUA_TUSERDATA_VECTOR3 => decode_lua_vector3(buf),
             LUA_TUSERDATA_QUATERNION => decode_lua_quaternion(buf),
-            _ => Err(Error::DecodeError)
+            _ => Err(anyhow::anyhow!("Could not decode Lua user type"))
         }
     }
     else {
-        Err(Error::DecodeError)
+        Err(anyhow::anyhow!("Could not decode Lua user type"))
     }
 }
 
-fn decode_lua_vector2(buf: &mut impl Buf) -> Result<LuaType, Error> {
-    let x = decode_lua_number(buf)?;
-    let y = decode_lua_number(buf)?;
+fn decode_lua_vector2(buf: &mut impl Buf) -> Result<LuaType> {
+    let x = decode_lua_number(buf)
+        .context("Could not decode X")?;
+    let y = decode_lua_number(buf)
+        .context("Could not decode Y")?;
     match (x, y) {
         (LuaType::Number(x),
          LuaType::Number(y)) => Ok(LuaType::Vector2(x, y)),
-        _ => Err(Error::DecodeError)
+        _ => Err(anyhow::anyhow!("Either X or Y was not a Lua number"))
     }
 }
 
-fn decode_lua_vector3(buf: &mut impl Buf) -> Result<LuaType, Error> {
-    let x = decode_lua_number(buf)?;
-    let y = decode_lua_number(buf)?;
-    let z = decode_lua_number(buf)?;
+fn decode_lua_vector3(buf: &mut impl Buf) -> Result<LuaType> {
+    let x = decode_lua_number(buf)
+        .context("Could not decode X")?;
+    let y = decode_lua_number(buf)
+        .context("Could not decode Y")?;
+    let z = decode_lua_number(buf)
+        .context("Could not decode Z")?;
     match (x, y, z) {
         (LuaType::Number(x),
          LuaType::Number(y),
          LuaType::Number(z)) => Ok(LuaType::Vector3(x, y, z)),
-        _ => Err(Error::DecodeError)
+        _ => Err(anyhow::anyhow!("Either X, Y, or Z was not a Lua number"))
     }
 }
 
-fn decode_lua_quaternion(buf: &mut impl Buf) -> Result<LuaType, Error> {
-    let w = decode_lua_number(buf)?;
-    let x = decode_lua_number(buf)?;
-    let y = decode_lua_number(buf)?;
-    let z = decode_lua_number(buf)?;
+fn decode_lua_quaternion(buf: &mut impl Buf) -> Result<LuaType> {
+    let w = decode_lua_number(buf)
+        .context("Could not decode W")?;
+    let x = decode_lua_number(buf)
+        .context("Could not decode X")?;
+    let y = decode_lua_number(buf)
+        .context("Could not decode Y")?;
+    let z = decode_lua_number(buf)
+        .context("Could not decode Z")?;
     match (w, x, y, z) {
         (LuaType::Number(w),
          LuaType::Number(x),
          LuaType::Number(y),
          LuaType::Number(z)) => Ok(LuaType::Quaternion(w, x, y, z)),
-        _ => Err(Error::DecodeError)
+         _ => Err(anyhow::anyhow!("Either W, X, Y, or Z was not a Lua number"))
     }
 }
 
-fn decode_lua_number(buf: &mut impl Buf) -> Result<LuaType, Error> {
+fn decode_lua_number(buf: &mut impl Buf) -> Result<LuaType> {
     /* handle Carlo's unusual double encoding */
     if buf.remaining() > size_of::<u64>() + size_of::<u32>() {
         let mantissa = buf.get_i64();
@@ -117,11 +118,11 @@ fn decode_lua_number(buf: &mut impl Buf) -> Result<LuaType, Error> {
         }
     }
     else {
-        Err(Error::DecodeError)
+        Err(anyhow::anyhow!("Could not decode Lua number"))
     }
 }
 
-fn decode_lua_string(buf: &mut impl Buf) -> Result<LuaType, Error> {
+fn decode_lua_string(buf: &mut impl Buf) -> Result<LuaType> {
     /* extract C string */
     let mut data = Vec::new();
     while buf.has_remaining() {
@@ -131,11 +132,11 @@ fn decode_lua_string(buf: &mut impl Buf) -> Result<LuaType, Error> {
         }
     }
     String::from_utf8(data)
-        .map_err(|_| Error::DecodeError)
+        .map_err(|_| anyhow::anyhow!("Could not decode Lua string"))
         .map(|content| LuaType::String(content))
 }
 
-fn decode_lua_boolean(buf: &mut impl Buf) -> Result<LuaType, Error> {
+fn decode_lua_boolean(buf: &mut impl Buf) -> Result<LuaType> {
     if buf.has_remaining() {
         match buf.get_i8() {
             0 => Ok(LuaType::Boolean(false)),
@@ -143,11 +144,11 @@ fn decode_lua_boolean(buf: &mut impl Buf) -> Result<LuaType, Error> {
         }
     }
     else {
-        Err(Error::DecodeError)
+        Err(anyhow::anyhow!("Could not decode Lua boolean"))
     }
 }
 
-fn decode_lua_table(buf: &mut impl Buf) -> Result<LuaType, Error> {
+fn decode_lua_table(buf: &mut impl Buf) -> Result<LuaType> {
     let mut table = Vec::new();
     while buf.has_remaining() {
         /* parse the key */
@@ -158,7 +159,7 @@ fn decode_lua_table(buf: &mut impl Buf) -> Result<LuaType, Error> {
             LUA_TUSERDATA => decode_lua_usertype(buf),
             LUA_TTABLE => decode_lua_table(buf),
             LUA_TNIL => break,
-            _ => Err(Error::DecodeError),
+            _ => Err(anyhow::anyhow!("Could not decode key")),
         }?;
         if buf.has_remaining() {
             /* parse the value */
@@ -168,12 +169,12 @@ fn decode_lua_table(buf: &mut impl Buf) -> Result<LuaType, Error> {
                 LUA_TSTRING => decode_lua_string(buf),
                 LUA_TUSERDATA => decode_lua_usertype(buf),
                 LUA_TTABLE => decode_lua_table(buf),
-                _ => Err(Error::DecodeError),
+                _ => Err(anyhow::anyhow!("Could not decode value")),
             }?;
             table.push((key, value));
         }
         else {
-            return Err(Error::DecodeError);
+            anyhow::bail!("Could not decode value");
         }
     }
     Ok(LuaType::Table(table))
@@ -292,5 +293,4 @@ pub async fn new(addr: SocketAddr, journal: mpsc::Sender<journal::Request>) -> i
             }
         }   
     }
-    // Ok(())
 }

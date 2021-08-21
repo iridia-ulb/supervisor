@@ -32,7 +32,7 @@ async-stream = { version = "0.3" }
 bytes = { version = "1.0", features = ["serde"] }
 uuid = { version = "0.8", features = ["serde", "v3", "v4"] }
 ipnet = { version = "2.3" }
-macaddr = { version = "1.0" }
+macaddr = { version = "1.0", features = ["serde_std"] }
 regex = { version = "1.4" }
 lazy_static = { version = "1.4" }
 base64 = { version = "0.13" }
