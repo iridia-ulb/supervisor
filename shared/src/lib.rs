@@ -8,7 +8,7 @@ use serde::{Serialize, Deserialize};
 #[derive(Serialize, Deserialize, Debug)]
 pub enum UpMessage {
     //send me all drones/pipucks
-    Refresh,
+    GetDescriptors,
     // perform action on drone with this id
     DroneAction(String, drone::Action),
     // perform action on pipuck with this id
@@ -19,7 +19,9 @@ pub enum UpMessage {
 #[derive(Serialize, Deserialize, Debug)]
 pub enum DownMessage {
     // broadcast, trigger by change in actual drone
+    AddDrone(drone::Descriptor),
     UpdateDrone(String, drone::Update),
+    AddPiPuck(pipuck::Descriptor),
     UpdatePiPuck(String, pipuck::Update),
 }
 

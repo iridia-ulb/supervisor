@@ -68,16 +68,6 @@ pub enum Error {
     IoError(#[from] std::io::Error),
 }
 
-// theory of operation
-// how are changes detected? in part by polling -- these changes need to be sent to the
-// webui -- when a change in state occurs this should be pushed via a channel to the webui
-
-// perhaps make two sub-actors -- one for handling xbee requests, when it has been added,
-// the other for handling ferbedienung requests
-
-// let mut fernbedienung: Option<Arc<fernbedienung::Device>> = None;
-// let poll_upcore_link_strength_task = future::pending().left_future();
-
 enum FernbedienungRequest {
     StartCameraStream,
     StopCameraStream,
@@ -170,7 +160,7 @@ pub async fn new(mut request_rx: Receiver, descriptor: Descriptor) {
                     let _ = callback.send(descriptor.clone());
                 },
                 Request::Subscribe(callback) => {
-                    /* note that upon subscribing all updates should be sent to ensure
+                    /* note that upon subscribing all updates should be resent to ensure
                        that new clients are in sync */
                     if let Ok(_) = callback.send(updates_tx.subscribe()) {
                         let _ = updates_tx.send(Update::Descriptor(descriptor.clone()));

@@ -2,7 +2,7 @@ use std::net::Ipv4Addr;
 use bytes::Bytes;
 use serde::{Serialize, Deserialize};
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Descriptor {
     pub id: String,
     pub xbee_macaddr: macaddr::MacAddr6,

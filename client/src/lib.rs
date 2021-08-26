@@ -1,73 +1,38 @@
-use shared::{drone, pipuck};
+use std::{cell::RefCell, convert::AsRef, rc::Rc};
+use strum::{EnumProperty, IntoEnumIterator};
+use strum_macros::{AsRefStr, EnumIter, EnumProperty};
+use wasm_bindgen::prelude::*;
 use yew::prelude::*;
 use yew::services::websocket::{WebSocketService, WebSocketStatus, WebSocketTask};
 use yew::services::ConsoleService;
-use wasm_bindgen::prelude::*;
 
-mod mdl;
+mod drone;
 
-struct Drone {
-    id: String,
-    descriptor: Option<drone::Descriptor>
-}
-
-impl Drone {
-    fn new(id: String) -> Self {
-        Self { id, descriptor: None }
-    }
-
-    fn update(&mut self, update: shared::drone::Update) {
-        if let drone::Update::Descriptor(descriptor) = update {
-            self.descriptor.insert(descriptor);
-        }
-    }
+#[derive(AsRefStr, EnumProperty, EnumIter, Copy, Clone, PartialEq)]
+enum Tab {
+    #[strum(serialize = "Drones", props(icon = "mdi-quadcopter"))]
+    Drones,
+    #[strum(serialize = "Pi-Pucks", props(icon = "mdi-circle-slice-8"))]
+    PiPucks,
+    #[strum(serialize = "Experiment", props(icon = "mdi-play"))]
+    Experiment,
 }
 
 struct UserInterface {
     link: ComponentLink<Self>,
     socket: Option<WebSocketTask>,
-    drones: Vec<Drone>,
+    active_tab: Tab,
+    drones: Vec<Rc<RefCell<drone::Instance>>>,
 }
 
-impl UserInterface {
-    fn view_drone(&self, drone: &Drone) -> Html {
-        html! {
-            <mdl::card::Card
-                class=classes!("mdl-shadow--4dp", "mdl-cell", "mdl-cell--4-col")>
-                <mdl::card::title::Title class=classes!("mdl-card--expand","mdl-color--grey-300")>
-                    <mdl::card::title_text::TitleText text={ drone.id.clone() }/>
-                </mdl::card::title::Title>
-                <mdl::card::supporting_text::SupportingText class=classes!("mdl-color-text--grey-600")> {
-                    if let Some(ref descriptor) = drone.descriptor {
-                        html! {
-                            <>
-                            <p>{ format!("ID: {}", descriptor.id) }</p>
-                            <p>{ format!("Xbee: {}", descriptor.xbee_macaddr) }</p>
-                            <p>{ format!("Upcore: {}", descriptor.upcore_macaddr) }</p>
-                            </>
-                        }
-                    }
-                    else {
-                        html! {}
-                    }
-                }
-                </mdl::card::supporting_text::SupportingText>
-                <mdl::card::actions::Actions
-                    class=classes!("mdl-card--border")>
-                    <mdl::button::Button label="click" class=classes!("mdl-js-button") />
-                    <mdl::button::Button label="here" class=classes!("mdl-js-button") />
-                </mdl::card::actions::Actions>
-            </mdl::card::Card>
-        }
-    }
-}
 
-#[derive(Debug)]
+
 enum Msg {
 
     // TODO: handle disconnects by matching against WebSocketStatus::Closed or WebSocketStatus::Error
     Notifcation(WebSocketStatus),
     Data(Result<Vec<u8>, anyhow::Error>),
+    SetActiveTab(Tab),
 }
 
 impl Component for UserInterface {
@@ -89,16 +54,26 @@ impl Component for UserInterface {
             WebSocketService::connect_binary(&service_addr,
                                              callback_data,
                                              callback_notification);
+        // Delete me
+        let desc = shared::drone::Descriptor {
+            id: "drone1".into(),
+            xbee_macaddr: [0,0,0,0,0,0].into(),
+            upcore_macaddr: [0,0,0,0,0,0].into(),
+            optitrack_id: Some(42),
+        };
+        let desc_vec = vec![Rc::new(RefCell::new(drone::Instance::new(desc)))];
+        // Delete me
         Self {
             link,
             socket: match socket {
                 Ok(socket) => Some(socket),
-                Err(_error) => {
+                Err(_) => {
                     ConsoleService::log("Could not connect to socket");
                     None
                 }
             },
-            drones: Default::default(),
+            active_tab: Tab::Drones,
+            drones: desc_vec, // Default::default(),
         }
     }
 
@@ -111,36 +86,51 @@ impl Component for UserInterface {
 
     fn update(&mut self, message: Self::Message) -> ShouldRender {
         match message {
+            Msg::SetActiveTab(tab) => {
+                self.active_tab = tab;
+                true
+            }
             Msg::Data(data) => match data {
                 Ok(data) => match bincode::deserialize::<shared::DownMessage>(&data) {
                     Ok(decoded) => match decoded {
+                        shared::DownMessage::AddDrone(descriptor) => {
+                            // if self.drones.iter().find(|drone| drone.descriptor.id == descriptor.id).is_none() {
+                            //     self.drones.push(drone::Instance::new(descriptor));
+                            // }
+                            true
+                        }
                         shared::DownMessage::UpdateDrone(id, update) => {
-                            match self.drones.iter_mut().find(|drone| drone.id == id) {
-                                Some(drone) => {
-                                    drone.update(update);
-                                }
-                                None => {
-                                    let mut drone = Drone::new(id);
-                                    drone.update(update);
-                                    self.drones.push(drone);
-                                }
-                            }
+                            // match self.drones.iter_mut().find(|drone| drone.descriptor.id == id) {
+                            //     Some(drone) => drone.update(update),
+                            //     None => ConsoleService::log(&format!("Drone {} not added to interface", id)),
+                            // }
+                            true
                         },
-                        shared::DownMessage::UpdatePiPuck(id, update) => {},
+                        shared::DownMessage::AddPiPuck(descriptor) => {
+                            // if self.pipucks.iter().find(|pipuck| pipuck.descriptor.id == descriptor.id).is_none() {
+                            //     self.pipucks.push(pipuck::PiPuck::new(descriptor));
+                            // }
+                            true
+                        }
+                        shared::DownMessage::UpdatePiPuck(id, update) => {
+                            true
+                        },
                     },
                     Err(error) => {
                         ConsoleService::log(&format!("1. {:?}", error));
+                        false
                     }
                 },
                 Err(err) => {
                     ConsoleService::log(&format!("2. {:?}", err));
+                    false
                 },
             },
             Msg::Notifcation(notification) => {
                 ConsoleService::log(&format!("{:?}", notification));
+                true
             }
         }
-        true
     }
 
 
@@ -150,47 +140,89 @@ impl Component for UserInterface {
 
     fn view(&self) -> Html {
         html! {
-            <mdl::layout::Layout class=classes!("mdl-js-layout","mdl-layout--fixed-header")>
-                <mdl::layout::header::Header>
-                    <mdl::layout::header_row::HeaderRow class=classes!("supervisor-header")>
-                        <img src={"images/drone.png"}/>
-                        <span class=classes!("mdl-layout-title")>{ "Supervisor" }</span>
-                    </mdl::layout::header_row::HeaderRow>
-                </mdl::layout::header::Header>
-                <mdl::layout::content::Content>
-                    <mdl::tabs::Tabs
-                        class=classes!("mdl-js-tabs")>
-                        <mdl::tabs::tab_bar::TabBar>
-                            <mdl::tabs::tab::Tab class=classes!("is-active")
-                                target="#drones"
-                                icon="settings_ethernet"
-                                label="Drones" />
-                            <mdl::tabs::tab::Tab
-                                target="#pipucks"
-                                icon="settings_ethernet"
-                                label="Pi-Pucks" />
-                            <mdl::tabs::tab::Tab
-                                target="#experiment"
-                                icon="play_arrow"
-                                label="Experiment" />
-                        </mdl::tabs::tab_bar::TabBar >
-                        <mdl::tabs::panel::Panel id="drones" class=classes!("is-active")>
-                            <mdl::grid::Grid>
-                                { for self.drones.iter().map(|drone| self.view_drone(drone)) }
-                            </mdl::grid::Grid>
-                        </mdl::tabs::panel::Panel>
-                        <mdl::tabs::panel::Panel id="pipucks">
-                            <mdl::grid::Grid/>
-                        </mdl::tabs::panel::Panel>
-                        <mdl::tabs::panel::Panel id="experiment">
-                            <mdl::grid::Grid/>
-                        </mdl::tabs::panel::Panel>
-                    </mdl::tabs::Tabs>
-                </mdl::layout::content::Content>
-            </mdl::layout::Layout>
+            <>
+                { self.render_hero() }
+                { self.render_tabs() }
+                <section class="section">
+                    <div class="container is-fluid">
+                        <div class="columns is-multiline is-mobile">
+                            <div class="column is-full-mobile is-full-tablet is-full-desktop is-half-widescreen is-one-third-fullhd"> {
+                                match self.active_tab {
+                                    Tab::Drones => {
+                                        self.drones.iter().map(|drone| html!{
+                                            <drone::Card instance=drone />
+                                        }).collect::<Html>()
+                                    }
+                                    Tab::PiPucks => {
+                                        html! {}
+                                    }
+                                    Tab::Experiment => {
+                                        html! {}
+                                    }
+                                }
+                            }
+                            </div>
+                        </div>
+                    </div>
+                </section>
+            </>
         }
     }
 }
+
+impl UserInterface {
+    fn render_hero(&self) -> Html {
+        html!{
+            <section class="hero is-link">
+                <div class="hero-body">
+                    <div class="columns is-vcentered">
+                        <div class="column is-narrow">
+                            <figure class="image is-64x64">
+                                <img src="images/drone.png" />
+                            </figure>
+                        </div>
+                        <div class="column">
+                            <p class="title is-2">{ "Supervisor" }</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        }
+    }
+
+    fn render_tabs(&self) -> Html {
+        html! {
+            <div class="tabs is-centered is-boxed is-medium">
+                <ul> {
+                    Tab::iter()
+                        .map(|tab| {
+                            let li_classes = if self.active_tab == tab {
+                                Some("is-active")
+                            }
+                            else {
+                                None
+                            };
+                            let i_classes = ["mdi", "mdi-24px", tab.get_str("icon").unwrap()];
+                            let tab_name = tab.as_ref();
+                            let onclick = self.link.callback(move |_| Msg::SetActiveTab(tab));
+                            html! {
+                                <li class=classes!(li_classes)>
+                                    <a onclick=onclick>
+                                        <span class="icon is-medium">
+                                            <i class=classes!(&i_classes[..])></i>
+                                        </span>
+                                        <span>{ tab_name }</span>
+                                    </a>
+                                </li>
+                            }
+                        })
+                        .collect::<Html>()
+                } </ul>
+            </div>
+        }
+    }
+}
+
 
 #[wasm_bindgen]
 pub fn launch() -> Result<(), JsValue> {
