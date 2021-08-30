@@ -31,7 +31,7 @@ enum UpCore {
 
 
 pub struct Instance {
-    descriptor: drone::Descriptor,
+    pub descriptor: drone::Descriptor,
     battery: u8,
     optitrack_pos: [f32; 3],
     upcore: UpCore,
@@ -159,17 +159,29 @@ impl Card {
             html! {
                 <div class="modal is-active">
                     <div class="modal-background" onclick=disable_onclick />
-                    <div class="modal-content">
-                        <div class="columns is-multiline is-mobile">
-                            <div class="column is-half">
-                                <figure class="image is-128x128">
-                                    <img src="https://image-placeholder.com/images/actual-size/640x480.png" alt="" />
-                                </figure>
-                            </div>
-                            <div class="column is-half">
-                                <figure class="image is-128x128">
-                                    <img src="https://image-placeholder.com/images/actual-size/640x480.png" alt="" />
-                                </figure>
+                    <div style="width:800px" class="modal-content">
+                        <div class="container is-clipped">
+                            <div class="columns is-multiline is-mobile">
+                                <div class="column is-half">
+                                    <figure class="image">
+                                        <img src="https://image-placeholder.com/images/actual-size/640x480.png" alt="" />
+                                    </figure>
+                                </div>
+                                <div class="column is-half">
+                                    <figure class="image">
+                                        <img src="https://image-placeholder.com/images/actual-size/640x480.png" alt="" />
+                                    </figure>
+                                </div>
+                                <div class="column is-half">
+                                    <figure class="image">
+                                        <img src="https://image-placeholder.com/images/actual-size/640x480.png" alt="" />
+                                    </figure>
+                                </div>
+                                <div class="column is-half">
+                                    <figure class="image">
+                                        <img src="https://image-placeholder.com/images/actual-size/640x480.png" alt="" />
+                                    </figure>
+                                </div>
                             </div>
                         </div>
                     </div>
