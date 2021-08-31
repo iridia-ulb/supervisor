@@ -3,6 +3,7 @@ use anyhow::{Result, Context};
 use futures::{StreamExt, TryFutureExt};
 use serde::{Deserialize, Serialize};
 use software::Software;
+use std::sync::Arc;
 use std::{collections::HashMap};
 use log;
 
@@ -42,8 +43,8 @@ pub enum Request {
     AddDroneSoftware(String, Vec<u8>),
     ClearDroneSoftware,
     CheckDroneSoftware(oneshot::Sender<(software::Checksums, software::Result<()>)>),
-    ForwardDroneRequest(String, drone::Request),
-    GetDroneIds(oneshot::Sender<Vec<String>>),
+    ForwardDroneRequest(Arc<drone::Descriptor>, drone::Request),
+    GetDroneDescriptors(oneshot::Sender<Vec<Arc<drone::Descriptor>>>),
     //ForwardDroneActionAll(drone::Action),
     ///GetDrones(oneshot::Sender<HashMap<String, drone::State>>),
 
@@ -51,8 +52,8 @@ pub enum Request {
     AddPiPuckSoftware(String, Vec<u8>),
     ClearPiPuckSoftware,
     CheckPiPuckSoftware(oneshot::Sender<(software::Checksums, software::Result<()>)>),
-    ForwardPiPuckRequest(String, pipuck::Request),
-    GetPiPuckIds(oneshot::Sender<Vec<String>>),
+    ForwardPiPuckRequest(Arc<pipuck::Descriptor>, pipuck::Request),
+    GetPiPuckDescriptors(oneshot::Sender<Vec<Arc<pipuck::Descriptor>>>),
     //ForwardPiPuckActionAll(pipuck::Action),
     //GetPiPucks(oneshot::Sender<HashMap<String, pipuck::State>>),
 }
@@ -68,13 +69,13 @@ pub async fn new(
     
     let mut drone_software : crate::software::Software = Default::default();   
     let mut pipuck_software : crate::software::Software = Default::default();
-    let pipucks: HashMap<String, pipuck::Instance> = pipucks
+    let pipucks: HashMap<Arc<pipuck::Descriptor>, pipuck::Instance> = pipucks
         .into_iter()
-        .map(|descriptor| (descriptor.id.clone(), pipuck::Instance::new(descriptor)))
+        .map(|descriptor| (Arc::new(descriptor), pipuck::Instance::default()))
         .collect();
-    let drones: HashMap<String, drone::Instance> = drones
+    let drones: HashMap<Arc<drone::Descriptor>, drone::Instance> = drones
         .into_iter()
-        .map(|descriptor| (descriptor.id.clone(), drone::Instance::new(descriptor)))
+        .map(|descriptor| (Arc::new(descriptor), drone::Instance::default()))
         .collect();
     
     while let Some(request) = arena_request_rx.recv().await {
@@ -83,7 +84,7 @@ pub async fn new(
                 todo!("Request all devices to sync there state");
             }
             Request::AddXbee(device, macaddr) => {
-                match &associate_xbee_device(macaddr, &drones).await[..] {
+                match &associate_xbee_device(macaddr, &drones)[..] {
                     [instance] => {
                         let request = drone::Request::AssociateXbee(device);
                         let _ = instance.request_tx.send(request).await;
@@ -94,14 +95,14 @@ pub async fn new(
             },
             Request::AddFernbedienung(device, macaddr) => {
                 /* first: attempt to associate fernbedienung with a drone */
-                match &associate_fernbedienung_device_with_drone(macaddr, &drones).await[..] {
+                match &associate_fernbedienung_device_with_drone(macaddr, &drones)[..] {
                     [instance] => {
                         let request = drone::Request::AssociateFernbedienung(device);
                         let _ = instance.request_tx.send(request).await;
                     },
                     [_, _, ..] => log::error!("Fernbedienung {} is associated with multiple drones", macaddr),
                     /* second: attempt to associate fernbedienung with a Pi-Puck */
-                    [] => match &associate_fernbedienung_device_with_pipuck(macaddr, &pipucks).await[..] {
+                    [] => match &associate_fernbedienung_device_with_pipuck(macaddr, &pipucks)[..] {
                         [instance] => {
                             let request = pipuck::Request::AssociateFernbedienung(device);
                             let _ = instance.request_tx.send(request).await;
@@ -150,15 +151,14 @@ pub async fn new(
                     log::error!("Could not respond with drone software check");
                 }
             },
-            Request::ForwardDroneRequest(id, request) => match drones.get(&id) {
+            Request::ForwardDroneRequest(desc, request) => match drones.get(&desc) {
                 Some(instance) => {
                     let _ = instance.request_tx.send(request).await;
                 }
-                None => log::warn!("Could not find {}", id),
+                None => log::warn!("Could not find {}", desc),
             }
-            Request::GetDroneIds(callback) => {
-                let _ = callback
-                    .send(drones.keys().map(String::to_owned).collect::<Vec<_>>());
+            Request::GetDroneDescriptors(callback) => {
+                let _ = callback.send(drones.keys().cloned().collect::<Vec<_>>());
             }
             /* Pi-Puck requests */
             Request::AddPiPuckSoftware(path, contents) =>
@@ -175,101 +175,58 @@ pub async fn new(
                 }
                 None => log::warn!("Could not find {}", id),
             },
-            Request::GetPiPuckIds(callback) => {
-                let _ = callback
-                    .send(pipucks.keys().map(String::to_owned).collect::<Vec<_>>());
+            Request::GetPiPuckDescriptors(callback) => {
+                let _ = callback.send(pipucks.keys().cloned().collect::<Vec<_>>());
             }
         }
     }
 }
 
-async fn associate_xbee_device(
+fn associate_xbee_device(
     macaddr: macaddr::MacAddr6,
-    drones: &HashMap<String, drone::Instance>,
+    drones: &HashMap<Arc<drone::Descriptor>, drone::Instance>,
 ) -> Vec<&drone::Instance> {
-    drones
-        .values()
-        .map(|instance| {
-            let (callback_tx, callback_rx) = oneshot::channel();
-            let request = drone::Request::GetDescriptor(callback_tx);
-            instance.request_tx
-                .send(request)
-                .map_err(|_| anyhow::anyhow!("Could not request descriptor"))
-                .and_then(move |_| callback_rx
-                    .map_err(|_| anyhow::anyhow!("Could not recieve descriptor"))
-                    .map_ok(move |descriptor| (descriptor, instance)))
-        })
-        .collect::<FuturesUnordered<_>>()
-        .filter_map(|response| async move {
-            if let Ok((descriptor, instance)) = response {
-                if descriptor.xbee_macaddr == macaddr {
-                    return Some(instance)
-                }
-            }
+    drones.into_iter().filter_map(|(desc, instance)| {
+        if desc.xbee_macaddr == macaddr {
+            Some(instance)
+        }
+        else {
             None
-        })
-        .collect::<Vec<_>>().await
+        }
+    }).collect::<Vec<_>>()
 }
 
-async fn associate_fernbedienung_device_with_drone(
+fn associate_fernbedienung_device_with_drone(
     macaddr: macaddr::MacAddr6,
-    drones: &HashMap<String, drone::Instance>,
+    drones: &HashMap<Arc<drone::Descriptor>, drone::Instance>,
 ) -> Vec<&drone::Instance> {
-    drones
-        .values()
-        .map(|instance| {
-            let (callback_tx, callback_rx) = oneshot::channel();
-            let request = drone::Request::GetDescriptor(callback_tx);
-            instance.request_tx
-                .send(request)
-                .map_err(|_| anyhow::anyhow!("Could not request descriptor"))
-                .and_then(move |_| callback_rx
-                    .map_err(|_| anyhow::anyhow!("Could not recieve descriptor"))
-                    .map_ok(move |descriptor| (descriptor, instance)))
-        })
-        .collect::<FuturesUnordered<_>>()
-        .filter_map(|response| async move {
-            if let Ok((descriptor, instance)) = response {
-                if descriptor.upcore_macaddr == macaddr {
-                    return Some(instance)
-                }
-            }
+    drones.into_iter().filter_map(|(desc, instance)| {
+        if desc.upcore_macaddr == macaddr {
+            Some(instance)
+        }
+        else {
             None
-        })
-        .collect::<Vec<_>>().await
+        }
+    }).collect::<Vec<_>>()
 }
 
-async fn associate_fernbedienung_device_with_pipuck(
+fn associate_fernbedienung_device_with_pipuck(
     macaddr: macaddr::MacAddr6,
-    pipucks: &HashMap<String, pipuck::Instance>,
+    pipucks: &HashMap<Arc<pipuck::Descriptor>, pipuck::Instance>,
 ) -> Vec<&pipuck::Instance> {
-    pipucks
-        .values()
-        .map(|instance| {
-            let (callback_tx, callback_rx) = oneshot::channel();
-            let request = pipuck::Request::GetDescriptor(callback_tx);
-            instance.request_tx
-                .send(request)
-                .map_err(|_| anyhow::anyhow!("Could not request descriptor"))
-                .and_then(move |_| callback_rx
-                    .map_err(|_| anyhow::anyhow!("Could not recieve descriptor"))
-                    .map_ok(move |descriptor| (descriptor, instance)))
-        })
-        .collect::<FuturesUnordered<_>>()
-        .filter_map(|response| async move {
-            if let Ok((descriptor, instance)) = response {
-                if descriptor.rpi_macaddr == macaddr {
-                    return Some(instance)
-                }
-            }
+    pipucks.into_iter().filter_map(|(desc, instance)| {
+        if desc.rpi_macaddr == macaddr {
+            Some(instance)
+        }
+        else {
             None
-        })
-        .collect::<Vec<_>>().await
+        }
+    }).collect::<Vec<_>>()
 }
 
 async fn stop_experiment(
-    pipucks: &HashMap<String, pipuck::Instance>,
-    drones: &HashMap<String, drone::Instance>,
+    pipucks: &HashMap<Arc<pipuck::Descriptor>, pipuck::Instance>,
+    drones: &HashMap<Arc<drone::Descriptor>, drone::Instance>,
     journal_requests_tx: &mpsc::Sender<journal::Request>
 ) {
     let _ = journal_requests_tx.send(journal::Request::Stop).await;
@@ -293,9 +250,9 @@ async fn stop_experiment(
 }
 
 async fn start_experiment(
-    pipucks: &HashMap<String, pipuck::Instance>,
+    pipucks: &HashMap<Arc<pipuck::Descriptor>, pipuck::Instance>,
     pipuck_software: &Software,
-    drones: &HashMap<String, drone::Instance>,
+    drones: &HashMap<Arc<drone::Descriptor>, drone::Instance>,
     drone_software: &Software,
     journal_requests_tx: &mpsc::Sender<journal::Request>
 ) -> anyhow::Result<()> {

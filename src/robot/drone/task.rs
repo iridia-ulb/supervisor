@@ -1,4 +1,5 @@
 use std::{convert::TryInto, num::TryFromIntError, time::Duration};
+use anyhow::Context;
 use tokio::{sync::{broadcast, mpsc, oneshot}};
 use futures::{Future, FutureExt, Stream, StreamExt, TryFutureExt, TryStreamExt};
 use tokio_stream;
@@ -23,13 +24,9 @@ pub enum Request {
     AssociateFernbedienung(fernbedienung::Device),
     AssociateXbee(xbee::Device),
 
-
-    GetDescriptor(oneshot::Sender<Descriptor>),
     // when this message is recv, all updates are sent and then
     // updates are sent only on changes
     Subscribe(oneshot::Sender<broadcast::Receiver<Update>>),
-
-
 
     StartExperiment {
         software: software::Software,
@@ -81,12 +78,23 @@ enum XbeeRequest {
 
 fn xbee_link_margin_stream<'dev>(
     device: &'dev xbee::Device
-) -> impl Stream<Item = Result<i32, String>> + 'dev {
+) -> impl Stream<Item = anyhow::Result<i32>> + 'dev {
     async_stream::stream! {
+        let mut attempts: u8 = 0;
         loop {
-            let strength: Result<i32, String> = device.link_margin().await
-                .map_err(|error| error.to_string());
-            yield strength;
+            let link_margin_task = tokio::time::timeout(Duration::from_millis(500), device.link_margin()).await
+                .context("Timeout while communicating with Xbee")
+                .and_then(|result| result.context("Could not communicate with Xbee"));
+            match link_margin_task {
+                Ok(response) => {
+                    attempts = 0;
+                    yield Ok(response);
+                },
+                Err(error) => match attempts {
+                    0..=2 => attempts += 1,
+                    _ => yield Err(error)
+                }
+            }
         }
     }
 }
@@ -95,18 +103,23 @@ async fn xbee(
     device: xbee::Device,
     mut rx: mpsc::Receiver<XbeeRequest>,
     updates_tx: broadcast::Sender<Update>
-) -> anyhow::Result<()> {
-    /* link strength */
-    let link_strength_stream = xbee_link_margin_stream(&device)
-        .map(Update::XbeeSignal);
-    let link_strength_stream_throttled =
-        tokio_stream::StreamExt::throttle(link_strength_stream, Duration::from_millis(1000));
-    tokio::pin!(link_strength_stream_throttled);
-    
+) {
+    /* link margin */
+    let link_margin_stream = xbee_link_margin_stream(&device)
+        .map_ok(Update::XbeeSignal);
+    let link_margin_stream_throttled =
+        tokio_stream::StreamExt::throttle(link_margin_stream, Duration::from_millis(1000));
+    tokio::pin!(link_margin_stream_throttled);
     loop {
         tokio::select! {
-            Some(update) = link_strength_stream_throttled.next() => {
-                let _ = updates_tx.send(update);
+            Some(response) = link_margin_stream_throttled.next() => match response {
+                Ok(update) => {
+                    let _ = updates_tx.send(update);
+                },
+                Err(error) => {
+                    log::warn!("{}", error);
+                    break;
+                },
             },
             recv = rx.recv() => match recv {
                 Some(request) => match request {
@@ -116,17 +129,27 @@ async fn xbee(
             }
         }
     }
-    Ok(())
 }
 
 fn fernbedienung_link_strength_stream<'dev>(
     device: &'dev fernbedienung::Device
-) -> impl Stream<Item = Result<i32, String>> + 'dev {
+) -> impl Stream<Item = anyhow::Result<i32>> + 'dev {
     async_stream::stream! {
+        let mut attempts : u8 = 0;
         loop {
-            let strength: Result<i32, String> = device.link_strength().await
-                .map_err(|error| error.to_string());
-            yield strength;
+            let link_strength_task = tokio::time::timeout(Duration::from_millis(500), device.link_strength()).await
+                .context("Timeout while communicating with Up Core")
+                .and_then(|result| result.context("Could not communicate with Up Core"));
+            match link_strength_task {
+                Ok(response) => {
+                    attempts = 0;
+                    yield Ok(response);
+                },
+                Err(error) => match attempts {
+                    0..=2 => attempts += 1,
+                    _ => yield Err(error)
+                }
+            }
         }
     }
 }
@@ -135,10 +158,10 @@ async fn fernbedienung(
     device: fernbedienung::Device,
     mut rx: mpsc::Receiver<FernbedienungRequest>,
     updates_tx: broadcast::Sender<Update>
-) -> anyhow::Result<()> {
+) {
     /* link strength */
     let link_strength_stream = fernbedienung_link_strength_stream(&device)
-        .map(Update::FernbedienungSignal);
+        .map_ok(Update::FernbedienungSignal);
     let link_strength_stream_throttled =
         tokio_stream::StreamExt::throttle(link_strength_stream, Duration::from_millis(1000));
     tokio::pin!(link_strength_stream_throttled);
@@ -152,8 +175,14 @@ async fn fernbedienung(
                 let update = Update::Camera { camera, result: result.map_err(|e| e.to_string()) };
                 let _ = updates_tx.send(update);
             },
-            Some(update) = link_strength_stream_throttled.next() => {
-                let _ = updates_tx.send(update);
+            Some(response) = link_strength_stream_throttled.next() => match response {
+                Ok(update) => {
+                    let _ = updates_tx.send(update);
+                },
+                Err(error) => {
+                    log::warn!("{}", error);
+                    break;
+                },
             },
             recv = rx.recv() => match recv {
                 Some(request) => match request {
@@ -173,17 +202,18 @@ async fn fernbedienung(
             }
         }
     }
-    Ok(())
 }
 
-pub async fn new(mut request_rx: Receiver, descriptor: Descriptor) {
+pub async fn new(mut request_rx: Receiver) {
     /* fernbedienung task state */
     let fernbedienung_task = futures::future::pending().left_future();
     let mut fernbedienung_tx = Option::default();
+    let mut fernbedienung_addr = Option::default();
     tokio::pin!(fernbedienung_task);
     /* xbee task state */
     let xbee_task = futures::future::pending().left_future();
     let mut xbee_tx = Option::default();
+    let mut xbee_addr = Option::default();
     tokio::pin!(xbee_task);
     /* updates_tx is for sending changes in state to subscribers (e.g., the webui) */
     let (updates_tx, _) = broadcast::channel(16);
@@ -196,39 +226,43 @@ pub async fn new(mut request_rx: Receiver, descriptor: Descriptor) {
                 Request::AssociateFernbedienung(device) => {
                     let (tx, rx) = mpsc::channel(8);
                     fernbedienung_tx = Some(tx);
+                    fernbedienung_addr = Some(device.addr);
+                    let _ = updates_tx.send(Update::FernbedienungConnected(device.addr));
                     fernbedienung_task.set(fernbedienung(device, rx, updates_tx.clone()).right_future());
                 },
                 Request::AssociateXbee(device) => {
                     let (tx, rx) = mpsc::channel(8);
                     xbee_tx = Some(tx);
+                    xbee_addr = Some(device.addr);
+                    let _ = updates_tx.send(Update::XbeeConnected(device.addr));
                     xbee_task.set(xbee(device, rx, updates_tx.clone()).right_future());
-                },
-                Request::GetDescriptor(callback) => {
-                    let _ = callback.send(descriptor.clone());
                 },
                 Request::Subscribe(callback) => {
                     /* note that upon subscribing all updates should be sent to ensure
                        that new clients are in sync */
                     if let Ok(_) = callback.send(updates_tx.subscribe()) {
-                        let _ = updates_tx.send(Update::Descriptor(descriptor.clone()));
+                        if let Some(addr) = xbee_addr {
+                            let _ = updates_tx.send(Update::XbeeConnected(addr));
+                        }
+                        if let Some(addr) = fernbedienung_addr {
+                            let _ = updates_tx.send(Update::FernbedienungConnected(addr));
+                        }
                     }
                 },
                 Request::StartExperiment { software, journal, callback } => log::warn!("not implemented"),
                 Request::StopExperiment => log::warn!("not implemented"),
             },
-            result = &mut fernbedienung_task => {
+            _ = &mut fernbedienung_task => {
                 fernbedienung_tx = None;
+                fernbedienung_addr = None;
                 fernbedienung_task.set(futures::future::pending().left_future());
-                if let Err(error) = result {
-                    log::info!("Fernbedienung task terminated: {}", error);
-                }
+                let _ = updates_tx.send(Update::FernbedienungDisconnected);
             },
-            result = &mut xbee_task => {
+            _ = &mut xbee_task => {
                 xbee_tx = None;
+                xbee_addr = None;
                 xbee_task.set(futures::future::pending().left_future());
-                if let Err(error) = result {
-                    log::info!("Xbee task terminated: {}", error);
-                }
+                let _ = updates_tx.send(Update::XbeeDisconnected);
             }
         }
     }

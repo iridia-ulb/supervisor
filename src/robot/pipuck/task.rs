@@ -32,8 +32,6 @@ pub enum Request {
     // updates are sent only on changes
     Subscribe(oneshot::Sender<broadcast::Receiver<Update>>),
 
-    GetDescriptor(oneshot::Sender<Descriptor>),
-
     StartExperiment {
         software: software::Software,
         journal: mpsc::Sender<journal::Request>,
@@ -139,7 +137,7 @@ async fn fernbedienung(
 
 // TODO: I think actions and requests can be merged
 
-pub async fn new(mut request_rx: Receiver, descriptor: Descriptor) {
+pub async fn new(mut request_rx: Receiver) {
     let fernbedienung_task = futures::future::pending().left_future();
     /* fernbedienung_tx is for forwarding requests to the fernbedienung task */
     let mut fernbedienung_tx = Option::default();
@@ -156,14 +154,11 @@ pub async fn new(mut request_rx: Receiver, descriptor: Descriptor) {
                     fernbedienung_tx = Some(tx);
                     fernbedienung_task.set(fernbedienung(device, rx, updates_tx.clone()).right_future());
                 },
-                Request::GetDescriptor(callback) => {
-                    let _ = callback.send(descriptor.clone());
-                },
                 Request::Subscribe(callback) => {
                     /* note that upon subscribing all updates should be resent to ensure
                        that new clients are in sync */
                     if let Ok(_) = callback.send(updates_tx.subscribe()) {
-                        let _ = updates_tx.send(Update::Descriptor(descriptor.clone()));
+                        //
                     }
                 },
                 Request::StartExperiment { software, journal, callback } => log::warn!("not implemented"),

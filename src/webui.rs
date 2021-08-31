@@ -1,9 +1,10 @@
 use anyhow::Context;
 use headers::HeaderMapExt;
-use std::{net::SocketAddr, time::Duration};
+use lazy_static::__Deref;
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use tokio_stream::{StreamMap, wrappers::{BroadcastStream, errors::BroadcastStreamRecvError}};
-use futures::{FutureExt, SinkExt, StreamExt, TryFutureExt, TryStreamExt, stream::FuturesUnordered};
+use futures::{FutureExt, SinkExt, StreamExt, TryFutureExt, TryStreamExt, stream::{self, FuturesUnordered}};
 use tokio::{self, sync::{broadcast, mpsc, oneshot}, time::timeout};
 
 use warp::{Filter};
@@ -58,43 +59,59 @@ async fn handle_client(
 ) {
     /* subscribe to drone updates and map them to websocket messages */
     let drone_updates = match subscribe_drone_updates(&arena_tx).await {
-        Ok(stream) => stream
-            .filter_map(|(id, update)| async {
-                match update {
-                    Ok(update) => {
-                        Some(shared::DownMessage::UpdateDrone(id, update))
+        Ok(updates) => {
+            let add_drone_messages = updates.keys()
+                .cloned()
+                .map(|desc| shared::DownMessage::AddDrone(desc.deref().clone()))
+                .collect::<Vec<_>>();
+            let update_drone_messages = updates
+                .filter_map(|(desc, update)| async move {
+                    match update {
+                        Ok(update) => {
+                            Some(shared::DownMessage::UpdateDrone(desc.id.clone(), update))
+                        }
+                        Err(BroadcastStreamRecvError::Lagged(count)) => {
+                            log::warn!("Client missed {} messages for {}", count, desc);
+                            None
+                        }
                     }
-                    Err(BroadcastStreamRecvError::Lagged(count)) => {
-                        log::warn!("Client missed {} messages for {}", count, id);
-                        None
-                    }
-                }
-            })
-            .map(|message| bincode::serialize(&message)
-                .context("Could not serialize drone message"))
-            .map_ok(|encoded| warp::ws::Message::binary(encoded)),
+                });
+            /* send the add drone messages first, then stream the drone updates */
+            stream::iter(add_drone_messages).chain(update_drone_messages)
+                .map(|message| bincode::serialize(&message)
+                    .context("Could not serialize drone message"))
+                .map_ok(|encoded| warp::ws::Message::binary(encoded))
+        },
         Err(error) => {
             log::error!("Could not initialize client: {}", error);
             return;
         }
     };
-    /* subscribe to Pi-Puck updates and map them to websocket messages */
+    /* subscribe to pipuck updates and map them to websocket messages */
     let pipuck_updates = match subscribe_pipuck_updates(&arena_tx).await {
-        Ok(stream) => stream
-            .filter_map(|(id, update)| async {
-                match update {
-                    Ok(update) => {
-                        Some(shared::DownMessage::UpdatePiPuck(id, update))
+        Ok(updates) => {
+            let add_pipuck_messages = updates.keys()
+                .cloned()
+                .map(|desc| shared::DownMessage::AddPiPuck(desc.deref().clone()))
+                .collect::<Vec<_>>();
+            let update_pipuck_messages = updates
+                .filter_map(|(desc, update)| async move {
+                    match update {
+                        Ok(update) => {
+                            Some(shared::DownMessage::UpdatePiPuck(desc.id.clone(), update))
+                        }
+                        Err(BroadcastStreamRecvError::Lagged(count)) => {
+                            log::warn!("Client missed {} messages for {}", count, desc);
+                            None
+                        }
                     }
-                    Err(BroadcastStreamRecvError::Lagged(count)) => {
-                        log::warn!("Client missed {} messages for {}", count, id);
-                        None
-                    }
-                }
-            })
-            .map(|message| bincode::serialize(&message)
-                .context("Could not serialize Pi-Puck message"))
-            .map_ok(|encoded| warp::ws::Message::binary(encoded)),
+                });
+            /* send the add drone messages first, then stream the pipuck updates */
+            stream::iter(add_pipuck_messages).chain(update_pipuck_messages)
+                .map(|message| bincode::serialize(&message)
+                    .context("Could not serialize Pi-Puck message"))
+                .map_ok(|encoded| warp::ws::Message::binary(encoded))
+        },
         Err(error) => {
             log::error!("Could not initialize client: {}", error);
             return;
@@ -104,6 +121,9 @@ async fn handle_client(
     tokio::pin!(pipuck_updates);
     tokio::pin!(drone_updates);
     let (mut websocket_tx, mut websocket_rx) = ws.split();
+
+    /* send all descriptors to client */
+    
 
 
     loop {
@@ -150,56 +170,57 @@ async fn handle_client(
 
 async fn subscribe_drone_updates(
     arena_tx: &mpsc::Sender<arena::Request>
-) -> anyhow::Result<StreamMap<String, BroadcastStream<drone::Update>>> {
+) -> anyhow::Result<StreamMap<Arc<drone::Descriptor>, BroadcastStream<drone::Update>>> {
     let (callback_tx, callback_rx) = oneshot::channel();
-    let update_streams = arena_tx.send(arena::Request::GetDroneIds(callback_tx))
-        .map_err(|_| anyhow::anyhow!("Could not request drone identifers"))
+    let update_streams = arena_tx.send(arena::Request::GetDroneDescriptors(callback_tx))
+        .map_err(|_| anyhow::anyhow!("Could not request drone descriptors"))
         .and_then(|_| callback_rx
-            .map(|result| result.context("Could not get drone identifers")))
-        .and_then(|drone_ids| drone_ids.into_iter()
-            .map(|drone_id| {
+            .map(|result| result.context("Could not get drone descriptors")))
+        .and_then(|drone_descs| drone_descs.into_iter()
+            .map(|drone_desc| {
                 let (callback_tx, callback_rx) = oneshot::channel();
                 let request = drone::Request::Subscribe(callback_tx);
-                arena_tx.send(arena::Request::ForwardDroneRequest(drone_id.clone(), request))
+                arena_tx.send(arena::Request::ForwardDroneRequest(drone_desc.clone(), request))
                     .map_err(|_| anyhow::anyhow!("Could not request drone updates"))
                     .and_then(|_| callback_rx
                         .map(|result| result.context("Could not subscribe to drone updates"))
-                        .map_ok(|receiver| (drone_id, BroadcastStream::new(receiver))))
+                        .map_ok(|receiver| (drone_desc, BroadcastStream::new(receiver))))
             })
             .collect::<FuturesUnordered<_>>()
             .try_collect::<Vec<_>>()
         ).await?;
     let mut drone_update_stream_map = StreamMap::new();
-    for (id, update_stream) in update_streams {
-        drone_update_stream_map.insert(id, update_stream);
+    for (desc, update_stream) in update_streams {
+        drone_update_stream_map.insert(desc, update_stream);
     }
     Ok(drone_update_stream_map)
 }
 
 async fn subscribe_pipuck_updates(
     arena_tx: &mpsc::Sender<arena::Request>
-) -> anyhow::Result<StreamMap<String, BroadcastStream<pipuck::Update>>> {
+) -> anyhow::Result<StreamMap<Arc<pipuck::Descriptor>, BroadcastStream<pipuck::Update>>> {
     let (callback_tx, callback_rx) = oneshot::channel();
-    let update_streams = arena_tx.send(arena::Request::GetPiPuckIds(callback_tx))
-        .map_err(|_| anyhow::anyhow!("Could not request Pi-Puck identifers"))
+    let update_streams = arena_tx.send(arena::Request::GetPiPuckDescriptors(callback_tx))
+        .map_err(|_| anyhow::anyhow!("Could not request Pi-Puck descriptors"))
         .and_then(|_| callback_rx
-            .map(|result| result.context("Could not get Pi-Puck identifers")))
-        .and_then(|pipuck_ids| pipuck_ids.into_iter()
-            .map(|pipuck_id| {
+            .map(|result| result.context("Could not get Pi-Puck descriptors")))
+        .and_then(|pipuck_descs| pipuck_descs.into_iter()
+            .map(|pipuck_desc| {
                 let (callback_tx, callback_rx) = oneshot::channel();
                 let request = pipuck::Request::Subscribe(callback_tx);
-                arena_tx.send(arena::Request::ForwardPiPuckRequest(pipuck_id.clone(), request))
+                arena_tx.send(arena::Request::ForwardPiPuckRequest(pipuck_desc.clone(), request))
                     .map_err(|_| anyhow::anyhow!("Could not request Pi-Puck updates"))
                     .and_then(|_| callback_rx
                         .map(|result| result.context("Could not subscribe to Pi-Puck updates"))
-                        .map_ok(|receiver| (pipuck_id, BroadcastStream::new(receiver))))
+                        .map_ok(|receiver| (pipuck_desc, BroadcastStream::new(receiver))))
             })
             .collect::<FuturesUnordered<_>>()
             .try_collect::<Vec<_>>()
         ).await?;
+    
     let mut pipuck_update_stream_map = StreamMap::new();
-    for (id, update_stream) in update_streams {
-        pipuck_update_stream_map.insert(id, update_stream);
+    for (desc, update_stream) in update_streams {
+        pipuck_update_stream_map.insert(desc, update_stream);
     }
     Ok(pipuck_update_stream_map)
 }

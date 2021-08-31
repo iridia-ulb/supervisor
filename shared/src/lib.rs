@@ -10,9 +10,9 @@ pub enum UpMessage {
     //send me all drones/pipucks
     GetDescriptors,
     // perform action on drone with this id
-    DroneAction(String, drone::Action),
+    DroneAction(drone::Descriptor, drone::Action),
     // perform action on pipuck with this id
-    PiPuckAction(String, pipuck::Action),
+    PiPuckAction(pipuck::Descriptor, pipuck::Action),
 }
 
 // backend to frontend, status updates

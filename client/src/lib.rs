@@ -1,4 +1,4 @@
-use std::{cell::RefCell, convert::AsRef, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, convert::AsRef, rc::Rc};
 use strum::{EnumProperty, IntoEnumIterator};
 use strum_macros::{AsRefStr, EnumIter, EnumProperty};
 use wasm_bindgen::prelude::*;
@@ -22,7 +22,8 @@ struct UserInterface {
     link: ComponentLink<Self>,
     socket: Option<WebSocketTask>,
     active_tab: Tab,
-    drones: Vec<Rc<RefCell<drone::Instance>>>,
+    drones: HashMap<String, Rc<RefCell<drone::Instance>>>,
+    //pipucks: HashMap<shared::pipuck::Descriptor, Rc<RefCell<pipuck::Instance>>>,
 }
 
 
@@ -55,13 +56,13 @@ impl Component for UserInterface {
                                              callback_data,
                                              callback_notification);
         // Delete me
-        let desc = shared::drone::Descriptor {
-            id: "drone1".into(),
-            xbee_macaddr: [0,0,0,0,0,0].into(),
-            upcore_macaddr: [0,0,0,0,0,0].into(),
-            optitrack_id: Some(42),
-        };
-        let desc_vec = vec![Rc::new(RefCell::new(drone::Instance::new(desc)))];
+        // let desc = shared::drone::Descriptor {
+        //     id: "drone1".into(),
+        //     xbee_macaddr: [0,0,0,0,0,0].into(),
+        //     upcore_macaddr: [0,0,0,0,0,0].into(),
+        //     optitrack_id: Some(42),
+        // };
+        // let desc_vec = vec![Rc::new(RefCell::new(drone::Instance::new(desc)))];
         // Delete me
         Self {
             link,
@@ -73,7 +74,8 @@ impl Component for UserInterface {
                 }
             },
             active_tab: Tab::Drones,
-            drones: desc_vec, // Default::default(),
+            drones: Default::default(),
+            //pipucks: Default::default(),
         }
     }
 
@@ -90,29 +92,22 @@ impl Component for UserInterface {
                 self.active_tab = tab;
                 true
             }
-            Msg::Data(data) => match data {
+            Msg::Data(data) => { ConsoleService::log("Got Msg::Data!"); match data {
                 Ok(data) => match bincode::deserialize::<shared::DownMessage>(&data) {
                     Ok(decoded) => match decoded {
-                        shared::DownMessage::AddDrone(descriptor) => {
-                            // if self.drones.iter().find(|drone| drone.descriptor.id == descriptor.id).is_none() {
-                            //     self.drones.push(drone::Instance::new(descriptor));
-                            // }
-                            true
-                        }
-                        shared::DownMessage::UpdateDrone(id, update) => {
-                            // match self.drones.iter_mut().find(|drone| drone.descriptor.id == id) {
-                            //     Some(drone) => drone.update(update),
-                            //     None => ConsoleService::log(&format!("Drone {} not added to interface", id)),
-                            // }
+                        shared::DownMessage::AddDrone(desc) => {
+                            self.drones.entry(desc.id.clone())
+                                .or_insert_with(|| Rc::new(RefCell::new(drone::Instance::new(desc))));
                             true
                         },
-                        shared::DownMessage::AddPiPuck(descriptor) => {
-                            // if self.pipucks.iter().find(|pipuck| pipuck.descriptor.id == descriptor.id).is_none() {
-                            //     self.pipucks.push(pipuck::PiPuck::new(descriptor));
-                            // }
+                        shared::DownMessage::UpdateDrone(id, update) => {
+                            if let Some(drone) = self.drones.get(&id) {
+                                drone.borrow_mut().update(update);
+                            }
                             true
-                        }
-                        shared::DownMessage::UpdatePiPuck(id, update) => {
+                        },
+                        _ => {
+                            // TODO
                             true
                         },
                     },
@@ -125,7 +120,7 @@ impl Component for UserInterface {
                     ConsoleService::log(&format!("2. {:?}", err));
                     false
                 },
-            },
+            }},
             Msg::Notifcation(notification) => {
                 ConsoleService::log(&format!("{:?}", notification));
                 true
@@ -148,14 +143,14 @@ impl Component for UserInterface {
                         <div class="columns is-multiline is-mobile">
                             <div class="column is-full-mobile is-full-tablet is-full-desktop is-half-widescreen is-one-third-fullhd"> {
                                 match self.active_tab {
-                                    Tab::Drones => {
-                                        self.drones.iter().map(|drone| html!{
+                                    Tab::Drones => self.drones
+                                        .values()
+                                        .map(|drone| html!{
                                             <drone::Card instance=drone />
-                                        }).collect::<Html>()
-                                    }
+                                        }).collect::<Html>(),
                                     Tab::PiPucks => {
                                         html! {}
-                                    }
+                                    },
                                     Tab::Experiment => {
                                         html! {}
                                     }

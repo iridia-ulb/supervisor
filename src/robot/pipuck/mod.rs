@@ -11,10 +11,10 @@ pub struct Instance {
     task: JoinHandle<()>
 }
 
-impl Instance {
-    pub fn new(descriptor: Descriptor) -> Self {
+impl Default for Instance {
+    fn default() -> Self {
         let (request_tx, request_rx) = mpsc::channel(8);
-        let task = tokio::spawn(task::new(request_rx, descriptor));
+        let task = tokio::spawn(task::new(request_rx));
         Self {
             request_tx,
             task

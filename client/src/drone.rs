@@ -1,3 +1,4 @@
+use core::str;
 use std::{cell::RefCell, net::Ipv4Addr, rc::Rc};
 
 use shared::drone;
@@ -13,8 +14,8 @@ enum Terminal {
 
 enum Pixhawk {
     Connected {
-        ip: Ipv4Addr,
-        signal: u8,
+        addr: Ipv4Addr,
+        signal: Result<i32, String>,
         terminal: Terminal,
     },
     Disconnected,
@@ -22,8 +23,8 @@ enum Pixhawk {
 
 enum UpCore {
     Connected {
-        ip: Ipv4Addr,
-        signal: u8,
+        addr: Ipv4Addr,
+        signal: Result<i32, String>,
         terminal: Terminal,
     },
     Disconnected,
@@ -50,6 +51,33 @@ impl Instance {
     }
 
     pub fn update(&mut self, update: shared::drone::Update) {
+        match update {
+            drone::Update::Camera { camera, result } => {},
+            drone::Update::FernbedienungConnected(addr) => 
+                self.upcore = UpCore::Connected {
+                    addr,
+                    signal: Err(String::from("Unknown")),
+                    terminal: Terminal::Inactive
+                },
+            drone::Update::FernbedienungDisconnected => 
+                self.upcore = UpCore::Disconnected,
+            drone::Update::FernbedienungSignal(strength) => 
+                if let UpCore::Connected { signal, ..} = &mut self.upcore {
+                    *signal = Ok(strength);
+                },
+            drone::Update::XbeeConnected(addr) => 
+                self.pixhawk = Pixhawk::Connected {
+                    addr,
+                    signal: Err(String::from("Unknown")),
+                    terminal: Terminal::Inactive
+                },
+            drone::Update::XbeeDisconnected => 
+                self.pixhawk = Pixhawk::Disconnected,
+            drone::Update::XbeeSignal(strength) => 
+                if let Pixhawk::Connected { signal, ..} = &mut self.pixhawk {
+                    *signal = Ok(strength);
+                },
+        }
     }
 }
 
@@ -58,7 +86,7 @@ pub struct Card {
     props: Props,
     bash_terminal_visible: bool,
     mavlink_terminal_visible: bool,
-    camera_modal_active: bool
+    camera_dialog_active: bool
 }
 
 // what if properties was just drone::Instance itself?
@@ -85,7 +113,7 @@ impl Component for Card {
             link,
             bash_terminal_visible: false,
             mavlink_terminal_visible: false,
-            camera_modal_active: false
+            camera_dialog_active: false
         }
     }
 
@@ -101,7 +129,7 @@ impl Component for Card {
                 true
             },
             Msg::ToggleCameraStream => {
-                self.camera_modal_active = !self.camera_modal_active;
+                self.camera_dialog_active = !self.camera_dialog_active;
                 true
             }
         }
@@ -154,7 +182,7 @@ impl Component for Card {
 
 impl Card {
     fn render_camera_modal(&self, drone: &Instance) -> Html {
-        if self.camera_modal_active {
+        if self.camera_dialog_active {
             let disable_onclick = self.link.callback(|_| Msg::ToggleCameraStream);
             html! {
                 <div class="modal is-active">
@@ -194,15 +222,18 @@ impl Card {
     }
 
     fn render_upcore(&self, drone: &Instance) -> Html {
-        let wifi_signal_strength = format!("images/wifi{}.svg", match drone.upcore {
-            UpCore::Disconnected => '0',
+        let (wifi_signal_level, wifi_signal_info) = match &drone.upcore {
+            UpCore::Disconnected => (0, String::from("Disconnected")),
             UpCore::Connected { signal, .. } => match signal {
-                0..=24 => '1',
-                25..=49 => '2',
-                50..=74 => '3',
-                _ => '4',
-            },
-        });
+                Err(message) => (0, message.clone()),
+                Ok(level) => (match level {
+                    0..=24 => 1,
+                    25..=49 => 2,
+                    50..=74 => 3,
+                    _ => 4,
+                }, format!("{}%", level))
+            }
+        };
         let term_btn_onclick = self.link.callback(|_| Msg::ToggleBashTerminal);
         let term_disabled = match &drone.upcore {
             UpCore::Connected { terminal, .. } => match terminal {
@@ -265,7 +296,7 @@ impl Card {
                         <div class="notification has-text-centered">
                             <p style="line-height:32px"> {
                                 match drone.upcore {
-                                    UpCore::Connected { ip, .. } => ip.to_string(),
+                                    UpCore::Connected { addr, .. } => addr.to_string(),
                                     UpCore::Disconnected => "Disconnected".to_owned()
                                 }
                             } </p>
@@ -274,7 +305,7 @@ impl Card {
                     <div class="column is-one-fifth">
                         <div class="notification has-text-centered">
                             <figure class="image mx-auto is-32x32">
-                                <img src=wifi_signal_strength />
+                                <img src=format!("images/wifi{}.svg", wifi_signal_level) title=wifi_signal_info />
                             </figure>
                         </div>
                     </div>
@@ -284,15 +315,18 @@ impl Card {
     }
     
     fn render_pixhawk(&self, drone: &Instance) -> Html {
-        let wifi_signal_strength = format!("images/wifi{}.svg", match drone.pixhawk {
-            Pixhawk::Disconnected => '0',
+        let (wifi_signal_level, wifi_signal_info) = match &drone.pixhawk {
+            Pixhawk::Disconnected => (0, String::from("Disconnected")),
             Pixhawk::Connected { signal, .. } => match signal {
-                0..=24 => '1',
-                25..=49 => '2',
-                50..=74 => '3',
-                _ => '4',
-            },
-        });
+                Err(message) => (0, message.clone()),
+                Ok(level) => (match level {
+                    0..=24 => 1,
+                    25..=49 => 2,
+                    50..=74 => 3,
+                    _ => 4,
+                }, format!("{}%", level))
+            }
+        };
         let term_btn_onclick = self.link.callback(|_| Msg::ToggleMavlinkTerminal);
         let term_disabled = match &drone.pixhawk {
             Pixhawk::Connected { terminal, .. } => match terminal {
@@ -355,7 +389,7 @@ impl Card {
                         <div class="notification has-text-centered">
                             <p style="line-height:32px"> {
                                 match drone.pixhawk {
-                                    Pixhawk::Connected { ip, .. } => ip.to_string(),
+                                    Pixhawk::Connected { addr, .. } => addr.to_string(),
                                     Pixhawk::Disconnected => "Disconnected".to_owned()
                                 }
                             } </p>
@@ -364,7 +398,7 @@ impl Card {
                     <div class="column is-one-fifth">
                         <div class="notification has-text-centered">
                             <figure class="image mx-auto is-32x32">
-                                <img src=wifi_signal_strength />
+                                <img src=format!("images/wifi{}.svg", wifi_signal_level) title=wifi_signal_info />
                             </figure>
                         </div>
                     </div>
