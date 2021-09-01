@@ -7,12 +7,10 @@ use serde::{Serialize, Deserialize};
 // frontend to backend,
 #[derive(Serialize, Deserialize, Debug)]
 pub enum UpMessage {
-    //send me all drones/pipucks
-    GetDescriptors,
     // perform action on drone with this id
-    DroneAction(drone::Descriptor, drone::Action),
+    DroneAction(String, drone::Action),
     // perform action on pipuck with this id
-    PiPuckAction(pipuck::Descriptor, pipuck::Action),
+    PiPuckAction(String, pipuck::Action),
 }
 
 // backend to frontend, status updates

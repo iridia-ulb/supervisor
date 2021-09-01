@@ -1,4 +1,5 @@
 use std::{cell::RefCell, collections::HashMap, convert::AsRef, rc::Rc};
+use anyhow::Context;
 use strum::{EnumProperty, IntoEnumIterator};
 use strum_macros::{AsRefStr, EnumIter, EnumProperty};
 use wasm_bindgen::prelude::*;
@@ -9,7 +10,7 @@ use yew::services::ConsoleService;
 mod drone;
 
 #[derive(AsRefStr, EnumProperty, EnumIter, Copy, Clone, PartialEq)]
-enum Tab {
+pub enum Tab {
     #[strum(serialize = "Drones", props(icon = "mdi-quadcopter"))]
     Drones,
     #[strum(serialize = "Pi-Pucks", props(icon = "mdi-circle-slice-8"))]
@@ -18,7 +19,7 @@ enum Tab {
     Experiment,
 }
 
-struct UserInterface {
+pub struct UserInterface {
     link: ComponentLink<Self>,
     socket: Option<WebSocketTask>,
     active_tab: Tab,
@@ -28,11 +29,12 @@ struct UserInterface {
 
 
 
-enum Msg {
+pub enum Msg {
 
     // TODO: handle disconnects by matching against WebSocketStatus::Closed or WebSocketStatus::Error
-    Notifcation(WebSocketStatus),
-    Data(Result<Vec<u8>, anyhow::Error>),
+    WebSocketNotifcation(WebSocketStatus),
+    WebSocketRxData(Result<Vec<u8>, anyhow::Error>),
+    SendUpMessage(shared::UpMessage),
     SetActiveTab(Tab),
 }
 
@@ -48,22 +50,13 @@ impl Component for UserInterface {
             .unwrap();
         let service_addr = format!("ws://{}/socket", service_addr);
         let callback_data =
-            link.callback(|data| Msg::Data(data));
+            link.callback(|data| Msg::WebSocketRxData(data));
         let callback_notification =
-            link.callback(|notification| Msg::Notifcation(notification));
+            link.callback(|notification| Msg::WebSocketNotifcation(notification));
         let socket =
             WebSocketService::connect_binary(&service_addr,
                                              callback_data,
                                              callback_notification);
-        // Delete me
-        // let desc = shared::drone::Descriptor {
-        //     id: "drone1".into(),
-        //     xbee_macaddr: [0,0,0,0,0,0].into(),
-        //     upcore_macaddr: [0,0,0,0,0,0].into(),
-        //     optitrack_id: Some(42),
-        // };
-        // let desc_vec = vec![Rc::new(RefCell::new(drone::Instance::new(desc)))];
-        // Delete me
         Self {
             link,
             socket: match socket {
@@ -79,20 +72,22 @@ impl Component for UserInterface {
         }
     }
 
-    // pub enum DownMessage {
-    //     // broadcast, trigger by change in actual drone
-    //     UpdateDrone(String, drone::Update),
-    //     UpdatePiPuck(String, pipuck::Update),
-    // }
-    
-
     fn update(&mut self, message: Self::Message) -> ShouldRender {
         match message {
             Msg::SetActiveTab(tab) => {
                 self.active_tab = tab;
                 true
             }
-            Msg::Data(data) => { ConsoleService::log("Got Msg::Data!"); match data {
+            Msg::SendUpMessage(message) => {
+                if let Some(websocket) = &mut self.socket {
+                    websocket.send_binary(bincode::serialize(&message).context("Could not serialize UpMessage"));  
+                }
+                else {
+                    ConsoleService::log("Could not send UpMessage: Not connected");
+                }
+                false
+            }
+            Msg::WebSocketRxData(data) => match data {
                 Ok(data) => match bincode::deserialize::<shared::DownMessage>(&data) {
                     Ok(decoded) => match decoded {
                         shared::DownMessage::AddDrone(desc) => {
@@ -120,8 +115,8 @@ impl Component for UserInterface {
                     ConsoleService::log(&format!("2. {:?}", err));
                     false
                 },
-            }},
-            Msg::Notifcation(notification) => {
+            },
+            Msg::WebSocketNotifcation(notification) => {
                 ConsoleService::log(&format!("{:?}", notification));
                 true
             }
@@ -146,7 +141,7 @@ impl Component for UserInterface {
                                     Tab::Drones => self.drones
                                         .values()
                                         .map(|drone| html!{
-                                            <drone::Card instance=drone />
+                                            <drone::Card instance=drone parent=self.link.clone() />
                                         }).collect::<Html>(),
                                     Tab::PiPucks => {
                                         html! {}

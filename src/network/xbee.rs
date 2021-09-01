@@ -1,12 +1,11 @@
 use bytes::{BytesMut, Buf, BufMut};
 use bitvec::view::BitView;
+use futures::{StreamExt, TryStreamExt, SinkExt, stream::FuturesUnordered};
 use macaddr::MacAddr6;
+use std::fmt::Debug;
 use std::{collections::HashMap, convert::TryFrom, net::SocketAddr, ops::BitXor, time::Duration};
 use std::net::Ipv4Addr;
-
-use futures::{SinkExt, stream::FuturesUnordered};
 use tokio::{net::UdpSocket, sync::{oneshot, mpsc}, time::Instant};
-use tokio_stream::StreamExt;
 use tokio_util::{codec::{Decoder, Encoder}, udp::UdpFramed};
 
 const CONFIG_CMD_LEN: usize = 12;
@@ -52,7 +51,7 @@ pub enum PinMode {
     //OutputDefaultHigh = 5,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub enum Pin {
     DIO0 = 0,
     DIO1 = 1,
@@ -126,6 +125,12 @@ pub struct Device {
     pub addr: Ipv4Addr,
     request_tx: mpsc::Sender<Request>,
     return_addr_tx: Option<oneshot::Sender<Ipv4Addr>>,
+}
+
+impl Debug for Device {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Xbee@{}", self.addr)
+    }
 }
 
 impl Drop for Device {
@@ -360,7 +365,7 @@ impl Device {
         value.first().cloned().map(|state| state as i32).ok_or(Error::DecodeError)
     }
 
-    pub async fn pin_states(&self) -> Result<Vec<(Pin, bool)>> {
+    pub async fn pin_states(&self) -> Result<HashMap<Pin, bool>> {
         let (response_tx, response_rx) = oneshot::channel();
         let request = Request::GetParameter([b'I',b'S'], response_tx);
         self.request_tx.send(request).await.map_err(|_| Error::RequestFailed)?;
@@ -377,14 +382,14 @@ impl Device {
             let digital_samples = digital_samples.view_bits::<bitvec::order::Lsb0>();
             digital_mask.iter_ones().map(|index| {
                 <Pin>::try_from(index).map(|pin| (pin, digital_samples[index]))
-            }).collect::<Result<Vec<_>>>()
+            }).collect::<Result<HashMap<_,_>>>()
         }
         else {
             Err(Error::DecodeError)
         }
     }
 
-    pub async fn write_outputs(&self, config: Vec<(Pin, bool)>) -> Result<()> {
+    pub async fn write_outputs(&self, config: &[(Pin, bool)]) -> Result<()> {
         let mut om_config: u16 = 0;
         let mut io_config: u16 = 0;
         for (pin, mode) in config.iter() {
@@ -411,9 +416,9 @@ impl Device {
         let pin_states = self.pin_states().await?;
         /* check if they were set correctly */
         for (target_pin, target_mode) in config.iter() {
-            pin_states.iter().find(|(pin, _)| pin == target_pin)
+            pin_states.get(target_pin)
                 .ok_or(Error::RequestFailed)
-                .and_then(|(_, mode)| match target_mode == mode {
+                .and_then(|mode| match target_mode == mode {
                     true => Ok(()),
                     false => Err(Error::RequestFailed)
                 })?;
@@ -421,7 +426,7 @@ impl Device {
         Ok(())
     }
 
-    pub async fn set_pin_modes(&self, modes: Vec<(Pin, PinMode)>) -> Result<()> {
+    pub async fn set_pin_modes(&self, modes: &[(Pin, PinMode)]) -> Result<()> {
         for (pin, mode) in modes.iter() {
             let request = 
                 Request::SetParameter(<[u8; 2]>::from(*pin),
@@ -434,31 +439,29 @@ impl Device {
         modes.into_iter()
             .map(|(pin, mode)| {
                 let (response_tx, response_rx) = oneshot::channel();
-                let request = Request::GetParameter(<[u8; 2]>::from(pin), response_tx);
+                let request = Request::GetParameter(<[u8; 2]>::from(*pin), response_tx);
                 let result = self.request_tx.send(request);
                 async move {
-                    (match result.await {
-                        Ok(_) => response_rx.await
-                            .map_err(|_| Error::RequestFailed)
-                            .and_then(|inner| inner),
-                        Err(_) => Err(Error::RequestFailed)
-                    }, mode)
+                    match result.await {
+                        Ok(_) => match response_rx.await {
+                            Ok(response) => match response {
+                                Ok(mut response) => match response.has_remaining() {
+                                    true => match response.get_u8() == *mode as u8 {
+                                        true => Ok(()),
+                                        _ => Err(Error::RequestFailed) 
+                                    },
+                                    _ => Err(Error::RequestFailed)
+                                },
+                                Err(error) => Err(error)
+                            },
+                            Err(_) => Err(Error::RequestFailed),
+                        },
+                        Err(_) => Err(Error::RequestFailed),
+                    }
                 }
             })
             .collect::<FuturesUnordered<_>>()
-            .collect::<Vec<_>>().await.into_iter()
-            .map(|(response, target_mode)| response
-                .and_then(|mut response| {
-                    match response.len() {
-                        1 => match response.get_u8() == target_mode as u8 {
-                            true => Ok(()),
-                            false => Err(Error::RequestFailed)
-                        },
-                        _ => Err(Error::RequestFailed)
-                    }
-                })
-            )
-            .collect::<Result<Vec<_>>>()
+            .try_collect::<Vec<_>>().await
             .map(|_| ())
     }
 

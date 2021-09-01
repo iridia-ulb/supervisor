@@ -18,16 +18,23 @@ impl Display for Descriptor {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub enum Action {
-    UpCorePowerOn,
-    UpCoreHalt,
-    UpCorePowerOff,
-    UpCoreReboot,
-    PixhawkPowerOn,
-    PixhawkPowerOff,
-    StartCameraStream,
-    StopCameraStream,
+    Fernbedienung(FernbedienungAction),
+    Xbee(XbeeAction)
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub enum FernbedienungAction {
+    Halt,
+    Reboot,
+    SetCameraStream(bool),
     GetKernelMessages,
     Identify,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub enum XbeeAction {
+    SetUpCorePower(bool),
+    SetPixhawkPower(bool),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -44,6 +51,11 @@ pub enum Update {
     // indicates whether the xbee connection is up or down
     XbeeConnected(Ipv4Addr),
     XbeeDisconnected,
-    XbeeSignal(i32)
+    XbeeSignal(i32),
+
+    PowerState {
+        pixhawk: bool,
+        upcore: bool,
+    }
 }
 

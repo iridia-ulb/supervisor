@@ -121,11 +121,6 @@ async fn handle_client(
     tokio::pin!(pipuck_updates);
     tokio::pin!(drone_updates);
     let (mut websocket_tx, mut websocket_rx) = ws.split();
-
-    /* send all descriptors to client */
-    
-
-
     loop {
         tokio::select! {
             /* requests from client */
@@ -134,9 +129,16 @@ async fn handle_client(
                     if message.is_close() {
                         break;
                     }
-                    let message = bincode::deserialize::<shared::UpMessage>(message.as_bytes());
-                    // TODO
-                    log::info!("{:?}", message);
+                    match bincode::deserialize::<shared::UpMessage>(message.as_bytes()) {
+                        Ok(message) => match message {
+                            shared::UpMessage::DroneAction(id, action) => {
+                                let request = drone::Request::Execute(action);
+                                let _ = arena_tx.send(arena::Request::ForwardDroneRequest(id, request)).await;
+                            },
+                            shared::UpMessage::PiPuckAction(id, action) => todo!(),
+                        },
+                        Err(_) => todo!(),
+                    }
                 }
                 Err(error) => {
                     log::warn!("{}", error);
@@ -166,8 +168,6 @@ async fn handle_client(
     }
 }
 
-// TODO after subscribing request drone update with descriptor?
-
 async fn subscribe_drone_updates(
     arena_tx: &mpsc::Sender<arena::Request>
 ) -> anyhow::Result<StreamMap<Arc<drone::Descriptor>, BroadcastStream<drone::Update>>> {
@@ -180,7 +180,7 @@ async fn subscribe_drone_updates(
             .map(|drone_desc| {
                 let (callback_tx, callback_rx) = oneshot::channel();
                 let request = drone::Request::Subscribe(callback_tx);
-                arena_tx.send(arena::Request::ForwardDroneRequest(drone_desc.clone(), request))
+                arena_tx.send(arena::Request::ForwardDroneRequest(drone_desc.id.clone(), request))
                     .map_err(|_| anyhow::anyhow!("Could not request drone updates"))
                     .and_then(|_| callback_rx
                         .map(|result| result.context("Could not subscribe to drone updates"))
@@ -208,7 +208,7 @@ async fn subscribe_pipuck_updates(
             .map(|pipuck_desc| {
                 let (callback_tx, callback_rx) = oneshot::channel();
                 let request = pipuck::Request::Subscribe(callback_tx);
-                arena_tx.send(arena::Request::ForwardPiPuckRequest(pipuck_desc.clone(), request))
+                arena_tx.send(arena::Request::ForwardPiPuckRequest(pipuck_desc.id.clone(), request))
                     .map_err(|_| anyhow::anyhow!("Could not request Pi-Puck updates"))
                     .and_then(|_| callback_rx
                         .map(|result| result.context("Could not subscribe to Pi-Puck updates"))
@@ -224,16 +224,6 @@ async fn subscribe_pipuck_updates(
     }
     Ok(pipuck_update_stream_map)
 }
-
-// the logic behind UI has changed significantly. Updates should now be sent only when there is something to update
-// this means that the drone actor itself should instigate the update, perhaps by sending a message.
-// actually, what we need is bidirectional communication, the webui needs to send messages to actors
-// (execute command, send update), but it also needs to recieve the updates and send them back to the client
-
-// UpMsgRequest<UpMsg> is message from the client such as UpMsg::Refresh or UpMesg::DroneExecuteAction
-// UpMsg::Refresh can use local state, i.e., we keep a Vec<DroneStatus> etc in this module which is updated by the actors
-// UpMsg::DroneExecuteAction needs to forwarded back to the actor, hence, we need `mpsc::Sender<arena::Request>` inside
-// up_message_handler
 
 // "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 fn generate_image_node(mime: &str, data: &[u8], style: &str) -> String {

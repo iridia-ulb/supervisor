@@ -1,3 +1,4 @@
+use std::fmt::Debug;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::collections::HashMap;
@@ -57,6 +58,12 @@ pub struct Device {
     pub addr: Ipv4Addr,
     request_tx: mpsc::Sender<Request>,
     return_addr_tx: Option<oneshot::Sender<Ipv4Addr>>,
+}
+
+impl Debug for Device {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Fernbedienung@{}", self.addr)
+    }
 }
 
 impl Drop for Device {
@@ -121,7 +128,7 @@ impl Device {
                         Ok(protocol::Response(uuid, response)) => {
                             if let Some(uuid) = uuid {
                                 if let Some(status_tx) = status_txs.get(&uuid) {
-                                    let _ = status_tx.send(response);
+                                    let _ = status_tx.send(response).await;
                                 }
                             }
                             else {
@@ -252,13 +259,13 @@ impl Device {
                     let request = protocol::Request(uuid, protocol::RequestKind::Process(
                         protocol::process::Request::Terminate)
                     );
-                    let _ = remote_requests_tx.send(request);
+                    let _ = remote_requests_tx.send(request).await;
                 },
                 Some(stdin) = stdin_rx.next() => {
                     let request = protocol::Request(uuid, protocol::RequestKind::Process(
                         protocol::process::Request::StandardInput(stdin))
                     );
-                    let _ = remote_requests_tx.send(request);
+                    let _ = remote_requests_tx.send(request).await;
 
                 },
                 Some(response) = run_status_rx.recv() => match response {
@@ -279,12 +286,12 @@ impl Device {
                         },
                         protocol::process::Response::StandardOutput(data) => {
                             if let Some(stdout_tx) = &stdout_tx {
-                                let _ = stdout_tx.send(data);
+                                let _ = stdout_tx.send(data).await;
                             }
                         },
                         protocol::process::Response::StandardError(data) => {
                             if let Some(stderr_tx) = &stderr_tx {
-                                let _ = stderr_tx.send(data);
+                                let _ = stderr_tx.send(data).await;
                             }
                         },
                     },

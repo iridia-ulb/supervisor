@@ -1,7 +1,5 @@
-use core::str;
-use std::{cell::RefCell, net::Ipv4Addr, rc::Rc};
-
-use shared::drone;
+use std::{cell::RefCell, collections::HashMap, net::Ipv4Addr, rc::Rc};
+use shared::{UpMessage, drone::{Action, Descriptor, FernbedienungAction, XbeeAction, Update}};
 use yew::{prelude::*, services::ConsoleService};
 //use wasm_bindgen::prelude::*;
 
@@ -16,6 +14,7 @@ enum Pixhawk {
     Connected {
         addr: Ipv4Addr,
         signal: Result<i32, String>,
+        battery: Result<u8, String>,
         terminal: Terminal,
     },
     Disconnected,
@@ -32,51 +31,64 @@ enum UpCore {
 
 
 pub struct Instance {
-    pub descriptor: drone::Descriptor,
-    battery: u8,
+    pub descriptor: Descriptor,
     optitrack_pos: [f32; 3],
     upcore: UpCore,
+    upcore_power: bool,
     pixhawk: Pixhawk,
+    pixhawk_power: bool,
+    camera_stream: HashMap<String, Result<String, String>>,
 }
 
 impl Instance {
-    pub fn new(descriptor: drone::Descriptor) -> Self {
+    pub fn new(descriptor: Descriptor) -> Self {
         Self { 
             descriptor, 
-            battery: 10, 
             optitrack_pos: [0.0, 0.0, 0.0],
             upcore: UpCore::Disconnected,
-            pixhawk: Pixhawk::Disconnected
+            upcore_power: false,
+            pixhawk: Pixhawk::Disconnected,
+            pixhawk_power: false,
+            camera_stream: Default::default(),
         }
     }
 
-    pub fn update(&mut self, update: shared::drone::Update) {
+    pub fn update(&mut self, update: Update) {
         match update {
-            drone::Update::Camera { camera, result } => {},
-            drone::Update::FernbedienungConnected(addr) => 
+            Update::Camera { camera, result } => {
+                self.camera_stream
+                    .insert(camera, result
+                        .map(|bytes| base64::encode(bytes)));
+            },
+            Update::FernbedienungConnected(addr) => 
                 self.upcore = UpCore::Connected {
                     addr,
                     signal: Err(String::from("Unknown")),
                     terminal: Terminal::Inactive
                 },
-            drone::Update::FernbedienungDisconnected => 
+            Update::FernbedienungDisconnected => 
                 self.upcore = UpCore::Disconnected,
-            drone::Update::FernbedienungSignal(strength) => 
+            Update::FernbedienungSignal(strength) => 
                 if let UpCore::Connected { signal, ..} = &mut self.upcore {
                     *signal = Ok(strength);
                 },
-            drone::Update::XbeeConnected(addr) => 
+            Update::XbeeConnected(addr) => 
                 self.pixhawk = Pixhawk::Connected {
                     addr,
+                    battery: Err(String::from("Unknown")),
                     signal: Err(String::from("Unknown")),
                     terminal: Terminal::Inactive
                 },
-            drone::Update::XbeeDisconnected => 
+            Update::XbeeDisconnected => 
                 self.pixhawk = Pixhawk::Disconnected,
-            drone::Update::XbeeSignal(strength) => 
+            Update::XbeeSignal(strength) => 
                 if let Pixhawk::Connected { signal, ..} = &mut self.pixhawk {
                     *signal = Ok(strength);
                 },
+            Update::PowerState { upcore, pixhawk } => {
+                self.pixhawk_power = pixhawk;
+                self.upcore_power = upcore;
+            }
         }
     }
 }
@@ -93,12 +105,14 @@ pub struct Card {
 #[derive(Clone, Properties)]
 pub struct Props {
     pub instance: Rc<RefCell<Instance>>,
+    pub parent: ComponentLink<crate::UserInterface>,
 }
 
 pub enum Msg {
     ToggleBashTerminal,
     ToggleMavlinkTerminal,
     ToggleCameraStream,
+    SendAction(Action),
 }
 
 // is it possible to just add a callback to the update method
@@ -119,6 +133,7 @@ impl Component for Card {
 
     // this fires when a message needs to be processed
     fn update(&mut self, msg: Self::Message) -> ShouldRender {
+        let mut drone = self.props.instance.borrow_mut();
         match msg {
             Msg::ToggleBashTerminal => {
                 self.bash_terminal_visible = !self.bash_terminal_visible;
@@ -129,11 +144,29 @@ impl Component for Card {
                 true
             },
             Msg::ToggleCameraStream => {
-                self.camera_dialog_active = !self.camera_dialog_active;
+                match self.camera_dialog_active {
+                    false => {
+                        let action = Action::Fernbedienung(FernbedienungAction::SetCameraStream(true));
+                        let message = UpMessage::DroneAction(drone.descriptor.id.clone(), action);
+                        self.props.parent.send_message(crate::Msg::SendUpMessage(message));
+                        drone.camera_stream.clear();
+                        self.camera_dialog_active = true;
+                    },
+                    true => {
+                        let action = Action::Fernbedienung(FernbedienungAction::SetCameraStream(false));
+                        let message = UpMessage::DroneAction(drone.descriptor.id.clone(), action);
+                        self.props.parent.send_message(crate::Msg::SendUpMessage(message));
+                        self.camera_dialog_active = false;
+                    }
+                }
                 true
+            },
+            Msg::SendAction(action) => {
+                let message = UpMessage::DroneAction(drone.descriptor.id.clone(), action);
+                self.props.parent.send_message(crate::Msg::SendUpMessage(message));
+                false
             }
         }
-
     }
 
     // this fires when the parent changes the properties of this component
@@ -147,6 +180,20 @@ impl Component for Card {
     fn view(&self) -> Html {
         //let toggle_upcore_power = self.link.callback(|e: MouseEvent| Msg::ToggleUpcorePower);
         let drone = self.props.instance.borrow();
+
+        let (batt_level, batt_info) = match &drone.pixhawk {
+            Pixhawk::Disconnected => (0, String::from("Unknown")),
+            Pixhawk::Connected { battery, .. } => match battery {
+                Err(message) => (0, message.clone()),
+                Ok(level) => (match level {
+                    0..=24 => 1,
+                    25..=49 => 2,
+                    50..=74 => 3,
+                    _ => 4,
+                }, format!("{}%", level))
+            }
+        };
+
         html! {
             <div class="card">
                 <header class="card-header">
@@ -156,12 +203,7 @@ impl Component for Card {
                         </div>
                         <div class="level-right">
                             <figure class="level-item image mx-0 is-48x48">
-                                <img src=format!("images/batt{}.svg", match drone.battery {
-                                    0..=24 => '1',
-                                    25..=49 => '2',
-                                    50..=74 => '3',
-                                    _ => '4',
-                                }) />
+                                <img src=format!("images/batt{}.svg", batt_level) title=batt_info/>
                             </figure>
                         </div>
                     </nav>
@@ -187,30 +229,28 @@ impl Card {
             html! {
                 <div class="modal is-active">
                     <div class="modal-background" onclick=disable_onclick />
-                    <div style="width:800px" class="modal-content">
+                    <div style="width:50%" class="modal-content">
                         <div class="container is-clipped">
-                            <div class="columns is-multiline is-mobile">
-                                <div class="column is-half">
-                                    <figure class="image">
-                                        <img src="https://image-placeholder.com/images/actual-size/640x480.png" alt="" />
-                                    </figure>
-                                </div>
-                                <div class="column is-half">
-                                    <figure class="image">
-                                        <img src="https://image-placeholder.com/images/actual-size/640x480.png" alt="" />
-                                    </figure>
-                                </div>
-                                <div class="column is-half">
-                                    <figure class="image">
-                                        <img src="https://image-placeholder.com/images/actual-size/640x480.png" alt="" />
-                                    </figure>
-                                </div>
-                                <div class="column is-half">
-                                    <figure class="image">
-                                        <img src="https://image-placeholder.com/images/actual-size/640x480.png" alt="" />
-                                    </figure>
-                                </div>
-                            </div>
+                            <div class="columns is-multiline is-mobile"> { 
+                                drone.camera_stream.iter().map(|(id, result)| match result {
+                                    Ok(encoded) => html! {
+                                        <div class="column is-half">
+                                            <figure class="image">
+                                                <img src=format!("data:image/jpeg;base64,{}", encoded) />
+                                                <figcaption class="has-text-white"> { id.clone() } </figcaption>
+                                            </figure>
+                                        </div>
+                                    },
+                                    Err(error) => html! {
+                                        <div class="column is-half has-text-white">
+                                            <figure class="image">
+                                                <p> { error.clone () }</p>
+                                                <figcaption class="has-text-white"> { id.clone() } </figcaption>
+                                            </figure>
+                                        </div>
+                                    }
+                                }).collect::<Html>()
+                            } </div>
                         </div>
                     </div>
                 </div>
@@ -226,12 +266,12 @@ impl Card {
             UpCore::Disconnected => (0, String::from("Disconnected")),
             UpCore::Connected { signal, .. } => match signal {
                 Err(message) => (0, message.clone()),
-                Ok(level) => (match level {
+                Ok(level) => (match level + 90 {
                     0..=24 => 1,
                     25..=49 => 2,
                     50..=74 => 3,
                     _ => 4,
-                }, format!("{}%", level))
+                }, format!("{}%", level + 90))
             }
         };
         let term_btn_onclick = self.link.callback(|_| Msg::ToggleBashTerminal);
@@ -440,6 +480,18 @@ impl Card {
 
     fn render_menu(&self, drone: &Instance) -> Html {
         let toggle_onclick = self.link.callback(|_| Msg::ToggleCameraStream);
+        let power_on_upcore_onclick = 
+            self.link.callback(|_|
+                    Msg::SendAction(Action::Xbee(XbeeAction::SetUpCorePower(true))));
+        let power_off_upcore_onclick =
+            self.link.callback(|_|
+                Msg::SendAction(Action::Xbee(XbeeAction::SetUpCorePower(false))));
+        let reboot_upcore_onclick = 
+            self.link.callback(|_|
+                Msg::SendAction(Action::Fernbedienung(FernbedienungAction::Reboot)));
+        let halt_upcore_onclick = 
+            self.link.callback(|_|
+                Msg::SendAction(Action::Fernbedienung(FernbedienungAction::Halt)));
         html! {
             <footer class="card-footer">
                 <a class="card-footer-item" onclick=toggle_onclick>{ "Show cameras" }</a>
@@ -455,9 +507,23 @@ impl Card {
                     </div>
                     <div class="dropdown-menu" id="dropdown-menu" role="menu">
                         <div class="dropdown-content">
-                            <a class="dropdown-item">{ "Halt" }</a>
-                            <a class="dropdown-item">{ "Reboot" }</a>
-                            <a class="dropdown-item">{ "Power Off" }</a>
+                            <a class="dropdown-item" onclick=halt_upcore_onclick>{ "Halt" }</a>
+                            <a class="dropdown-item" onclick=reboot_upcore_onclick>{ "Reboot" }</a>
+                            {
+                                match drone.pixhawk {
+                                    Pixhawk::Connected { .. } => match drone.upcore_power {
+                                        true => html! {
+                                            <a class="dropdown-item" onclick=power_off_upcore_onclick>{ "Power Off" }</a>
+                                        },
+                                        false => html! {
+                                            <a class="dropdown-item" onclick=power_on_upcore_onclick>{ "Power On" }</a>
+                                        }
+                                    }
+                                    Pixhawk::Disconnected => html! {
+                                        <p class="dropdown-item has-text-grey-light">{ "Power On" }</p>
+                                    }
+                                }
+                            }
                         </div>
                     </div>
                 </div>
@@ -480,45 +546,3 @@ impl Card {
         }
     }
 }
-
-// <nav class="level is-mobile">
-//                 <div class="level-item">
-//                     <div class="dropdown is-hoverable">
-//                         <div class="dropdown-trigger">
-//                             <button class="button">
-//                                 <span>{ "Up Core" }</span>
-//                                 <span class="icon is-small">
-//                                     <i class="mdi mdi-menu-down" />
-//                                 </span>
-//                             </button>
-//                         </div>
-//                         <div class="dropdown-menu" id="dropdown-menu" role="menu">
-//                             <div class="dropdown-content">
-//                                 <a class="dropdown-item">{ "Halt" }</a>
-//                                 <a class="dropdown-item">{ "Reboot" }</a>
-//                                 <a class="dropdown-item">{ "Power Off" }</a>
-//                             </div>
-//                         </div>
-//                     </div>
-//                 </div>
-//                 <div class="level-item">
-//                     <div class="dropdown is-hoverable">
-//                         <div class="dropdown-trigger">
-//                             <button class="button">
-//                                 <span>{ "Pixhawk" }</span>
-//                                 <span class="icon is-small">
-//                                     <i class="mdi mdi-menu-down" />
-//                                 </span>
-//                             </button>
-//                         </div>
-//                         <div class="dropdown-menu" id="dropdown-menu" role="menu">
-//                             <div class="dropdown-content">
-//                                 <a class="dropdown-item">{ "Power Off" }</a>
-//                             </div>
-//                         </div>
-//                     </div>
-//                 </div>
-//                 <div class="level-item">
-//                     <button class="button">{ "Show cameras" }</button>
-//                 </div>
-//             </nav>

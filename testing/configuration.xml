@@ -7,7 +7,7 @@
     <robots network="192.168.1.0/24">
         <drone  id="drone1"
                 xbee_macaddr="00:04:F3:19:FE:53"
-                upcore_macaddr="FFFFFF:FFFFFF"
+                upcore_macaddr="B0:F1:EC:E9:2F:97"
                 optitrack_id="1" />
         <pipuck id="pipuck1" 
                 rpi_macaddr="FFFFFF:FFFFFF"

@@ -43,7 +43,7 @@ pub enum Request {
     AddDroneSoftware(String, Vec<u8>),
     ClearDroneSoftware,
     CheckDroneSoftware(oneshot::Sender<(software::Checksums, software::Result<()>)>),
-    ForwardDroneRequest(Arc<drone::Descriptor>, drone::Request),
+    ForwardDroneRequest(String, drone::Request),
     GetDroneDescriptors(oneshot::Sender<Vec<Arc<drone::Descriptor>>>),
     //ForwardDroneActionAll(drone::Action),
     ///GetDrones(oneshot::Sender<HashMap<String, drone::State>>),
@@ -52,7 +52,7 @@ pub enum Request {
     AddPiPuckSoftware(String, Vec<u8>),
     ClearPiPuckSoftware,
     CheckPiPuckSoftware(oneshot::Sender<(software::Checksums, software::Result<()>)>),
-    ForwardPiPuckRequest(Arc<pipuck::Descriptor>, pipuck::Request),
+    ForwardPiPuckRequest(String, pipuck::Request),
     GetPiPuckDescriptors(oneshot::Sender<Vec<Arc<pipuck::Descriptor>>>),
     //ForwardPiPuckActionAll(pipuck::Action),
     //GetPiPucks(oneshot::Sender<HashMap<String, pipuck::State>>),
@@ -151,11 +151,13 @@ pub async fn new(
                     log::error!("Could not respond with drone software check");
                 }
             },
-            Request::ForwardDroneRequest(desc, request) => match drones.get(&desc) {
-                Some(instance) => {
-                    let _ = instance.request_tx.send(request).await;
+            Request::ForwardDroneRequest(id, request) => {
+                match drones.iter().find(|&(desc, _)| desc.id == id) {
+                    Some((_, instance)) => {
+                        let _ = instance.request_tx.send(request).await;
+                    }
+                    None => log::warn!("Could not find drone with identifier {}", id),
                 }
-                None => log::warn!("Could not find {}", desc),
             }
             Request::GetDroneDescriptors(callback) => {
                 let _ = callback.send(drones.keys().cloned().collect::<Vec<_>>());
@@ -169,11 +171,13 @@ pub async fn new(
                 let _ = callback
                     .send((pipuck_software.checksums(), pipuck_software.check_config()));
             },
-            Request::ForwardPiPuckRequest(id, request) => match pipucks.get(&id) {
-                Some(instance) => {
-                    let _ = instance.request_tx.send(request).await;
+            Request::ForwardPiPuckRequest(id, request) => {
+                match pipucks.iter().find(|&(desc, _)| desc.id == id) {
+                    Some((_, instance)) => {
+                        let _ = instance.request_tx.send(request).await;
+                    }
+                    None => log::warn!("Could not find drone with identifier {}", id),
                 }
-                None => log::warn!("Could not find {}", id),
             },
             Request::GetPiPuckDescriptors(callback) => {
                 let _ = callback.send(pipucks.keys().cloned().collect::<Vec<_>>());

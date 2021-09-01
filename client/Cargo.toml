@@ -11,6 +11,8 @@ version = "0.1.0"
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
+base64 = { version = "0.13" }
+bytes = { version = "1.0", features = ["serde"] }
 shared = { path = "../shared" }
 strum = { version = "0.21" }
 strum_macros = { version = "0.21" }

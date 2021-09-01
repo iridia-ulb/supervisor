@@ -4,7 +4,7 @@ mod task;
 mod codec; // TODO move this inside task?
 
 pub use task::{
-    Action, Error, Receiver, Request, Sender, Update, Descriptor
+    Error, Receiver, Request, Sender, Update, Descriptor
 };
 
 pub struct Instance {

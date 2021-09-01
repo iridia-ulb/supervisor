@@ -20,7 +20,6 @@ pub struct MjpegStreamerStream<'dev, S> {
 impl<S> PinnedDrop for MjpegStreamerStream<'_, S> {
     fn drop(self: Pin<&mut Self>) {
         if let Some(terminate_tx) = self.project().terminate_tx.take() {
-            eprintln!("dropping camera stream");
             terminate_tx.send(());
         }
     }
@@ -49,8 +48,15 @@ impl MjpegStreamerStream<'_, ()> {
         let source = format!("http://{}:{}/?action=snapshot", device.addr, port);
         MjpegStreamerStream {
             device, terminate_tx: Some(terminate_tx), stream: async_stream::stream! {
+                tokio::pin!(mjpg_streamer);
                 loop {
-                    yield reqwest::get(&source).and_then(|response| response.bytes()).await;
+                    tokio::select! {
+                        
+                        item = reqwest::get(&source).and_then(|response| response.bytes()) => {
+                            yield item;
+                        }
+                        _ = &mut mjpg_streamer => break,
+                    }
                 }
             }
         }
