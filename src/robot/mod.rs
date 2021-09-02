@@ -8,7 +8,4 @@ pub enum Error {
 
     #[error(transparent)]
     PiPuckError(#[from] pipuck::Error),
-
-    #[error(transparent)]
-    DroneError(#[from] drone::Error),
 }

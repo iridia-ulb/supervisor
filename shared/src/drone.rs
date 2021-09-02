@@ -26,33 +26,48 @@ pub enum Action {
 pub enum FernbedienungAction {
     Halt,
     Reboot,
+    Bash(BashAction),
     SetCameraStream(bool),
     GetKernelMessages,
     Identify,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+pub enum BashAction {
+    KeyUp(String),
+    KeyDown(String),
+    Close,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub enum XbeeAction {
     SetUpCorePower(bool),
     SetPixhawkPower(bool),
+    Mavlink(MavlinkAction),
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub enum MavlinkAction {
+    KeyUp(String),
+    KeyDown(String),
+    Close,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum Update {
-    // sends camera footage
+    Battery(i32),
     Camera {
         camera: String,
         result: Result<Bytes, String>
     },
-    // indicates whether the ferbedienung connection is up or down
     FernbedienungConnected(Ipv4Addr),
     FernbedienungDisconnected,
     FernbedienungSignal(i32),
-    // indicates whether the xbee connection is up or down
     XbeeConnected(Ipv4Addr),
     XbeeDisconnected,
     XbeeSignal(i32),
-
+    Mavlink(String),
+    Bash(String),
     PowerState {
         pixhawk: bool,
         upcore: bool,

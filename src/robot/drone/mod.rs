@@ -1,10 +1,10 @@
 use tokio::{self, sync::mpsc, task::JoinHandle};
 
 mod task;
-mod codec; // TODO move this inside task?
+mod codec;
 
 pub use task::{
-    Error, Receiver, Request, Sender, Update, Descriptor
+    Receiver, Request, Sender, Update, Descriptor
 };
 
 pub struct Instance {

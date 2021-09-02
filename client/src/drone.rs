@@ -1,21 +1,14 @@
 use std::{cell::RefCell, collections::HashMap, net::Ipv4Addr, rc::Rc};
-use shared::{UpMessage, drone::{Action, Descriptor, FernbedienungAction, XbeeAction, Update}};
+use shared::{UpMessage, drone::{Action, Descriptor, FernbedienungAction, BashAction, XbeeAction, MavlinkAction, Update}};
 use yew::{prelude::*, services::ConsoleService};
 //use wasm_bindgen::prelude::*;
-
-enum Terminal {
-    Active {
-        buffer: Vec<String>
-    },
-    Inactive,
-}
 
 enum Pixhawk {
     Connected {
         addr: Ipv4Addr,
         signal: Result<i32, String>,
-        battery: Result<u8, String>,
-        terminal: Terminal,
+        battery: Result<i32, String>,
+        terminal: String,
     },
     Disconnected,
 }
@@ -24,7 +17,7 @@ enum UpCore {
     Connected {
         addr: Ipv4Addr,
         signal: Result<i32, String>,
-        terminal: Terminal,
+        terminal: String,
     },
     Disconnected,
 }
@@ -55,6 +48,9 @@ impl Instance {
 
     pub fn update(&mut self, update: Update) {
         match update {
+            Update::Battery(reading) => if let Pixhawk::Connected { battery, ..} = &mut self.pixhawk {
+                *battery = Ok(reading);
+        },
             Update::Camera { camera, result } => {
                 self.camera_stream
                     .insert(camera, result
@@ -64,7 +60,7 @@ impl Instance {
                 self.upcore = UpCore::Connected {
                     addr,
                     signal: Err(String::from("Unknown")),
-                    terminal: Terminal::Inactive
+                    terminal: Default::default(),
                 },
             Update::FernbedienungDisconnected => 
                 self.upcore = UpCore::Disconnected,
@@ -77,14 +73,19 @@ impl Instance {
                     addr,
                     battery: Err(String::from("Unknown")),
                     signal: Err(String::from("Unknown")),
-                    terminal: Terminal::Inactive
+                    terminal: Default::default(),
                 },
             Update::XbeeDisconnected => 
                 self.pixhawk = Pixhawk::Disconnected,
-            Update::XbeeSignal(strength) => 
-                if let Pixhawk::Connected { signal, ..} = &mut self.pixhawk {
+            Update::XbeeSignal(strength) => if let Pixhawk::Connected { signal, ..} = &mut self.pixhawk {
                     *signal = Ok(strength);
-                },
+            },
+            Update::Bash(response) => if let UpCore::Connected { terminal, ..} = &mut self.upcore {
+                terminal.push_str(&response);
+            },
+            Update::Mavlink(response) => if let Pixhawk::Connected { terminal, ..} = &mut self.pixhawk {
+                terminal.push_str(&response);
+            },
             Update::PowerState { upcore, pixhawk } => {
                 self.pixhawk_power = pixhawk;
                 self.upcore_power = upcore;
@@ -136,7 +137,20 @@ impl Component for Card {
         let mut drone = self.props.instance.borrow_mut();
         match msg {
             Msg::ToggleBashTerminal => {
-                self.bash_terminal_visible = !self.bash_terminal_visible;
+                match self.bash_terminal_visible {
+                    false => {
+                        if let UpCore::Connected { terminal, .. } = &mut drone.upcore {
+                            terminal.clear();
+                        }
+                        self.bash_terminal_visible = true;
+                    },
+                    true => {
+                        let action = Action::Fernbedienung(FernbedienungAction::Bash(BashAction::Close));
+                        let message = UpMessage::DroneAction(drone.descriptor.id.clone(), action);
+                        self.props.parent.send_message(crate::Msg::SendUpMessage(message));
+                        self.bash_terminal_visible = false;
+                    }
+                }
                 true
             },
             Msg::ToggleMavlinkTerminal => {
@@ -237,15 +251,15 @@ impl Card {
                                         <div class="column is-half">
                                             <figure class="image">
                                                 <img src=format!("data:image/jpeg;base64,{}", encoded) />
-                                                <figcaption class="has-text-white"> { id.clone() } </figcaption>
+                                                <figcaption class="has-text-grey-lighter"> { &id } </figcaption>
                                             </figure>
                                         </div>
                                     },
                                     Err(error) => html! {
-                                        <div class="column is-half has-text-white">
+                                        <div class="column is-half">
                                             <figure class="image">
-                                                <p> { error.clone () }</p>
-                                                <figcaption class="has-text-white"> { id.clone() } </figcaption>
+                                                <p class="has-text-white"> { error.clone () }</p>
+                                                <figcaption class="has-text-grey-lighter"> { &id } </figcaption>
                                             </figure>
                                         </div>
                                     }
@@ -275,13 +289,18 @@ impl Card {
             }
         };
         let term_btn_onclick = self.link.callback(|_| Msg::ToggleBashTerminal);
-        let term_disabled = match &drone.upcore {
-            UpCore::Connected { terminal, .. } => match terminal {
-                Terminal::Active { .. } => false,
-                Terminal::Inactive => true,
-            },
-            UpCore::Disconnected => true,
-        };
+        let term_onkeydown = self.link.callback(|e: KeyboardEvent| {
+            Msg::SendAction(
+                Action::Fernbedienung(
+                    FernbedienungAction::Bash(
+                        BashAction::KeyDown(e.key()))))
+        });
+        let term_onkeyup = self.link.callback(|e: KeyboardEvent| {
+            Msg::SendAction(
+                Action::Fernbedienung(
+                    FernbedienungAction::Bash(
+                        BashAction::KeyUp(e.key()))))
+        });
         html! {
             <>
                 <nav class="level is-mobile">
@@ -307,19 +326,21 @@ impl Card {
                             <div class="column is-full">
                                 <div class="is-family-monospace">
                                     <div class="field">
-                                        <div class="control">
-                                            <textarea class="textarea"
-                                                      readonly=true
-                                                      disabled=term_disabled />
-                                        </div>
-                                    </div>
-                                    <div class="field">
-                                        <div class="control">
-                                            <input class="input"
-                                                   type="text" 
-                                                   disabled=term_disabled
-                                                   placeholder="Type a command and press enter" />
-                                        </div>
+                                        <div class="control"> {
+                                            match &drone.upcore {
+                                                UpCore::Connected { terminal, .. } => html! {
+                                                    <textarea class="textarea"
+                                                              readonly=true
+                                                              onkeydown=term_onkeydown
+                                                              onkeyup=term_onkeyup> {
+                                                        terminal.as_str()
+                                                    } </textarea>
+                                                },
+                                                UpCore::Disconnected => html! {
+                                                    <textarea class="textarea" readonly=true disabled=true />
+                                                },
+                                            }
+                                        } </div>
                                     </div>
                                 </div>
                             </div>
@@ -368,13 +389,18 @@ impl Card {
             }
         };
         let term_btn_onclick = self.link.callback(|_| Msg::ToggleMavlinkTerminal);
-        let term_disabled = match &drone.pixhawk {
-            Pixhawk::Connected { terminal, .. } => match terminal {
-                Terminal::Active { .. } => false,
-                Terminal::Inactive => true,
-            },
-            Pixhawk::Disconnected => true,
-        };
+        let term_onkeydown = self.link.callback(|e: KeyboardEvent| {
+            Msg::SendAction(
+                Action::Xbee(
+                    XbeeAction::Mavlink(
+                        MavlinkAction::KeyDown(e.key()))))
+        });
+        let term_onkeyup = self.link.callback(|e: KeyboardEvent| {
+            Msg::SendAction(
+                Action::Xbee(
+                    XbeeAction::Mavlink(
+                        MavlinkAction::KeyUp(e.key()))))
+        });
         html! {
             <>
                 <nav class="level is-mobile">
@@ -400,19 +426,21 @@ impl Card {
                             <div class="column is-full">
                                 <div class="is-family-monospace">
                                     <div class="field">
-                                        <div class="control">
-                                            <textarea class="textarea"
-                                                      readonly=true
-                                                      disabled=term_disabled />
-                                        </div>
-                                    </div>
-                                    <div class="field">
-                                        <div class="control">
-                                            <input class="input"
-                                                   type="text" 
-                                                   disabled=term_disabled
-                                                   placeholder="Type a command and press enter" />
-                                        </div>
+                                        <div class="control"> {
+                                            match &drone.pixhawk {
+                                                Pixhawk::Connected { terminal, .. } => html! {
+                                                    <textarea class="textarea"
+                                                            readonly=true
+                                                            onkeydown=term_onkeydown
+                                                            onkeyup=term_onkeyup> {
+                                                        terminal.as_str()
+                                                    } </textarea>
+                                                },
+                                                Pixhawk::Disconnected => html! {
+                                                    <textarea class="textarea" readonly=true disabled=true />
+                                                },
+                                            }
+                                        } </div>
                                     </div>
                                 </div>
                             </div>

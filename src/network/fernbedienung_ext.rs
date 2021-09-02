@@ -51,7 +51,6 @@ impl MjpegStreamerStream<'_, ()> {
                 tokio::pin!(mjpg_streamer);
                 loop {
                     tokio::select! {
-                        
                         item = reqwest::get(&source).and_then(|response| response.bytes()) => {
                             yield item;
                         }

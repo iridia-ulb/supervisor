@@ -1,12 +1,17 @@
-use std::{collections::HashMap, convert::TryInto, num::TryFromIntError, time::Duration};
+use std::{collections::HashMap, time::Duration};
 use anyhow::Context;
-use tokio::{sync::{broadcast, mpsc, oneshot}};
-use futures::{Future, FutureExt, Stream, StreamExt, TryFutureExt, TryStreamExt};
+use bytes::BytesMut;
+use mavlink::{MavHeader, common::{self, MavMessage, SerialControlDev, SerialControlFlag}};
+use shared::drone::{BashAction, MavlinkAction};
+use tokio::{net::TcpStream, sync::{broadcast, mpsc, oneshot}};
+use futures::{FutureExt, SinkExt, Stream, StreamExt, TryStreamExt};
 use tokio_stream;
+use tokio_util::codec::Framed;
 
 use crate::network::{fernbedienung, fernbedienung_ext::MjpegStreamerStream, xbee};
 use crate::journal;
 use crate::software;
+use super::codec;
 
 pub use shared::drone::{Action, FernbedienungAction, XbeeAction, Descriptor, Update};
 
@@ -44,45 +49,18 @@ const XBEE_DEFAULT_PIN_CONFIG: &[(xbee::Pin, xbee::PinMode)] = &[
 pub enum Request {
     AssociateFernbedienung(fernbedienung::Device),
     AssociateXbee(xbee::Device),
-
     Execute(Action),
-
     Subscribe(oneshot::Sender<broadcast::Receiver<Update>>),
-
     StartExperiment {
         software: software::Software,
         journal: mpsc::Sender<journal::Request>,
-        callback: oneshot::Sender<Result<(), Error>>
+        callback: oneshot::Sender<anyhow::Result<()>>
     },
     StopExperiment,
 }
 
 pub type Sender = mpsc::Sender<Request>;
 pub type Receiver = mpsc::Receiver<Request>;
-
-#[derive(thiserror::Error, Debug)]
-pub enum Error {
-    #[error("Operation timed out")]
-    Timeout,
-    #[error("{0:?} is not currently valid")]
-    InvalidAction(Action),
-
-    #[error("Could not request action")]
-    RequestError,
-    #[error("Did not receive response")]
-    ResponseError,
-
-    #[error(transparent)]
-    XbeeError(#[from] xbee::Error),
-    #[error(transparent)]
-    FernbedienungError(#[from] fernbedienung::Error),
-    #[error(transparent)]
-    FetchError(#[from] reqwest::Error),
-    #[error(transparent)]
-    SoftwareError(#[from] software::Error),
-    #[error(transparent)]
-    IoError(#[from] std::io::Error),
-}
 
 fn xbee_pin_states_stream<'dev>(
     device: &'dev xbee::Device
@@ -134,6 +112,84 @@ fn xbee_link_margin_stream<'dev>(
 /* configure mux (upcore controls pixhawk) */
 //device.write_outputs(vec![(xbee::Pin::DIO4, true)]).await?;
 
+async fn mavlink(
+    device: &xbee::Device,
+    mut rx: mpsc::Receiver<MavlinkAction>,
+    updates_tx: broadcast::Sender<Update>
+) -> anyhow::Result<()> {
+    let connection = TcpStream::connect((device.addr, 9750))
+        .map(|result| result
+            .context("Could not connect to serial communication service"));
+    let connection = tokio::time::timeout(Duration::from_secs(1), connection)
+        .map(|result| result
+            .context("Timeout while connecting to serial communication service")
+            .and_then(|result| result)).await?;
+    let (mut sink, mut stream) = 
+        Framed::new(connection, codec::MavMessageCodec::<MavMessage>::new()).split();
+
+    let mut mavlink_target = None;
+    let mut mavlink_sequence = 0;
+    
+    loop {
+        tokio::select! {
+            Some(message) = rx.recv() => match message {
+                MavlinkAction::KeyUp(_) => {},
+                MavlinkAction::KeyDown(_) => {
+                    match mavlink_target {
+                        Some((system_id, component_id)) => {
+                            log::info!("sending top");
+                            let data = common::SERIAL_CONTROL_DATA {
+                                baudrate: 0,
+                                timeout: 3,
+                                device: SerialControlDev::SERIAL_CONTROL_DEV_SHELL,
+                                flags: SerialControlFlag::SERIAL_CONTROL_FLAG_RESPOND | SerialControlFlag::SERIAL_CONTROL_FLAG_MULTI,
+                                count: "top".as_bytes().len() as u8,
+                                data: "top".as_bytes().to_owned(),
+                            };
+                            let message = MavMessage::SERIAL_CONTROL(data);
+                            let header = MavHeader { system_id, component_id, sequence: mavlink_sequence };
+                            
+                            match sink.send((header, message)).await {
+                                Ok(_) => {
+                                    mavlink_sequence = mavlink_sequence.wrapping_add(1);
+                                }
+                                Err(error) => log::error!("{}", error)
+                            }
+                        },
+                        None => {
+                            log::warn!("Can not send, target not ready");
+                        }
+                    }
+                },
+                MavlinkAction::Close => {},
+            },
+            Some(Ok((header, body))) = stream.next() => {
+                match body {
+                    MavMessage::HEARTBEAT(_) => {
+                        if let None = mavlink_target {
+                            mavlink_target = Some((header.system_id, header.component_id));
+                        }
+                    },
+                    MavMessage::BATTERY_STATUS(data) => {
+                        let mut battery_reading = data.voltages[0] as f32;
+                        battery_reading /= DRONE_BATT_NUM_CELLS;
+                        battery_reading -= DRONE_BATT_EMPTY_MV;
+                        battery_reading /= DRONE_BATT_FULL_MV - DRONE_BATT_EMPTY_MV;
+                        let battery_reading = (battery_reading.max(0.0).min(1.0) * 100.0) as i32;
+                        let _ = updates_tx.send(Update::Battery(battery_reading));
+                    },
+                    MavMessage::SERIAL_CONTROL(data) => {
+                        log::info!("serial control data => {:?}", data);
+                        let s = String::from_utf8_lossy(&data.data).into_owned();
+                        let _  = updates_tx.send(Update::Mavlink(s));
+                    },
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 async fn xbee(
     device: xbee::Device,
     mut rx: mpsc::Receiver<XbeeAction>,
@@ -147,7 +203,6 @@ async fn xbee(
     /* set the baud rate to match the baud rate of the Pixhawk */
     device.set_baud_rate(115200).await
         .context("Could not set serial baud rate")?;
-    
     /* link margin stream */
     let link_margin_stream = xbee_link_margin_stream(&device);
     let link_margin_stream_throttled =
@@ -158,6 +213,10 @@ async fn xbee(
     let pin_states_stream_throttled =
         tokio_stream::StreamExt::throttle(pin_states_stream, Duration::from_millis(1000));       
     tokio::pin!(pin_states_stream_throttled);
+    /* mavlink task */
+    let (mut mavlink_tx, mavlink_rx) = mpsc::channel(8);
+    let mavlink_task = mavlink(&device, mavlink_rx, updates_tx.clone());
+    tokio::pin!(mavlink_task);
 
     loop {
         tokio::select! {
@@ -188,8 +247,20 @@ async fn xbee(
                             log::error!("Could not configure Pixhawk power: {}", error);
                         }
                     },
+                    XbeeAction::Mavlink(action) => {
+                        let _ = mavlink_tx.send(action).await;
+                    },
                 },
                 None => break Ok(()), // normal shutdown
+            },
+            result = &mut mavlink_task => {
+                if let Err(error) = result {
+                    log::error!("Mavlink task terminated: {}", error);
+                }
+                /* restart task */
+                let (tx, rx) = mpsc::channel(8);
+                mavlink_tx = tx;
+                mavlink_task.set(mavlink(&device, rx, updates_tx.clone()));
             }
         }
     }
@@ -218,11 +289,70 @@ fn fernbedienung_link_strength_stream<'dev>(
     }
 }
 
+async fn bash(
+    device: &fernbedienung::Device,
+    mut rx: mpsc::Receiver<BashAction>,
+    updates_tx: broadcast::Sender<Update>,
+) {
+    let process = fernbedienung::Process {
+        target: "bash".into(),
+        working_dir: None,
+        args: vec!["-i".to_owned()],
+    };
+    let (stdout_tx, mut stdout_rx) = mpsc::channel(8);
+    let (stderr_tx, mut stderr_rx) = mpsc::channel(8);
+    let (stdin_tx, stdin_rx) = mpsc::channel(8);
+    let (terminate_tx, terminate_rx) = oneshot::channel();
+
+    let process = device.run(process, Some(terminate_rx), Some(stdin_rx), Some(stdout_tx), Some(stderr_tx));
+    tokio::pin!(process);
+
+    loop {
+        tokio::select! {
+            result = &mut process => {
+                log::info!("Remote bash instance terminated with {:?}", result);
+                break;
+            }
+            Some(stdout) = stdout_rx.recv() => {
+                let update = Update::Bash(String::from_utf8_lossy(&stdout).into_owned());
+                log::info!("{:?}", update);
+                let _ = updates_tx.send(update);
+            },
+            Some(stderr) = stderr_rx.recv() => {
+                let update = Update::Bash(String::from_utf8_lossy(&stderr).into_owned());
+                log::info!("{:?}", update);
+                let _ = updates_tx.send(update);
+            },
+            Some(action) = rx.recv() => match action {
+                BashAction::KeyUp(_key) => {}, // stdin_tx
+                BashAction::KeyDown(key) => {
+                    let input = match key.as_ref() {
+                        "Enter" => "\r",
+                        "Backspace" => "\x08",
+                        other => other,
+                    };
+                    if let Err(error) = stdin_tx.send(BytesMut::from(input)).await {
+                        log::warn!("Could not send keystokes to remote Bash instance: {}", error)
+                    }
+                },
+                BashAction::Close => {
+                    let _ = terminate_tx.send(());
+                    break;
+                }
+            }
+        }
+    }
+}
+
 async fn fernbedienung(
     device: fernbedienung::Device,
     mut rx: mpsc::Receiver<FernbedienungAction>,
     updates_tx: broadcast::Sender<Update>
 ) {
+    /* bash task */
+    let bash_task = futures::future::pending().left_future();
+    let mut bash_tx : Option<mpsc::Sender<BashAction>> = Option::default();
+    tokio::pin!(bash_task);
     /* link strength */
     let link_strength_stream = fernbedienung_link_strength_stream(&device)
         .map_ok(Update::FernbedienungSignal);
@@ -266,11 +396,26 @@ async fn fernbedienung(
                     FernbedienungAction::Reboot => if let Err(error) = device.reboot().await {
                         log::warn!("Could not reboot Up Core: {}", error);
                     },
+                    FernbedienungAction::Bash(action) => match &bash_tx {
+                        Some(tx) => {
+                            let _ = tx.send(action).await;    
+                        },
+                        None => {
+                            let (tx, rx) = mpsc::channel(8);
+                            let _ = tx.send(action).await;
+                            bash_tx = Some(tx);
+                            bash_task.set(bash(&device, rx, updates_tx.clone()).right_future());
+                        }
+                    },
                     FernbedienungAction::GetKernelMessages => {},
                     FernbedienungAction::Identify => {},
                 },
                 None => break,
-            }
+            },
+            _ = &mut bash_task => {
+                bash_tx = None;
+                bash_task.set(futures::future::pending().left_future());
+            },
         }
     }
 }
