@@ -1,6 +1,7 @@
 use std::{cell::RefCell, collections::HashMap, net::Ipv4Addr, rc::Rc};
-use shared::{UpMessage, drone::{Action, Descriptor, FernbedienungAction, BashAction, XbeeAction, MavlinkAction, Update}};
-use yew::{prelude::*, services::ConsoleService};
+use shared::{UpMessage, FernbedienungAction, TerminalAction, drone::{Action, XbeeAction, Descriptor, Update}};
+use web_sys::{Element, HtmlInputElement};
+use yew::{prelude::*, services::ConsoleService, web_sys::HtmlTextAreaElement};
 //use wasm_bindgen::prelude::*;
 
 enum Pixhawk {
@@ -22,7 +23,6 @@ enum UpCore {
     Disconnected,
 }
 
-
 pub struct Instance {
     pub descriptor: Descriptor,
     optitrack_pos: [f32; 3],
@@ -33,6 +33,8 @@ pub struct Instance {
     camera_stream: HashMap<String, Result<String, String>>,
 }
 
+// a lot of stuff here seems like it should be implemented directly on the component,
+// update for instance would be cleaner if it was implemented via a ComponentLink<T>
 impl Instance {
     pub fn new(descriptor: Descriptor) -> Self {
         Self { 
@@ -97,9 +99,17 @@ impl Instance {
 pub struct Card {
     link: ComponentLink<Self>,
     props: Props,
+    // where multiple noderefs etc are present, perhaps
+    // this indicates when a component is necessary?
     bash_terminal_visible: bool,
+    bash_textarea: NodeRef,
+    bash_input: NodeRef,
+    // mavlink vs. bash also indicates that a component
+    // would be useful
     mavlink_terminal_visible: bool,
-    camera_dialog_active: bool
+    mavlink_textarea: NodeRef,
+    mavlink_input: NodeRef,
+    camera_dialog_active: bool,
 }
 
 // what if properties was just drone::Instance itself?
@@ -114,6 +124,8 @@ pub enum Msg {
     ToggleMavlinkTerminal,
     ToggleCameraStream,
     SendAction(Action),
+    SendBashCommand,
+    SendMavlinkCommand,
 }
 
 // is it possible to just add a callback to the update method
@@ -127,25 +139,65 @@ impl Component for Card {
             props,
             link,
             bash_terminal_visible: false,
+            bash_textarea: NodeRef::default(),
+            bash_input: NodeRef::default(),
             mavlink_terminal_visible: false,
+            mavlink_textarea: NodeRef::default(),
+            mavlink_input: NodeRef::default(),
             camera_dialog_active: false
         }
     }
+
+
+    fn rendered(&mut self, _: bool) {
+        if let Some(textarea) = self.bash_textarea.cast::<HtmlTextAreaElement>() {
+            textarea.set_scroll_top(textarea.scroll_height());
+        }
+        if let Some(textarea) = self.mavlink_textarea.cast::<HtmlTextAreaElement>() {
+            textarea.set_scroll_top(textarea.scroll_height());
+        }
+    }
+
 
     // this fires when a message needs to be processed
     fn update(&mut self, msg: Self::Message) -> ShouldRender {
         let mut drone = self.props.instance.borrow_mut();
         match msg {
+            Msg::SendMavlinkCommand => match self.mavlink_input.cast::<HtmlInputElement>() {
+                Some(input) => {
+                    let term_action = TerminalAction::Run(input.value());
+                    input.set_value("");
+                    let action = Action::Xbee(XbeeAction::Mavlink(term_action));
+                    let message = UpMessage::DroneAction(drone.descriptor.id.clone(), action);
+                    self.props.parent.send_message(crate::Msg::SendUpMessage(message));
+                    true
+                },
+                _ => false
+            },
+            Msg::SendBashCommand => match self.bash_input.cast::<HtmlInputElement>() {
+                Some(input) => {
+                    let term_action = TerminalAction::Run(input.value());
+                    input.set_value("");
+                    let action = Action::Fernbedienung(FernbedienungAction::Bash(term_action));
+                    let message = UpMessage::DroneAction(drone.descriptor.id.clone(), action);
+                    self.props.parent.send_message(crate::Msg::SendUpMessage(message));
+                    true
+                },
+                _ => false
+            },
             Msg::ToggleBashTerminal => {
                 match self.bash_terminal_visible {
                     false => {
                         if let UpCore::Connected { terminal, .. } = &mut drone.upcore {
                             terminal.clear();
                         }
+                        let action = Action::Fernbedienung(FernbedienungAction::Bash(TerminalAction::Start));
+                        let message = UpMessage::DroneAction(drone.descriptor.id.clone(), action);
+                        self.props.parent.send_message(crate::Msg::SendUpMessage(message));
                         self.bash_terminal_visible = true;
                     },
                     true => {
-                        let action = Action::Fernbedienung(FernbedienungAction::Bash(BashAction::Close));
+                        let action = Action::Fernbedienung(FernbedienungAction::Bash(TerminalAction::Stop));
                         let message = UpMessage::DroneAction(drone.descriptor.id.clone(), action);
                         self.props.parent.send_message(crate::Msg::SendUpMessage(message));
                         self.bash_terminal_visible = false;
@@ -184,7 +236,7 @@ impl Component for Card {
     }
 
     // this fires when the parent changes the properties of this component
-    fn change(&mut self, props: Self::Properties) -> ShouldRender {
+    fn change(&mut self, _: Self::Properties) -> ShouldRender {
         true
     }
 
@@ -288,18 +340,18 @@ impl Card {
                 }, format!("{}%", level + 90))
             }
         };
+        let (term_disabled, term_content) = match &drone.upcore {
+            UpCore::Disconnected => (true, String::new()),
+            UpCore::Connected { terminal, ..} => (false, terminal.clone())
+        };
+        let mut term_classes = classes!("column", "is-full");
+        if !self.bash_terminal_visible {
+            term_classes.push("is-hidden");
+        }
         let term_btn_onclick = self.link.callback(|_| Msg::ToggleBashTerminal);
-        let term_onkeydown = self.link.callback(|e: KeyboardEvent| {
-            Msg::SendAction(
-                Action::Fernbedienung(
-                    FernbedienungAction::Bash(
-                        BashAction::KeyDown(e.key()))))
-        });
-        let term_onkeyup = self.link.callback(|e: KeyboardEvent| {
-            Msg::SendAction(
-                Action::Fernbedienung(
-                    FernbedienungAction::Bash(
-                        BashAction::KeyUp(e.key()))))
+        let term_onkeydown = self.link.batch_callback(|event: KeyboardEvent| match event.key().as_ref() {
+            "Enter" => Some(Msg::SendBashCommand),
+            _ => None,
         });
         html! {
             <>
@@ -308,44 +360,42 @@ impl Card {
                         <p class="level-item">{ "Up Core" }</p>
                     </div>
                     <div class="level-right">
-                        <button class="level-item button" onclick=term_btn_onclick> {
+                        <button class="level-item button" onclick=term_btn_onclick disabled=term_disabled> {
                             if self.bash_terminal_visible {
-                                "Hide Bash terminal"
+                                "Close Bash terminal"
                             }
                             else {
-                                "Show Bash terminal"
+                                "Open Bash terminal"
                             }
                         } </button>
                     </div>
                 </nav>
                 
-                <div class="columns is-multiline is-mobile"> {
-                    match self.bash_terminal_visible {
-                        false => html! {},
-                        true  => html! {
-                            <div class="column is-full">
-                                <div class="is-family-monospace">
-                                    <div class="field">
-                                        <div class="control"> {
-                                            match &drone.upcore {
-                                                UpCore::Connected { terminal, .. } => html! {
-                                                    <textarea class="textarea"
-                                                              readonly=true
-                                                              onkeydown=term_onkeydown
-                                                              onkeyup=term_onkeyup> {
-                                                        terminal.as_str()
-                                                    } </textarea>
-                                                },
-                                                UpCore::Disconnected => html! {
-                                                    <textarea class="textarea" readonly=true disabled=true />
-                                                },
-                                            }
-                                        } </div>
-                                    </div>
+                <div class="columns is-multiline is-mobile">
+                    <div class=term_classes>
+                        <div>
+                            <div class="field">
+                                <div class="control">
+                                    <textarea ref=self.bash_textarea.clone()
+                                              class="textarea is-family-monospace"
+                                              readonly=false>
+                                              { term_content }
+                                    </textarea>
                                 </div>
                             </div>
-                        }
-                    }}
+                            <div class="field">
+                                <div class="control">
+                                    <input ref=self.bash_input.clone()
+                                           class="input is-family-monospace"
+                                           type="text" 
+                                           disabled=term_disabled
+                                           placeholder="Type a command and press enter"
+                                           onkeydown=term_onkeydown />
+                                </div>
+                            </div>
+                        </div>
+                    </div> 
+                    
                     <div class="column is-two-fifths">
                         <div class="notification has-text-centered">
                             <p style="line-height:32px"> {
@@ -388,18 +438,18 @@ impl Card {
                 }, format!("{}%", level))
             }
         };
+        let (term_disabled, term_content) = match &drone.pixhawk {
+            Pixhawk::Disconnected => (true, String::new()),
+            Pixhawk::Connected { terminal, ..} => (false, terminal.clone())
+        };
+        let mut term_classes = classes!("column", "is-full");
+        if !self.mavlink_terminal_visible {
+            term_classes.push("is-hidden");
+        }
         let term_btn_onclick = self.link.callback(|_| Msg::ToggleMavlinkTerminal);
-        let term_onkeydown = self.link.callback(|e: KeyboardEvent| {
-            Msg::SendAction(
-                Action::Xbee(
-                    XbeeAction::Mavlink(
-                        MavlinkAction::KeyDown(e.key()))))
-        });
-        let term_onkeyup = self.link.callback(|e: KeyboardEvent| {
-            Msg::SendAction(
-                Action::Xbee(
-                    XbeeAction::Mavlink(
-                        MavlinkAction::KeyUp(e.key()))))
+        let term_onkeydown = self.link.batch_callback(|event: KeyboardEvent| match event.key().as_ref() {
+            "Enter" => Some(Msg::SendMavlinkCommand),
+            _ => None,
         });
         html! {
             <>
@@ -408,44 +458,41 @@ impl Card {
                         <p class="level-item">{ "Pixhawk" }</p>
                     </div>
                     <div class="level-right">
-                        <button class="level-item button" onclick=term_btn_onclick> {
+                        <button class="level-item button" onclick=term_btn_onclick disabled=term_disabled> {
                             if self.mavlink_terminal_visible {
-                                "Hide Mavlink terminal"
+                                "Close Mavlink terminal"
                             }
                             else {
-                                "Show Mavlink terminal"
+                                "Open Mavlink terminal"
                             }
                         } </button>
                     </div>
                 </nav>
                 
-                <div class="columns is-multiline is-mobile"> {
-                    match self.mavlink_terminal_visible {
-                        false => html! {},
-                        true  => html! {
-                            <div class="column is-full">
-                                <div class="is-family-monospace">
-                                    <div class="field">
-                                        <div class="control"> {
-                                            match &drone.pixhawk {
-                                                Pixhawk::Connected { terminal, .. } => html! {
-                                                    <textarea class="textarea"
-                                                            readonly=true
-                                                            onkeydown=term_onkeydown
-                                                            onkeyup=term_onkeyup> {
-                                                        terminal.as_str()
-                                                    } </textarea>
-                                                },
-                                                Pixhawk::Disconnected => html! {
-                                                    <textarea class="textarea" readonly=true disabled=true />
-                                                },
-                                            }
-                                        } </div>
-                                    </div>
+                <div class="columns is-multiline is-mobile">
+                    <div class=term_classes>
+                        <div>
+                            <div class="field">
+                                <div class="control">
+                                    <textarea ref=self.mavlink_textarea.clone()
+                                            class="textarea is-family-monospace"
+                                            readonly=false>
+                                            { term_content }
+                                    </textarea>
                                 </div>
                             </div>
-                        }
-                    }}
+                            <div class="field">
+                                <div class="control">
+                                    <input ref=self.mavlink_input.clone()
+                                        class="input is-family-monospace"
+                                        type="text" 
+                                        disabled=term_disabled
+                                        placeholder="Type a command and press enter"
+                                        onkeydown=term_onkeydown />
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                     <div class="column is-two-fifths">
                         <div class="notification has-text-centered">
                             <p style="line-height:32px"> {

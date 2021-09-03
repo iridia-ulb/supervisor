@@ -23,6 +23,23 @@ pub enum DownMessage {
     UpdatePiPuck(String, pipuck::Update),
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+pub enum FernbedienungAction {
+    Halt,
+    Reboot,
+    Bash(TerminalAction),
+    SetCameraStream(bool),
+    GetKernelMessages,
+    Identify,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub enum TerminalAction {
+    Start,
+    Run(String),
+    Stop,
+}
+
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ExperimentStatus {

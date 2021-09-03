@@ -332,12 +332,19 @@ impl Device {
 
     pub async fn run(&self,
                      process: protocol::process::Process,
-                     terminate_rx: Option<oneshot::Receiver<()>>,
-                     stdin_rx: Option<mpsc::Receiver<BytesMut>>,
-                     stdout_tx: Option<mpsc::Sender<BytesMut>>,
-                     stderr_tx: Option<mpsc::Sender<BytesMut>>) -> Result<()> {
+                     terminate_rx: impl Into<Option<oneshot::Receiver<()>>>,
+                     stdin_rx: impl Into<Option<mpsc::Receiver<BytesMut>>>,
+                     stdout_tx: impl Into<Option<mpsc::Sender<BytesMut>>>,
+                     stderr_tx: impl Into<Option<mpsc::Sender<BytesMut>>>) -> Result<()> {
         let (result_tx, result_rx) = oneshot::channel();
-        let request = Request::Run{ process, terminate_rx, stdin_rx, stdout_tx, stderr_tx, result_tx };
+        let request = Request::Run {
+            process,
+            terminate_rx: terminate_rx.into(),
+            stdin_rx: stdin_rx.into(),
+            stdout_tx: stdout_tx.into(),
+            stderr_tx: stderr_tx.into(),
+            result_tx: result_tx.into()
+        };
         self.request_tx.send(request).await.map_err(|_ | Error::RequestError)?;
         result_rx.await.map_err(|_| Error::ResponseError).and_then(|result| result)
     }
@@ -351,7 +358,7 @@ impl Device {
         let (stdout_tx, stdout_rx) = mpsc::channel(8);
         let stdout_stream = ReceiverStream::new(stdout_rx);
         let (_, stdout) = tokio::try_join!(
-            self.run(process, None, None, Some(stdout_tx), None),
+            self.run(process, None, None, stdout_tx, None),
             stdout_stream.concat().map(Result::Ok)
         )?;
         let temp_dir = std::str::from_utf8(stdout.as_ref())
@@ -368,7 +375,7 @@ impl Device {
         let (stdout_tx, stdout_rx) = mpsc::channel(8);
         let stdout_stream = ReceiverStream::new(stdout_rx);
         let (_, stdout) = tokio::try_join!(
-            self.run(process, None, None, Some(stdout_tx), None),
+            self.run(process, None, None, stdout_tx, None),
             stdout_stream.concat().map(Result::Ok)
         )?;
         let hostname = std::str::from_utf8(stdout.as_ref())
@@ -385,7 +392,7 @@ impl Device {
         let (stdout_tx, stdout_rx) = mpsc::channel(8);
         let stdout_stream = ReceiverStream::new(stdout_rx);
         let (_, stdout) = tokio::try_join!(
-            self.run(process, None, None, Some(stdout_tx), None),
+            self.run(process, None, None, stdout_tx, None),
             stdout_stream.concat().map(Result::Ok)
         )?;
         let messages = std::str::from_utf8(stdout.as_ref())
@@ -405,7 +412,7 @@ impl Device {
         let (stdout_tx, stdout_rx) = mpsc::channel(8);
         let stdout_stream = ReceiverStream::new(stdout_rx);
         let (_, stdout) = tokio::try_join!(
-            self.run(process, None, None, Some(stdout_tx), None),
+            self.run(process, None, None, stdout_tx, None),
             stdout_stream.concat().map(Result::Ok)
         )?;
         let link = std::str::from_utf8(stdout.as_ref())
@@ -429,7 +436,7 @@ impl Device {
         let (stdout_tx, stdout_rx) = mpsc::channel(8);
         let stdout_stream = ReceiverStream::new(stdout_rx);
         let (_, stdout) = tokio::try_join!(
-            self.run(process, None, None, Some(stdout_tx), None),
+            self.run(process, None, None, stdout_tx, None),
             stdout_stream.concat().map(Result::Ok)
         )?;
         let info = std::str::from_utf8(stdout.as_ref())

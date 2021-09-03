@@ -1,6 +1,7 @@
 use std::{fmt::Display, net::Ipv4Addr};
 use bytes::Bytes;
 use serde::{Serialize, Deserialize};
+use crate::{TerminalAction, FernbedienungAction};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub struct Descriptor {
@@ -23,34 +24,10 @@ pub enum Action {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub enum FernbedienungAction {
-    Halt,
-    Reboot,
-    Bash(BashAction),
-    SetCameraStream(bool),
-    GetKernelMessages,
-    Identify,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub enum BashAction {
-    KeyUp(String),
-    KeyDown(String),
-    Close,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
 pub enum XbeeAction {
     SetUpCorePower(bool),
     SetPixhawkPower(bool),
-    Mavlink(MavlinkAction),
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub enum MavlinkAction {
-    KeyUp(String),
-    KeyDown(String),
-    Close,
+    Mavlink(TerminalAction),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

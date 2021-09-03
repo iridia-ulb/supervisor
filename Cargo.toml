@@ -40,6 +40,7 @@ md5 = { version = "0.7" }
 itertools = { version = "0.9" }
 bitvec = { version = "0.21" }
 rand = { version = "0.8" }
+ansi-parser = { version = "0.8" }
 
 semver = { version = "0.4"}
 log = { version = "0.4" }

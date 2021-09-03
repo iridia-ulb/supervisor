@@ -1,11 +1,11 @@
 use std::{collections::HashMap, time::Duration};
 use anyhow::Context;
+use ansi_parser::{AnsiSequence, Output, AnsiParser};
 use bytes::BytesMut;
 use mavlink::{MavHeader, common::{self, MavMessage, SerialControlDev, SerialControlFlag}};
-use shared::drone::{BashAction, MavlinkAction};
 use tokio::{net::TcpStream, sync::{broadcast, mpsc, oneshot}};
 use futures::{FutureExt, SinkExt, Stream, StreamExt, TryStreamExt};
-use tokio_stream;
+use tokio_stream::{self, wrappers::ReceiverStream};
 use tokio_util::codec::Framed;
 
 use crate::network::{fernbedienung, fernbedienung_ext::MjpegStreamerStream, xbee};
@@ -13,7 +13,7 @@ use crate::journal;
 use crate::software;
 use super::codec;
 
-pub use shared::drone::{Action, FernbedienungAction, XbeeAction, Descriptor, Update};
+pub use shared::{FernbedienungAction, TerminalAction, drone::{Action, XbeeAction, Descriptor, Update}};
 
 const DRONE_BATT_FULL_MV: f32 = 4050.0;
 const DRONE_BATT_EMPTY_MV: f32 = 3500.0;
@@ -112,9 +112,74 @@ fn xbee_link_margin_stream<'dev>(
 /* configure mux (upcore controls pixhawk) */
 //device.write_outputs(vec![(xbee::Pin::DIO4, true)]).await?;
 
+// async fn mavlink2(
+//     device: &xbee::Device,
+//     mut rx: mpsc::Receiver<TerminalAction>,
+//     updates_tx: broadcast::Sender<Update>,
+// ) {   
+//     let process = futures::future::pending().left_future();
+//     let stdout = futures::stream::pending().left_stream();
+//     let stderr = futures::stream::pending().left_stream();
+//     let mut stdin = None;
+//     let mut terminate = None;
+//     tokio::pin!(process);
+//     tokio::pin!(stdout);
+//     tokio::pin!(stderr);
+//     loop {
+//         tokio::select! {
+//             Some(action) = rx.recv() => match action {
+//                 TerminalAction::Start => {
+//                     /* set up channels */
+//                     let (stdout_tx, stdout_rx) = mpsc::channel(8);
+//                     stdout.set(ReceiverStream::new(stdout_rx).right_stream());
+//                     let (stderr_tx, stderr_rx) = mpsc::channel(8);
+//                     stderr.set(ReceiverStream::new(stderr_rx).right_stream());
+//                     let (stdin_tx, stdin_rx) = mpsc::channel(8);
+//                     stdin = Some(stdin_tx);
+//                     let (terminate_tx, terminate_rx) = oneshot::channel();
+//                     terminate = Some(terminate_tx);
+//                     /* start process */
+//                     let bash = fernbedienung::Process {
+//                         target: "ssh".into(),
+//                         working_dir: None,
+//                         args: vec!["localhost".to_owned()],
+//                     };
+//                     process.set(device.run(bash, terminate_rx, stdin_rx, stdout_tx, stderr_tx).right_future());
+//                     log::info!("Remote Bash instance started");
+//                 },
+//                 TerminalAction::Run(mut command) => if let Some(tx) = stdin.as_ref() {
+//                     command.push_str("\r");
+//                     let _  = tx.send(BytesMut::from(command.as_bytes())).await;
+//                 },
+//                 TerminalAction::Stop => if let Some(tx) = terminate.take() {
+//                     let _ = tx.send(());
+//                 }
+//             },
+//             result = &mut process => {
+//                 process.set(futures::future::pending().left_future());
+//                 stdout.set(futures::stream::pending().left_stream());
+//                 stderr.set(futures::stream::pending().left_stream());
+//                 stdin = None;
+//                 terminate = None;
+//                 log::info!("Remote Bash instance terminated with {:?}", result);
+//             }
+//             Some(stdout) = stdout.next() => {
+//                 let update = Update::Bash(String::from_utf8_lossy(&stdout).into_owned());
+//                 log::info!("{:?}", update);
+//                 let _ = updates_tx.send(update);
+//             },
+//             Some(stderr) = stderr.next() => {
+//                 let update = Update::Bash(String::from_utf8_lossy(&stderr).into_owned());
+//                 log::info!("{:?}", update);
+//                 let _ = updates_tx.send(update);
+//             },
+//         }
+//     }
+// }
+
 async fn mavlink(
     device: &xbee::Device,
-    mut rx: mpsc::Receiver<MavlinkAction>,
+    mut rx: mpsc::Receiver<TerminalAction>,
     updates_tx: broadcast::Sender<Update>
 ) -> anyhow::Result<()> {
     let connection = TcpStream::connect((device.addr, 9750))
@@ -124,51 +189,72 @@ async fn mavlink(
         .map(|result| result
             .context("Timeout while connecting to serial communication service")
             .and_then(|result| result)).await?;
-    let (mut sink, mut stream) = 
+    let (sink, mut stream) = 
         Framed::new(connection, codec::MavMessageCodec::<MavMessage>::new()).split();
+    let mut mavlink_sequence = 0u8;
+    let sink = sink.with(|message| async {
+        let header = MavHeader { system_id: 255, component_id: 190, sequence: 0 };
+            anyhow::Result::<_>::Ok((header, message))
+    });
+    tokio::pin!(sink);
+    /* heartbeat stream */
+    let heartbeat_stream = futures::stream::iter(std::iter::repeat(
+        MavMessage::HEARTBEAT(common::HEARTBEAT_DATA {
+            custom_mode: 0,
+            mavtype: common::MavType::MAV_TYPE_GCS,
+            autopilot: common::MavAutopilot::MAV_AUTOPILOT_GENERIC,
+            base_mode: common::MavModeFlag::empty(),
+            system_status: common::MavState::MAV_STATE_UNINIT,
+            mavlink_version: 3,
+        })
+    ));
+    let heartbeat_stream_throttled =
+        tokio_stream::StreamExt::throttle(heartbeat_stream, Duration::from_millis(500));
+    tokio::pin!(heartbeat_stream_throttled);
 
-    let mut mavlink_target = None;
-    let mut mavlink_sequence = 0;
-    
     loop {
         tokio::select! {
-            Some(message) = rx.recv() => match message {
-                MavlinkAction::KeyUp(_) => {},
-                MavlinkAction::KeyDown(_) => {
-                    match mavlink_target {
-                        Some((system_id, component_id)) => {
-                            log::info!("sending top");
-                            let data = common::SERIAL_CONTROL_DATA {
-                                baudrate: 0,
-                                timeout: 3,
-                                device: SerialControlDev::SERIAL_CONTROL_DEV_SHELL,
-                                flags: SerialControlFlag::SERIAL_CONTROL_FLAG_RESPOND | SerialControlFlag::SERIAL_CONTROL_FLAG_MULTI,
-                                count: "top".as_bytes().len() as u8,
-                                data: "top".as_bytes().to_owned(),
-                            };
-                            let message = MavMessage::SERIAL_CONTROL(data);
-                            let header = MavHeader { system_id, component_id, sequence: mavlink_sequence };
-                            
-                            match sink.send((header, message)).await {
-                                Ok(_) => {
-                                    mavlink_sequence = mavlink_sequence.wrapping_add(1);
-                                }
-                                Err(error) => log::error!("{}", error)
+            Some(heartbeat) = heartbeat_stream_throttled.next() => {
+                let _ = sink.send(heartbeat).await;
+            }
+            Some(request) = rx.recv() => {
+                match request {
+                    // note that commands should not be run when mavlink is being used by ARGoS
+                    TerminalAction::Run(command) => {
+                        let command_padded = command.as_bytes()
+                            .iter()
+                            .cloned()
+                            .chain(std::iter::repeat(0u8))
+                            .take(70)
+                            .collect::<Vec<_>>();
+
+                        log::info!("sending \"{}\"", command);
+                        let data = common::SERIAL_CONTROL_DATA {
+                            baudrate: 0,
+                            timeout: 0,
+                            device: SerialControlDev::SERIAL_CONTROL_DEV_SHELL,
+                            flags: SerialControlFlag::SERIAL_CONTROL_FLAG_EXCLUSIVE | 
+                                SerialControlFlag::SERIAL_CONTROL_FLAG_RESPOND |
+                                SerialControlFlag::SERIAL_CONTROL_FLAG_MULTI,
+                            count: command_padded.len() as u8,
+                            data: command_padded,
+                        };
+                        log::info!("sending {} bytes", data.data.len());
+                        let message = MavMessage::SERIAL_CONTROL(data);
+                        match sink.send(message).await {
+                            Ok(_) => {
+                                mavlink_sequence = mavlink_sequence.wrapping_add(1);
                             }
-                        },
-                        None => {
-                            log::warn!("Can not send, target not ready");
+                            Err(error) => log::error!("{}", error)
                         }
-                    }
-                },
-                MavlinkAction::Close => {},
+                    },
+                    _ => {}, // ignore start and stop
+                }
             },
             Some(Ok((header, body))) = stream.next() => {
                 match body {
                     MavMessage::HEARTBEAT(_) => {
-                        if let None = mavlink_target {
-                            mavlink_target = Some((header.system_id, header.component_id));
-                        }
+                        log::info!("heartbeat from {}:{}", header.system_id, header.component_id);
                     },
                     MavMessage::BATTERY_STATUS(data) => {
                         let mut battery_reading = data.voltages[0] as f32;
@@ -178,10 +264,23 @@ async fn mavlink(
                         let battery_reading = (battery_reading.max(0.0).min(1.0) * 100.0) as i32;
                         let _ = updates_tx.send(Update::Battery(battery_reading));
                     },
-                    MavMessage::SERIAL_CONTROL(data) => {
-                        log::info!("serial control data => {:?}", data);
-                        let s = String::from_utf8_lossy(&data.data).into_owned();
-                        let _  = updates_tx.send(Update::Mavlink(s));
+                    MavMessage::SERIAL_CONTROL(common::SERIAL_CONTROL_DATA { data, count, .. }) => {
+                        log::info!("got serial control data");
+                        let valid = match std::str::from_utf8(&data[..count as usize]) {
+                            Ok(data) => data,
+                            Err(error) => {
+                                log::info!("count included non-utf8 data");
+                                std::str::from_utf8(&data[..error.valid_up_to()]).unwrap()
+                            }
+                        };
+                        log::info!("received \"{}\"", valid);
+                        let parsed: Vec<Output> = valid
+                            .ansi_parse()
+                            .collect();
+                        log::info!("received \"{:?}\"", parsed);
+                        // https://github.com/mavlink/qgroundcontrol/blob/master/src/AnalyzeView/MavlinkConsoleController.cc#L168
+                        //let s = .into_owned();
+                        //let _  = updates_tx.send(Update::Mavlink(s));
                     },
                     _ => {}
                 }
@@ -189,6 +288,8 @@ async fn mavlink(
         }
     }
 }
+
+
 
 async fn xbee(
     device: xbee::Device,
@@ -291,55 +392,65 @@ fn fernbedienung_link_strength_stream<'dev>(
 
 async fn bash(
     device: &fernbedienung::Device,
-    mut rx: mpsc::Receiver<BashAction>,
+    mut rx: mpsc::Receiver<TerminalAction>,
     updates_tx: broadcast::Sender<Update>,
-) {
-    let process = fernbedienung::Process {
-        target: "bash".into(),
-        working_dir: None,
-        args: vec!["-i".to_owned()],
-    };
-    let (stdout_tx, mut stdout_rx) = mpsc::channel(8);
-    let (stderr_tx, mut stderr_rx) = mpsc::channel(8);
-    let (stdin_tx, stdin_rx) = mpsc::channel(8);
-    let (terminate_tx, terminate_rx) = oneshot::channel();
-
-    let process = device.run(process, Some(terminate_rx), Some(stdin_rx), Some(stdout_tx), Some(stderr_tx));
+) {   
+    let process = futures::future::pending().left_future();
+    let stdout = futures::stream::pending().left_stream();
+    let stderr = futures::stream::pending().left_stream();
+    let mut stdin = None;
+    let mut terminate = None;
     tokio::pin!(process);
-
+    tokio::pin!(stdout);
+    tokio::pin!(stderr);
     loop {
         tokio::select! {
+            Some(action) = rx.recv() => match action {
+                TerminalAction::Start => {
+                    /* set up channels */
+                    let (stdout_tx, stdout_rx) = mpsc::channel(8);
+                    stdout.set(ReceiverStream::new(stdout_rx).right_stream());
+                    let (stderr_tx, stderr_rx) = mpsc::channel(8);
+                    stderr.set(ReceiverStream::new(stderr_rx).right_stream());
+                    let (stdin_tx, stdin_rx) = mpsc::channel(8);
+                    stdin = Some(stdin_tx);
+                    let (terminate_tx, terminate_rx) = oneshot::channel();
+                    terminate = Some(terminate_tx);
+                    /* start process */
+                    let bash = fernbedienung::Process {
+                        target: "bash".into(),
+                        working_dir: None,
+                        args: vec!["-li".to_owned()],
+                    };
+                    process.set(device.run(bash, terminate_rx, stdin_rx, stdout_tx, stderr_tx).right_future());
+                    log::info!("Remote Bash instance started");
+                },
+                TerminalAction::Run(mut command) => if let Some(tx) = stdin.as_ref() {
+                    command.push_str("\r");
+                    let _  = tx.send(BytesMut::from(command.as_bytes())).await;
+                },
+                TerminalAction::Stop => if let Some(tx) = terminate.take() {
+                    let _ = tx.send(());
+                }
+            },
             result = &mut process => {
-                log::info!("Remote bash instance terminated with {:?}", result);
-                break;
+                process.set(futures::future::pending().left_future());
+                stdout.set(futures::stream::pending().left_stream());
+                stderr.set(futures::stream::pending().left_stream());
+                stdin = None;
+                terminate = None;
+                log::info!("Remote Bash instance terminated with {:?}", result);
             }
-            Some(stdout) = stdout_rx.recv() => {
+            Some(stdout) = stdout.next() => {
                 let update = Update::Bash(String::from_utf8_lossy(&stdout).into_owned());
                 log::info!("{:?}", update);
                 let _ = updates_tx.send(update);
             },
-            Some(stderr) = stderr_rx.recv() => {
+            Some(stderr) = stderr.next() => {
                 let update = Update::Bash(String::from_utf8_lossy(&stderr).into_owned());
                 log::info!("{:?}", update);
                 let _ = updates_tx.send(update);
             },
-            Some(action) = rx.recv() => match action {
-                BashAction::KeyUp(_key) => {}, // stdin_tx
-                BashAction::KeyDown(key) => {
-                    let input = match key.as_ref() {
-                        "Enter" => "\r",
-                        "Backspace" => "\x08",
-                        other => other,
-                    };
-                    if let Err(error) = stdin_tx.send(BytesMut::from(input)).await {
-                        log::warn!("Could not send keystokes to remote Bash instance: {}", error)
-                    }
-                },
-                BashAction::Close => {
-                    let _ = terminate_tx.send(());
-                    break;
-                }
-            }
         }
     }
 }
@@ -350,8 +461,8 @@ async fn fernbedienung(
     updates_tx: broadcast::Sender<Update>
 ) {
     /* bash task */
-    let bash_task = futures::future::pending().left_future();
-    let mut bash_tx : Option<mpsc::Sender<BashAction>> = Option::default();
+    let (mut bash_tx, bash_rx) = mpsc::channel(8);
+    let bash_task = bash(&device, bash_rx, updates_tx.clone());
     tokio::pin!(bash_task);
     /* link strength */
     let link_strength_stream = fernbedienung_link_strength_stream(&device)
@@ -396,16 +507,8 @@ async fn fernbedienung(
                     FernbedienungAction::Reboot => if let Err(error) = device.reboot().await {
                         log::warn!("Could not reboot Up Core: {}", error);
                     },
-                    FernbedienungAction::Bash(action) => match &bash_tx {
-                        Some(tx) => {
-                            let _ = tx.send(action).await;    
-                        },
-                        None => {
-                            let (tx, rx) = mpsc::channel(8);
-                            let _ = tx.send(action).await;
-                            bash_tx = Some(tx);
-                            bash_task.set(bash(&device, rx, updates_tx.clone()).right_future());
-                        }
+                    FernbedienungAction::Bash(action) => {
+                        let _ = bash_tx.send(action).await;
                     },
                     FernbedienungAction::GetKernelMessages => {},
                     FernbedienungAction::Identify => {},
@@ -413,8 +516,10 @@ async fn fernbedienung(
                 None => break,
             },
             _ = &mut bash_task => {
-                bash_tx = None;
-                bash_task.set(futures::future::pending().left_future());
+                /* restart task */
+                let (tx, rx) = mpsc::channel(8);
+                bash_tx = tx;
+                bash_task.set(bash(&device, rx, updates_tx.clone()));
             },
         }
     }
