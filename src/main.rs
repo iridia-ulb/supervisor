@@ -2,7 +2,7 @@ use std::{net::SocketAddr, path::{Path, PathBuf}};
 use ipnet::Ipv4Net;
 use structopt::StructOpt;
 use anyhow::Context;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 mod arena;
 mod robot;
@@ -46,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
     /* create a task for tracking the robots and state of the experiment */
     let (arena_requests_tx, arena_requests_rx) = mpsc::channel(8);
     let (journal_requests_tx, journal_requests_rx) = mpsc::channel(8);
-    let (webui_requests_tx, webui_requests_rx) = mpsc::channel(8);
+    let (webui_requests_tx, _) = broadcast::channel(8);
     /* listen for the ctrl-c shutdown signal */
     let sigint_task = tokio::signal::ctrl_c();
     /* create journal task */
@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
     let arena_task =
         arena::new(arena_requests_rx,
                    &journal_requests_tx,
-                   &webui_requests_tx,
+                   webui_requests_tx.clone(),
                    pipucks,
                    drones);
     /* create network task */
@@ -67,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
     /* create the backend task */
     let webui_socket = webui_socket
         .ok_or(anyhow::anyhow!("A socket for the web interface must be provided"))?;
-    let webui_task = webui::run(webui_socket, webui_requests_rx, arena_requests_tx.clone());
+    let webui_task = webui::run(webui_socket, webui_requests_tx, arena_requests_tx.clone());
     /* pin the futures so that they can be polled via &mut */
     tokio::pin!(arena_task);
     tokio::pin!(journal_task);

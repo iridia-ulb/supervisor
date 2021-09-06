@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::{collections::HashMap};
 use log;
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use futures::{TryStreamExt, stream::FuturesUnordered};
 
 use crate::robot::{pipuck, drone};
@@ -15,53 +15,27 @@ use crate::software;
 use crate::journal;
 use crate::network::{xbee, fernbedienung};
 use crate::webui;
+use shared::experiment::{self, State};
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-pub enum Action {
-    #[serde(rename = "Start Experiment")]
-    StartExperiment,
-    #[serde(rename = "Stop Experiment")]
-    StopExperiment,
-}
-
-enum State {
-    Standby,
-    Active,
-}
 
 pub enum Request {
-    /* Arena requests */
-    Refresh,
-
-    GetActions(oneshot::Sender<Vec<Action>>),
-    Execute(Action),
-
-    AddXbee(xbee::Device, macaddr::MacAddr6),
-    AddFernbedienung(fernbedienung::Device, macaddr::MacAddr6),
-
     /* Drone requests */
-    AddDroneSoftware(String, Vec<u8>),
-    ClearDroneSoftware,
-    CheckDroneSoftware(oneshot::Sender<(software::Checksums, software::Result<()>)>),
     ForwardDroneRequest(String, drone::Request),
     GetDroneDescriptors(oneshot::Sender<Vec<Arc<drone::Descriptor>>>),
-    //ForwardDroneActionAll(drone::Action),
-    ///GetDrones(oneshot::Sender<HashMap<String, drone::State>>),
-
     /* Pi-Puck requests */
-    AddPiPuckSoftware(String, Vec<u8>),
-    ClearPiPuckSoftware,
-    CheckPiPuckSoftware(oneshot::Sender<(software::Checksums, software::Result<()>)>),
     ForwardPiPuckRequest(String, pipuck::Request),
     GetPiPuckDescriptors(oneshot::Sender<Vec<Arc<pipuck::Descriptor>>>),
-    //ForwardPiPuckActionAll(pipuck::Action),
-    //GetPiPucks(oneshot::Sender<HashMap<String, pipuck::State>>),
+    /* Arena requests */
+    AddXbee(xbee::Device, macaddr::MacAddr6),
+    AddFernbedienung(fernbedienung::Device, macaddr::MacAddr6),
+    /* Experiment requests */
+    Process(experiment::Request),
 }
 
 pub async fn new(
     mut arena_request_rx: mpsc::Receiver<Request>,
     journal_requests_tx: &mpsc::Sender<journal::Request>,
-    webui_requests_tx: &mpsc::Sender<webui::Request>,
+    webui_requests_tx: broadcast::Sender<webui::Request>,
     pipucks: Vec<pipuck::Descriptor>,
     drones: Vec<drone::Descriptor>
 ) {
@@ -80,9 +54,6 @@ pub async fn new(
     
     while let Some(request) = arena_request_rx.recv().await {
         match request {
-            Request::Refresh => {
-                todo!("Request all devices to sync there state");
-            }
             Request::AddXbee(device, macaddr) => {
                 match &associate_xbee_device(macaddr, &drones)[..] {
                     [instance] => {
@@ -113,14 +84,8 @@ pub async fn new(
                 }
             },
             /* Arena requests */
-            Request::GetActions(callback) => {
-                let _ = callback.send(match state {
-                    State::Standby => vec![Action::StartExperiment],
-                    State::Active => vec![Action::StopExperiment],
-                });                
-            },
-            Request::Execute(action) => match action {
-                Action::StartExperiment => {
+            Request::Process(request) => match request {
+                experiment::Request::StartExperiment => {
                     let start_experiment_result = 
                         start_experiment(&pipucks,
                                          &pipuck_software,
@@ -135,21 +100,39 @@ pub async fn new(
                         }
                     };
                 },
-                Action::StopExperiment => {
+                experiment::Request::StopExperiment => {
                     stop_experiment(&pipucks, &drones, &journal_requests_tx).await;
                     state = State::Standby;
                 }
-            }
-            Request::AddDroneSoftware(path, contents) =>
-                drone_software.add(path, contents),
-            Request::ClearDroneSoftware =>
-                drone_software.clear(),
-            Request::CheckDroneSoftware(callback) => {
-                let checksums = drone_software.checksums();
-                let check = drone_software.check_config();
-                if let Err(_) = callback.send((checksums, check)) {
-                    log::error!("Could not respond with drone software check");
-                }
+                experiment::Request::AddDroneSoftware(path, contents) => {
+                    drone_software.add(path, contents);
+                    let update = experiment::Update::DroneSoftware {
+                        checksums: drone_software.checksums()
+                            .into_iter()
+                            .map(|(name, digest)| (name, format!("{:x}", digest)))
+                            .collect(),
+                        status: drone_software.check_config()
+                            .map_err(|e| e.to_string())
+                    };
+                    let down_msg = shared::DownMessage::UpdateExperiment(update);
+                    let request = webui::Request::BroadcastDownMessage(down_msg);
+                    let _ = webui_requests_tx.send(request);
+                },
+                experiment::Request::ClearDroneSoftware => {
+                    drone_software.clear();
+                    let update = experiment::Update::DroneSoftware {
+                        checksums: drone_software.checksums()
+                            .into_iter()
+                            .map(|(name, digest)| (name, format!("{:x}", digest)))
+                            .collect(),
+                        status: drone_software.check_config()
+                            .map_err(|e| e.to_string())
+                    };
+                    let down_msg = shared::DownMessage::UpdateExperiment(update);
+                    let request = webui::Request::BroadcastDownMessage(down_msg);
+                    let _ = webui_requests_tx.send(request);
+                },
+                _ => todo!()
             },
             Request::ForwardDroneRequest(id, request) => {
                 match drones.iter().find(|&(desc, _)| desc.id == id) {
@@ -161,16 +144,8 @@ pub async fn new(
             }
             Request::GetDroneDescriptors(callback) => {
                 let _ = callback.send(drones.keys().cloned().collect::<Vec<_>>());
-            }
-            /* Pi-Puck requests */
-            Request::AddPiPuckSoftware(path, contents) =>
-                pipuck_software.add(path, contents),
-            Request::ClearPiPuckSoftware =>
-                pipuck_software.clear(),
-            Request::CheckPiPuckSoftware(callback) => {
-                let _ = callback
-                    .send((pipuck_software.checksums(), pipuck_software.check_config()));
             },
+            /* Pi-Puck requests */
             Request::ForwardPiPuckRequest(id, request) => {
                 match pipucks.iter().find(|&(desc, _)| desc.id == id) {
                     Some((_, instance)) => {

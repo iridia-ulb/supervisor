@@ -1,29 +1,36 @@
 pub mod drone;
 pub mod pipuck;
+pub mod experiment;
 
 use serde::{Serialize, Deserialize};
 // ------ UpMsg ------
 
+// Request should be for messages that go across an IP boundary and
+// should always include a UUID
+// Actions should be only used internally
+
 // frontend to backend,
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum UpMessage {
     // perform action on drone with this id
     DroneAction(String, drone::Action),
     // perform action on pipuck with this id
     PiPuckAction(String, pipuck::Action),
+    Experiment(experiment::Request)
 }
 
 // backend to frontend, status updates
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum DownMessage {
     // broadcast, trigger by change in actual drone
     AddDrone(drone::Descriptor),
     UpdateDrone(String, drone::Update),
     AddPiPuck(pipuck::Descriptor),
     UpdatePiPuck(String, pipuck::Update),
+    UpdateExperiment(experiment::Update),
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum FernbedienungAction {
     Halt,
     Reboot,
@@ -33,7 +40,7 @@ pub enum FernbedienungAction {
     Identify,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum TerminalAction {
     Start,
     Run(String),
@@ -41,7 +48,7 @@ pub enum TerminalAction {
 }
 
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ExperimentStatus {
     pub pipucks: u32,
     pub drones: u32,

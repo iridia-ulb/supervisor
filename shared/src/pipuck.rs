@@ -16,7 +16,7 @@ impl Display for Descriptor {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum Action {
     RpiHalt,
     RpiReboot,

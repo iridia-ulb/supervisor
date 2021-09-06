@@ -1,5 +1,6 @@
 use std::{cell::RefCell, collections::HashMap, convert::AsRef, rc::Rc};
 use anyhow::Context;
+use shared::DownMessage;
 use strum::{EnumProperty, IntoEnumIterator};
 use strum_macros::{AsRefStr, EnumIter, EnumProperty};
 use wasm_bindgen::prelude::*;
@@ -8,6 +9,7 @@ use yew::services::websocket::{WebSocketService, WebSocketStatus, WebSocketTask}
 use yew::services::ConsoleService;
 
 mod drone;
+mod experiment;
 
 #[derive(AsRefStr, EnumProperty, EnumIter, Copy, Clone, PartialEq)]
 pub enum Tab {
@@ -25,6 +27,7 @@ pub struct UserInterface {
     active_tab: Tab,
     drones: HashMap<String, Rc<RefCell<drone::Instance>>>,
     //pipucks: HashMap<shared::pipuck::Descriptor, Rc<RefCell<pipuck::Instance>>>,
+    drone_config_comp: Option<ComponentLink<experiment::DroneConfigCard>>,
 }
 
 
@@ -36,6 +39,8 @@ pub enum Msg {
     WebSocketRxData(Result<Vec<u8>, anyhow::Error>),
     SendUpMessage(shared::UpMessage),
     SetActiveTab(Tab),
+
+    RegisterDroneConfigComp(ComponentLink<experiment::DroneConfigCard>),
 }
 
 impl Component for UserInterface {
@@ -66,8 +71,9 @@ impl Component for UserInterface {
                     None
                 }
             },
-            active_tab: Tab::Drones,
+            active_tab: Tab::Experiment,
             drones: Default::default(),
+            drone_config_comp: None,
             //pipucks: Default::default(),
         }
     }
@@ -88,19 +94,36 @@ impl Component for UserInterface {
                 false
             }
             Msg::WebSocketRxData(data) => match data {
-                Ok(data) => match bincode::deserialize::<shared::DownMessage>(&data) {
+                Ok(data) => match bincode::deserialize::<DownMessage>(&data) {
                     Ok(decoded) => match decoded {
-                        shared::DownMessage::AddDrone(desc) => {
+                        DownMessage::AddDrone(desc) => {
                             self.drones.entry(desc.id.clone())
                                 .or_insert_with(|| Rc::new(RefCell::new(drone::Instance::new(desc))));
                             true
                         },
-                        shared::DownMessage::UpdateDrone(id, update) => {
+                        DownMessage::UpdateDrone(id, update) => {
                             if let Some(drone) = self.drones.get(&id) {
                                 drone.borrow_mut().update(update);
                             }
                             true
                         },
+                        DownMessage::UpdateExperiment(update) => {
+                            ConsoleService::log("got update exp");
+                            match update {
+                                shared::experiment::Update::State(x) => {},
+                                shared::experiment::Update::DroneSoftware { checksums, status } => {
+                                    ConsoleService::log("got drone update soft");
+                                    if let Some(drone_config_comp) = &self.drone_config_comp {
+                                        let comp_msg = experiment::Msg::UpdateSoftware(checksums, status);
+                                        drone_config_comp.send_message(comp_msg);
+                                    }
+                                },
+                                shared::experiment::Update::PiPuckSoftware { checksums, status } => {
+
+                                }
+                            }
+                            true
+                        }
                         _ => {
                             // TODO
                             true
@@ -120,6 +143,11 @@ impl Component for UserInterface {
                 ConsoleService::log(&format!("{:?}", notification));
                 true
             }
+            Msg::RegisterDroneConfigComp(link) => {
+                ConsoleService::log("registered drone comp link");
+                self.drone_config_comp = Some(link);
+                false
+            },
         }
     }
 
@@ -146,8 +174,8 @@ impl Component for UserInterface {
                                     Tab::PiPucks => {
                                         html! {}
                                     },
-                                    Tab::Experiment => {
-                                        html! {}
+                                    Tab::Experiment => html! {
+                                        <experiment::DroneConfigCard parent=self.link.clone() />
                                     }
                                 }
                             }

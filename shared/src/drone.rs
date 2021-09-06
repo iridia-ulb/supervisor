@@ -17,13 +17,13 @@ impl Display for Descriptor {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum Action {
     Fernbedienung(FernbedienungAction),
     Xbee(XbeeAction)
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum XbeeAction {
     SetUpCorePower(bool),
     SetPixhawkPower(bool),
