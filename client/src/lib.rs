@@ -26,8 +26,10 @@ pub struct UserInterface {
     socket: Option<WebSocketTask>,
     active_tab: Tab,
     drones: HashMap<String, Rc<RefCell<drone::Instance>>>,
-    //pipucks: HashMap<shared::pipuck::Descriptor, Rc<RefCell<pipuck::Instance>>>,
-    drone_config_comp: Option<ComponentLink<experiment::DroneConfigCard>>,
+    
+    drone_config_comp: Option<ComponentLink<experiment::drone::ConfigCard>>,
+    //pipuck_config_comp: Option<ComponentLink<experiment::pipuck::ConfigCard>>,
+    control_config_comp: Option<ComponentLink<experiment::control::ConfigCard>>,
 }
 
 
@@ -40,7 +42,9 @@ pub enum Msg {
     SendUpMessage(shared::UpMessage),
     SetActiveTab(Tab),
 
-    RegisterDroneConfigComp(ComponentLink<experiment::DroneConfigCard>),
+    SetDroneConfigComp(ComponentLink<experiment::drone::ConfigCard>),
+    //SetPiPuckConfigComp(ComponentLink<experiment::drone::ConfigCard>),
+    SetControlConfigComp(ComponentLink<experiment::control::ConfigCard>),
 }
 
 impl Component for UserInterface {
@@ -73,8 +77,11 @@ impl Component for UserInterface {
             },
             active_tab: Tab::Experiment,
             drones: Default::default(),
-            drone_config_comp: None,
             //pipucks: Default::default(),
+            /* configuration component links */
+            drone_config_comp: None,
+            //pipuck_config_comp: None,
+            control_config_comp: None,
         }
     }
 
@@ -86,7 +93,7 @@ impl Component for UserInterface {
             }
             Msg::SendUpMessage(message) => {
                 if let Some(websocket) = &mut self.socket {
-                    websocket.send_binary(bincode::serialize(&message).context("Could not serialize UpMessage"));  
+                    websocket.send_binary(bincode::serialize(&message).context("Could not serialize UpMessage"));
                 }
                 else {
                     ConsoleService::log("Could not send UpMessage: Not connected");
@@ -114,7 +121,7 @@ impl Component for UserInterface {
                                 shared::experiment::Update::DroneSoftware { checksums, status } => {
                                     ConsoleService::log("got drone update soft");
                                     if let Some(drone_config_comp) = &self.drone_config_comp {
-                                        let comp_msg = experiment::Msg::UpdateSoftware(checksums, status);
+                                        let comp_msg = experiment::drone::Msg::UpdateSoftware(checksums, status);
                                         drone_config_comp.send_message(comp_msg);
                                     }
                                 },
@@ -143,9 +150,12 @@ impl Component for UserInterface {
                 ConsoleService::log(&format!("{:?}", notification));
                 true
             }
-            Msg::RegisterDroneConfigComp(link) => {
-                ConsoleService::log("registered drone comp link");
+            Msg::SetDroneConfigComp(link) => {
                 self.drone_config_comp = Some(link);
+                false
+            },
+            Msg::SetControlConfigComp(link) => {
+                self.control_config_comp = Some(link);
                 false
             },
         }
@@ -163,24 +173,31 @@ impl Component for UserInterface {
                 { self.render_tabs() }
                 <section class="section">
                     <div class="container is-fluid">
-                        <div class="columns is-multiline is-mobile">
-                            <div class="column is-full-mobile is-full-tablet is-full-desktop is-half-widescreen is-one-third-fullhd"> {
-                                match self.active_tab {
-                                    Tab::Drones => self.drones
-                                        .values()
-                                        .map(|drone| html!{
+                        <div class="columns is-multiline is-mobile"> {
+                            match self.active_tab {
+                                Tab::Drones => self.drones
+                                    .values()
+                                    .map(|drone| html!{
+                                        <div class="column is-full-mobile is-full-tablet is-full-desktop is-half-widescreen is-one-third-fullhd">
                                             <drone::Card instance=drone parent=self.link.clone() />
-                                        }).collect::<Html>(),
-                                    Tab::PiPucks => {
-                                        html! {}
-                                    },
-                                    Tab::Experiment => html! {
-                                        <experiment::DroneConfigCard parent=self.link.clone() />
-                                    }
+                                        </div>
+                                    }).collect::<Html>(),
+                                Tab::PiPucks => {
+                                    html! {}
+                                },
+                                Tab::Experiment => html! {
+                                    <>
+                                    <div class="column is-full-mobile is-full-tablet is-full-desktop is-half-widescreen is-one-third-fullhd">
+                                            <experiment::drone::ConfigCard parent=self.link.clone() />
+                                        </div>
+
+                                        <div class="column is-full-mobile is-full-tablet is-half-desktop is-third-widescreen is-one-quarter-fullhd">
+                                            <experiment::control::ConfigCard parent=self.link.clone() />
+                                        </div>
+                                    </>
                                 }
                             }
-                            </div>
-                        </div>
+                        } </div>
                     </div>
                 </section>
             </>

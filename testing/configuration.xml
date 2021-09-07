@@ -9,7 +9,11 @@
                 xbee_macaddr="00:04:F3:19:FE:53"
                 upcore_macaddr="B0:F1:EC:E9:2F:97"
                 optitrack_id="1" />
-        <pipuck id="pipuck1" 
+        <drone  id="fake1"
+                xbee_macaddr="00:00:00:00:00:00"
+                upcore_macaddr="00:00:00:00:00:00"
+                optitrack_id="42" />
+        <pipuck id="pipuck1"
                 rpi_macaddr="FFFFFF:FFFFFF"
                 optitrack_id="2"
                 apriltag_id="20" />

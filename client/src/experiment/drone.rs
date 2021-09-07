@@ -11,7 +11,7 @@ use shared::experiment::Request;
 
 use crate::UserInterface as Parent;
 
-pub struct DroneConfigCard {
+pub struct ConfigCard {
     link: ComponentLink<Self>,
     props: Props,
     tasks: Vec<ReaderTask>,
@@ -26,24 +26,24 @@ pub struct Props {
 }
 
 pub enum Msg {
-    ResetDroneConfig,
     UpdateSoftware(Vec<(String, String)>, Result<(), String>),
 
     // this msg probably doesn't belong here
     // since it does interact with this component
     AddSoftware(Vec<File>),
+    ResetSoftware,
 }
 
 // is it possible to just add a callback to the update method
-impl Component for DroneConfigCard {
+impl Component for ConfigCard {
     type Message = Msg;
     type Properties = Props;
 
     fn create(props: Props, link: ComponentLink<Self>) -> Self {
 
-        props.parent.send_message(crate::Msg::RegisterDroneConfigComp(link.clone()));
+        props.parent.send_message(crate::Msg::SetDroneConfigComp(link.clone()));
         // if props contains a closure, I could use that to communicate with the actual instance
-        DroneConfigCard { 
+        ConfigCard { 
             props,
             link,
             tasks: Default::default(),
@@ -56,7 +56,7 @@ impl Component for DroneConfigCard {
     fn update(&mut self, msg: Self::Message) -> ShouldRender {
         //let mut drone = self.props.instance.borrow_mut();
         match msg {
-            Msg::ResetDroneConfig => todo!(),
+            Msg::ResetSoftware => todo!(),
             // TODO move this code into the other callback and 
             // remove this message type from this component
             Msg::AddSoftware(files) => for file in files {
@@ -103,7 +103,7 @@ impl Component for DroneConfigCard {
     }
 }
 
-impl DroneConfigCard {
+impl ConfigCard {
     fn render_config(&self) -> Html {
         html! {
             <>

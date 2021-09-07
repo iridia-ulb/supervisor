@@ -39,8 +39,6 @@ pub async fn new(
     pipucks: Vec<pipuck::Descriptor>,
     drones: Vec<drone::Descriptor>
 ) {
-    let mut state = State::Standby;
-    
     let mut drone_software : crate::software::Software = Default::default();   
     let mut pipuck_software : crate::software::Software = Default::default();
     let pipucks: HashMap<Arc<pipuck::Descriptor>, pipuck::Instance> = pipucks
@@ -86,23 +84,20 @@ pub async fn new(
             /* Arena requests */
             Request::Process(request) => match request {
                 experiment::Request::StartExperiment => {
-                    let start_experiment_result = 
-                        start_experiment(&pipucks,
-                                         &pipuck_software,
-                                         &drones,
-                                         &drone_software,
-                                         &journal_requests_tx).await;
-                    match start_experiment_result {
-                        Ok(_) => state = State::Active,
-                        Err(error) => {
-                            stop_experiment(&pipucks, &drones, &journal_requests_tx).await;
-                            log::error!("Could not start experiment: {}", error);
-                        }
-                    };
+                    let start_experiment_result = start_experiment(
+                        &pipucks,
+                        &pipuck_software,
+                        &drones,
+                        &drone_software,
+                        &webui_requests_tx,
+                        &journal_requests_tx).await;
+                    if let Err(error) = start_experiment_result {
+                        stop_experiment(&pipucks, &drones, &webui_requests_tx, &journal_requests_tx).await;
+                        log::error!("Could not start experiment: {}", error);
+                    }
                 },
                 experiment::Request::StopExperiment => {
-                    stop_experiment(&pipucks, &drones, &journal_requests_tx).await;
-                    state = State::Standby;
+                    stop_experiment(&pipucks, &drones, &webui_requests_tx,&journal_requests_tx).await;
                 }
                 experiment::Request::AddDroneSoftware(path, contents) => {
                     drone_software.add(path, contents);
@@ -206,6 +201,7 @@ fn associate_fernbedienung_device_with_pipuck(
 async fn stop_experiment(
     pipucks: &HashMap<Arc<pipuck::Descriptor>, pipuck::Instance>,
     drones: &HashMap<Arc<drone::Descriptor>, drone::Instance>,
+    webui_requests_tx: &broadcast::Sender<webui::Request>,
     journal_requests_tx: &mpsc::Sender<journal::Request>
 ) {
     let _ = journal_requests_tx.send(journal::Request::Stop).await;
@@ -226,6 +222,10 @@ async fn stop_experiment(
     if let Err(_) = pipuck_result {
         log::error!("Could not stop all Pi-Pucks");
     }
+    let update = experiment::Update::State(State::Standby);
+    let down_msg = shared::DownMessage::UpdateExperiment(update);
+    let request = webui::Request::BroadcastDownMessage(down_msg);
+    let _ = webui_requests_tx.send(request);
 }
 
 async fn start_experiment(
@@ -233,6 +233,7 @@ async fn start_experiment(
     pipuck_software: &Software,
     drones: &HashMap<Arc<drone::Descriptor>, drone::Instance>,
     drone_software: &Software,
+    webui_requests_tx: &broadcast::Sender<webui::Request>,
     journal_requests_tx: &mpsc::Sender<journal::Request>
 ) -> anyhow::Result<()> {
     /* check software validity before starting */
@@ -296,5 +297,9 @@ async fn start_experiment(
         .collect::<FuturesUnordered<_>>()
         .try_collect::<Vec<_>>().await?;
     /* experiment started successfully */
+    let update = experiment::Update::State(State::Active);
+    let down_msg = shared::DownMessage::UpdateExperiment(update);
+    let request = webui::Request::BroadcastDownMessage(down_msg);
+    let _ = webui_requests_tx.send(request);
     Ok(())
 }

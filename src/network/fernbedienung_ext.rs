@@ -20,7 +20,7 @@ pub struct MjpegStreamerStream<'dev, S> {
 impl<S> PinnedDrop for MjpegStreamerStream<'_, S> {
     fn drop(self: Pin<&mut Self>) {
         if let Some(terminate_tx) = self.project().terminate_tx.take() {
-            terminate_tx.send(());
+            let _ = terminate_tx.send(());
         }
     }
 }
