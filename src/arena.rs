@@ -1,8 +1,7 @@
 
 use anyhow::{Result, Context};
 use futures::{StreamExt, TryFutureExt};
-use serde::{Deserialize, Serialize};
-use software::Software;
+use shared::FernbedienungAction;
 use std::sync::Arc;
 use std::{collections::HashMap};
 use log;
@@ -11,12 +10,10 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use futures::{TryStreamExt, stream::FuturesUnordered};
 
 use crate::robot::{pipuck, drone};
-use crate::software;
 use crate::journal;
 use crate::network::{xbee, fernbedienung};
 use crate::webui;
-use shared::experiment::{self, State};
-
+use shared::experiment::{self, State, software::Software};
 
 pub enum Request {
     /* Drone requests */
@@ -39,8 +36,6 @@ pub async fn new(
     pipucks: Vec<pipuck::Descriptor>,
     drones: Vec<drone::Descriptor>
 ) {
-    let mut drone_software : crate::software::Software = Default::default();   
-    let mut pipuck_software : crate::software::Software = Default::default();
     let pipucks: HashMap<Arc<pipuck::Descriptor>, pipuck::Instance> = pipucks
         .into_iter()
         .map(|descriptor| (Arc::new(descriptor), pipuck::Instance::default()))
@@ -83,12 +78,12 @@ pub async fn new(
             },
             /* Arena requests */
             Request::Process(request) => match request {
-                experiment::Request::StartExperiment => {
+                experiment::Request::StartExperiment { drone_software, pipuck_software } => {
                     let start_experiment_result = start_experiment(
                         &pipucks,
-                        &pipuck_software,
+                        pipuck_software,
                         &drones,
-                        &drone_software,
+                        drone_software,
                         &webui_requests_tx,
                         &journal_requests_tx).await;
                     if let Err(error) = start_experiment_result {
@@ -99,36 +94,7 @@ pub async fn new(
                 experiment::Request::StopExperiment => {
                     stop_experiment(&pipucks, &drones, &webui_requests_tx,&journal_requests_tx).await;
                 }
-                experiment::Request::AddDroneSoftware(path, contents) => {
-                    drone_software.add(path, contents);
-                    let update = experiment::Update::DroneSoftware {
-                        checksums: drone_software.checksums()
-                            .into_iter()
-                            .map(|(name, digest)| (name, format!("{:x}", digest)))
-                            .collect(),
-                        status: drone_software.check_config()
-                            .map_err(|e| e.to_string())
-                    };
-                    let down_msg = shared::DownMessage::UpdateExperiment(update);
-                    let request = webui::Request::BroadcastDownMessage(down_msg);
-                    let _ = webui_requests_tx.send(request);
-                },
-                experiment::Request::ClearDroneSoftware => {
-                    drone_software.clear();
-                    let update = experiment::Update::DroneSoftware {
-                        checksums: drone_software.checksums()
-                            .into_iter()
-                            .map(|(name, digest)| (name, format!("{:x}", digest)))
-                            .collect(),
-                        status: drone_software.check_config()
-                            .map_err(|e| e.to_string())
-                    };
-                    let down_msg = shared::DownMessage::UpdateExperiment(update);
-                    let request = webui::Request::BroadcastDownMessage(down_msg);
-                    let _ = webui_requests_tx.send(request);
-                },
-                _ => todo!()
-            },
+            }
             Request::ForwardDroneRequest(id, request) => {
                 match drones.iter().find(|&(desc, _)| desc.id == id) {
                     Some((_, instance)) => {
@@ -230,9 +196,9 @@ async fn stop_experiment(
 
 async fn start_experiment(
     pipucks: &HashMap<Arc<pipuck::Descriptor>, pipuck::Instance>,
-    pipuck_software: &Software,
+    pipuck_software: Software,
     drones: &HashMap<Arc<drone::Descriptor>, drone::Instance>,
-    drone_software: &Software,
+    drone_software: Software,
     webui_requests_tx: &broadcast::Sender<webui::Request>,
     journal_requests_tx: &mpsc::Sender<journal::Request>
 ) -> anyhow::Result<()> {
@@ -253,50 +219,51 @@ async fn start_experiment(
         .and_then(|error| error)?;
     /* start the experiment */
     /* start pi-pucks first since they are less dangerous */
-    pipucks
-        .iter()
-        .map(|(id, instance)| {
-            let journal_requests_tx = journal_requests_tx.clone();
-            let (response_tx, response_rx) = oneshot::channel();
-            let request = pipuck::Request::StartExperiment {
-                software: pipuck_software.clone(),
-                journal: journal_requests_tx,
-                callback: response_tx
-            };
-            async move {
-                let _ = instance.request_tx.send(request).await;
-                let error_msg = ||
-                    format!("Could not start experiment on {}", id);
-                response_rx.await
-                    .context(error_msg())
-                    .and_then(|inner| inner.context(error_msg()))
-            }
-        })
-        .collect::<FuturesUnordered<_>>()
-        .try_collect::<Vec<_>>().await?;
+    // pipucks
+    //     .iter()
+    //     .map(|(id, instance)| {
+    //         let journal_requests_tx = journal_requests_tx.clone();
+    //         let (response_tx, response_rx) = oneshot::channel();
+    //         let request = pipuck::Request::StartExperiment {
+    //             journal: journal_requests_tx,
+    //             callback: response_tx
+    //         };
+    //         async move {
+    //             let _ = instance.request_tx.send(request).await;
+    //             let error_msg = ||
+    //                 format!("Could not start experiment on {}", id);
+    //             response_rx.await
+    //                 .context(error_msg())
+    //                 .and_then(|inner| inner.context(error_msg()))
+    //         }
+    //     })
+    //     .collect::<FuturesUnordered<_>>()
+    //     .try_collect::<Vec<_>>().await?;
     /* now start the drones */
     drones
         .iter()
-        .map(|(id, instance)| {
-            let journal_requests_tx = journal_requests_tx.clone();
-            let (response_tx, response_rx) = oneshot::channel();
+        .map(|(desc, instance)| {
+            use shared::{drone::Action, ExperimentAction, FernbedienungAction};
+
+            let (callback_tx, callback_rx) = oneshot::channel();
+
+            let action = Action::Fernbedienung(
+                FernbedienungAction::Experiment(
+                    ExperimentAction::Configure(drone_software.clone())));
+            let request = drone::Request::Execute(action);
+
             let request = drone::Request::StartExperiment {
                 software: drone_software.clone(),
-                journal: journal_requests_tx,
-                callback: response_tx
+                callback: callback_tx,
             };
-            async move {
-                let _ = instance.request_tx.send(request).await;
-                let error_msg = ||
-                    format!("Could not start experiment on {}", id);
-                response_rx.await
-                    .context(error_msg())
-                    .and_then(|inner| inner.context(error_msg()))
-            }
+            let id = desc.id.clone();
+            instance.request_tx.send(request)
+                .map_err(|_| anyhow::anyhow!("Could not request drone to start"))
+                .and_then(move |_| callback_rx.map_err(move |e| anyhow::anyhow!("Could not start drone {}", id)))
         })
         .collect::<FuturesUnordered<_>>()
         .try_collect::<Vec<_>>().await?;
-    /* experiment started successfully */
+    /* notify frontend that the experiment has started successfully */
     let update = experiment::Update::State(State::Active);
     let down_msg = shared::DownMessage::UpdateExperiment(update);
     let request = webui::Request::BroadcastDownMessage(down_msg);

@@ -1,37 +1,30 @@
-use shared::UpMessage;
-use web_sys::{Element, HtmlInputElement};
-use yew::{prelude::*, services::ConsoleService, web_sys::HtmlTextAreaElement};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 
-use yew::services::reader::{File, FileChunk, FileData, ReaderService, ReaderTask};
+use yew::prelude::*;
+
+use yew::services::reader::{File, FileData, ReaderService, ReaderTask};
 use yew::{html, ChangeData, Component, ComponentLink, Html, ShouldRender};
 
-use shared::experiment::Request;
-
-//use wasm_bindgen::prelude::*;
-
-use crate::UserInterface as Parent;
+use shared::experiment::{software::Software};
 
 pub struct ConfigCard {
     link: ComponentLink<Self>,
     props: Props,
-    tasks: Vec<ReaderTask>,
-    software_checksums: Vec<(String, String)>,
-    software_status: Result<(), String>,
+    tasks: HashMap<String, ReaderTask>,
 }
 
 // what if properties was just drone::Instance itself?
 #[derive(Clone, Properties)]
 pub struct Props {
-    pub parent: ComponentLink<Parent>,
+    pub software: Rc<RefCell<Software>>,
 }
 
 pub enum Msg {
-    UpdateSoftware(Vec<(String, String)>, Result<(), String>),
-
-    // this msg probably doesn't belong here
-    // since it does interact with this component
-    AddSoftware(Vec<File>),
-    ResetSoftware,
+    ClearSoftware,
+    AddSoftware(String, Vec<u8>),
+    ReadSoftware(Vec<File>),
 }
 
 // is it possible to just add a callback to the update method
@@ -40,36 +33,34 @@ impl Component for ConfigCard {
     type Properties = Props;
 
     fn create(props: Props, link: ComponentLink<Self>) -> Self {
-
-        props.parent.send_message(crate::Msg::SetDroneConfigComp(link.clone()));
         // if props contains a closure, I could use that to communicate with the actual instance
         ConfigCard { 
             props,
             link,
             tasks: Default::default(),
-            software_checksums: Default::default(),
-            software_status: Err(String::from("No software uploaded"))
         }
     }
 
-    // this fires when a message needs to be processed
     fn update(&mut self, msg: Self::Message) -> ShouldRender {
-        //let mut drone = self.props.instance.borrow_mut();
         match msg {
-            Msg::ResetSoftware => todo!(),
-            // TODO move this code into the other callback and 
-            // remove this message type from this component
-            Msg::AddSoftware(files) => for file in files {
-                let upload = self.props.parent.callback(|FileData {name, content}| {
-                    let up_msg = UpMessage::Experiment(Request::AddDroneSoftware(name, content));
-                    crate::Msg::SendUpMessage(up_msg)
-                });
-                self.tasks.push(ReaderService::read_file(file, upload).unwrap());
+            Msg::ReadSoftware(files) => {
+                let link = self.link.clone();
+                let tasks = files.into_iter()
+                    .filter_map(move |file| {
+                        let filename = file.name();
+                        let callback = 
+                            link.callback(|FileData {name, content}| Msg::AddSoftware(name, content));
+                        match ReaderService::read_file(file, callback) {
+                            Ok(task) => Some((filename, task)),
+                            Err(_) => None,
+                        }
+                    });
+                self.tasks.extend(tasks);
             },
-            Msg::UpdateSoftware(checksums, status) => {
-                self.software_checksums = checksums;
-                self.software_status = status;
-            }
+            Msg::ClearSoftware =>
+                self.props.software.borrow_mut().clear(),
+            Msg::AddSoftware(name, content) =>
+                self.props.software.borrow_mut().add(name, content),
         }
         true
     }
@@ -112,7 +103,7 @@ impl ConfigCard {
                         <p class="level-item">{ "Control software" }</p>
                     </div>
                     <div class="level-right"> {
-                        match &self.software_status {
+                        match &self.props.software.borrow().check_config() {
                             Ok(_) => html! {
                                 <span class="level-item">
                                     <span class="icon is-medium">
@@ -140,11 +131,11 @@ impl ConfigCard {
                         </tr>
                     </thead>
                     <tbody> {
-                        self.software_checksums.iter()
+                        self.props.software.borrow().checksums().iter()
                             .map(|(name, checksum)| html! {
                                 <tr>
                                     <td> { name } </td>
-                                    <td> { checksum } </td>
+                                    <td> { format!("{:x}", checksum) } </td>
                                 </tr>
                             }).collect::<Html>()
                     } </tbody>
@@ -154,11 +145,8 @@ impl ConfigCard {
     }
 
     fn render_menu(&self) -> Html {
-        let clear_onclick = self.props.parent.callback(|_| {
-            let up_msg = UpMessage::Experiment(Request::ClearDroneSoftware);
-            crate::Msg::SendUpMessage(up_msg)
-        });
-        let upload_onchange = self.link.callback(move |value| {
+        let clear_onclick = self.link.callback(|_| Msg::ClearSoftware);
+        let add_onchange = self.link.callback(move |value| {
             let mut result = Vec::new();
             if let ChangeData::Files(files) = value {
                 let files = js_sys::try_iter(&files)
@@ -167,13 +155,13 @@ impl ConfigCard {
                     .map(|v| File::from(v.unwrap()));
                 result.extend(files);
             }
-            Msg::AddSoftware(result)
+            Msg::ReadSoftware(result)
         });
         html! {
             <>
-                <input id="drone_file_upload" class="is-hidden" type="file" multiple=true onchange=upload_onchange />
+                <input id="drone_add_software" class="is-hidden" type="file" multiple=true onchange=add_onchange />
                 <footer class="card-footer">
-                    <a class="card-footer-item"><label for="drone_file_upload">{ "Upload" }</label></a>
+                    <label class="card-footer-item" for="drone_add_software">{ "Add" }</label>
                     <a class="card-footer-item" onclick=clear_onclick>{ "Clear" }</a>
                 </footer>
             </>

@@ -1,55 +1,16 @@
 use anyhow::Context;
-use headers::HeaderMapExt;
-use lazy_static::__Deref;
-use std::{net::SocketAddr, sync::Arc, time::Duration};
-
+use std::{net::SocketAddr, ops::Deref, sync::Arc};
 use tokio_stream::{StreamMap, wrappers::{BroadcastStream, errors::BroadcastStreamRecvError}};
 use futures::{FutureExt, SinkExt, StreamExt, TryFutureExt, TryStreamExt, stream::{self, FuturesUnordered}};
-use tokio::{self, sync::{broadcast, mpsc, oneshot}, time::timeout};
-
-use warp::{Filter};
-use warp::reply::Response;
-
+use tokio::{self, sync::{broadcast, mpsc, oneshot}};
+use warp::Filter;
 use shared::{UpMessage, DownMessage};
 
 use crate::{
     arena,
-    optitrack,
-    software,
     robot::drone,
     robot::pipuck,
 };
-
-
-// #[derive(Debug, Deserialize, Clone, Copy, Serialize)]
-// pub enum State {
-//     Standby,
-//     Active,
-// }
-
-// #[derive(Clone, Debug, Deserialize, Serialize)]
-// pub enum Request {
-//     AddDroneSoftware(String, Vec<u8>),
-//     ClearDroneSoftware,
-//     AddPiPuckSoftware(String, Vec<u8>),
-//     ClearPiPuckSoftware,
-//     GetExperimentState,
-//     StartExperiment,
-//     StopExperiment,
-// }
-
-// #[derive(Debug, Deserialize, Serialize)]
-// pub enum Update {
-//     State(State),
-//     DroneSoftware {
-//         checksums: Vec<(String, String)>,
-//         status: Result<(), String>
-//     },
-//     PiPuckSoftware {
-//         checksums: Vec<(String, String)>,
-//         status: Result<(), String>
-//     },
-// }
 
 #[derive(Clone)]
 pub enum Request {

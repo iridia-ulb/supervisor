@@ -1,8 +1,9 @@
 use std::{cell::RefCell, collections::HashMap, convert::AsRef, rc::Rc};
 use anyhow::Context;
-use shared::DownMessage;
+use shared::{DownMessage, FrontEndRequest, UpMessage};
 use strum::{EnumProperty, IntoEnumIterator};
 use strum_macros::{AsRefStr, EnumIter, EnumProperty};
+use uuid::Uuid;
 use wasm_bindgen::prelude::*;
 use yew::prelude::*;
 use yew::services::websocket::{WebSocketService, WebSocketStatus, WebSocketTask};
@@ -25,11 +26,14 @@ pub struct UserInterface {
     link: ComponentLink<Self>,
     socket: Option<WebSocketTask>,
     active_tab: Tab,
+    requests: HashMap<Uuid, Callback<Result<(), String>>>,
+
+
     drones: HashMap<String, Rc<RefCell<drone::Instance>>>,
     
     drone_config_comp: Option<ComponentLink<experiment::drone::ConfigCard>>,
     //pipuck_config_comp: Option<ComponentLink<experiment::pipuck::ConfigCard>>,
-    control_config_comp: Option<ComponentLink<experiment::control::ConfigCard>>,
+    control_config_comp: Option<ComponentLink<experiment::Interface>>,
 }
 
 
@@ -39,12 +43,15 @@ pub enum Msg {
     // TODO: handle disconnects by matching against WebSocketStatus::Closed or WebSocketStatus::Error
     WebSocketNotifcation(WebSocketStatus),
     WebSocketRxData(Result<Vec<u8>, anyhow::Error>),
-    SendUpMessage(shared::UpMessage),
+    
     SetActiveTab(Tab),
+
+    SendRequest(shared::BackEndRequest, Option<Callback<Result<(), String>>>),
+    
 
     SetDroneConfigComp(ComponentLink<experiment::drone::ConfigCard>),
     //SetPiPuckConfigComp(ComponentLink<experiment::drone::ConfigCard>),
-    SetControlConfigComp(ComponentLink<experiment::control::ConfigCard>),
+    SetControlConfigComp(ComponentLink<experiment::Interface>),
 }
 
 impl Component for UserInterface {
@@ -77,6 +84,8 @@ impl Component for UserInterface {
             },
             active_tab: Tab::Experiment,
             drones: Default::default(),
+
+            requests: Default::default(),
             //pipucks: Default::default(),
             /* configuration component links */
             drone_config_comp: None,
@@ -91,58 +100,62 @@ impl Component for UserInterface {
                 self.active_tab = tab;
                 true
             }
-            Msg::SendUpMessage(message) => {
-                if let Some(websocket) = &mut self.socket {
-                    websocket.send_binary(bincode::serialize(&message).context("Could not serialize UpMessage"));
-                }
-                else {
-                    ConsoleService::log("Could not send UpMessage: Not connected");
+            Msg::SendRequest(request, callback) => {
+                match self.socket.as_mut() {
+                    Some(websocket) => {
+                        let id = Uuid::new_v4();
+                        let message = UpMessage::Request(id, request);
+                        match bincode::serialize(&message) {
+                            Ok(serialized) => {
+                                websocket.send_binary(Ok(serialized));
+                                if let Some(callback) = callback {
+                                    self.requests.insert(id, callback);
+                                }
+                            },
+                            Err(err) => if let Some(callback) = callback {
+                                callback.emit(Err(String::from("Could not serialize request")));
+                            }
+                        }
+                    }
+                    None => if let Some(callback) = callback {
+                        callback.emit(Err(String::from("Could not send request: Disconnected")));
+                    }
                 }
                 false
             }
             Msg::WebSocketRxData(data) => match data {
                 Ok(data) => match bincode::deserialize::<DownMessage>(&data) {
                     Ok(decoded) => match decoded {
-                        DownMessage::AddDrone(desc) => {
-                            self.drones.entry(desc.id.clone())
-                                .or_insert_with(|| Rc::new(RefCell::new(drone::Instance::new(desc))));
-                            true
-                        },
-                        DownMessage::UpdateDrone(id, update) => {
-                            if let Some(drone) = self.drones.get(&id) {
-                                drone.borrow_mut().update(update);
-                            }
-                            true
-                        },
-                        DownMessage::UpdateExperiment(update) => {
-                            ConsoleService::log("got update exp");
-                            match update {
-                                shared::experiment::Update::State(x) => {},
-                                shared::experiment::Update::DroneSoftware { checksums, status } => {
-                                    ConsoleService::log("got drone update soft");
-                                    if let Some(drone_config_comp) = &self.drone_config_comp {
-                                        let comp_msg = experiment::drone::Msg::UpdateSoftware(checksums, status);
-                                        drone_config_comp.send_message(comp_msg);
-                                    }
-                                },
-                                shared::experiment::Update::PiPuckSoftware { checksums, status } => {
-
+                        DownMessage::Request(uuid, request) => match request {
+                            shared::FrontEndRequest::AddDrone(desc) => {
+                                self.drones.entry(desc.id.clone())
+                                    .or_insert_with(|| Rc::new(RefCell::new(drone::Instance::new(desc))));
+                                true
+                            },
+                            shared::FrontEndRequest::UpdateDrone(id, update) => {
+                                if let Some(drone) = self.drones.get(&id) {
+                                    drone.borrow_mut().update(update);
                                 }
-                            }
-                            true
-                        }
-                        _ => {
-                            // TODO
-                            true
+                                true
+                            },
+                            shared::FrontEndRequest::AddPiPuck(_) => todo!(),
+                            shared::FrontEndRequest::UpdatePiPuck(_, _) => todo!(),
+                            shared::FrontEndRequest::UpdateExperiment(_) => todo!(),
                         },
+                        DownMessage::Response(uuid, result) => {
+                            if let Some(callback) = self.requests.remove(&uuid) {
+                                callback.emit(result);
+                            }
+                            false
+                        }
                     },
                     Err(error) => {
-                        ConsoleService::log(&format!("1. {:?}", error));
+                        ConsoleService::log("Could not deserialize backend message");
                         false
                     }
                 },
                 Err(err) => {
-                    ConsoleService::log(&format!("2. {:?}", err));
+                    ConsoleService::log("Could not recieve backend message");
                     false
                 },
             },
@@ -186,15 +199,7 @@ impl Component for UserInterface {
                                     html! {}
                                 },
                                 Tab::Experiment => html! {
-                                    <>
-                                    <div class="column is-full-mobile is-full-tablet is-full-desktop is-half-widescreen is-one-third-fullhd">
-                                            <experiment::drone::ConfigCard parent=self.link.clone() />
-                                        </div>
-
-                                        <div class="column is-full-mobile is-full-tablet is-half-desktop is-third-widescreen is-one-quarter-fullhd">
-                                            <experiment::control::ConfigCard parent=self.link.clone() />
-                                        </div>
-                                    </>
+                                    <experiment::Interface parent=self.link.clone() />
                                 }
                             }
                         } </div>

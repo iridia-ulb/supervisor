@@ -9,7 +9,6 @@ mod robot;
 mod network;
 mod webui;
 mod optitrack;
-mod software;
 mod journal;
 mod router;
 

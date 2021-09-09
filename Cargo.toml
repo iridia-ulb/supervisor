@@ -34,9 +34,8 @@ uuid = { version = "0.8", features = ["serde", "v3", "v4"] }
 ipnet = { version = "2.3" }
 macaddr = { version = "1.0", features = ["serde_std"] }
 regex = { version = "1.4" }
-lazy_static = { version = "1.4" }
+once_cell = { version = "1.8" }
 base64 = { version = "0.13" }
-md5 = { version = "0.7" }
 itertools = { version = "0.9" }
 bitvec = { version = "0.21" }
 rand = { version = "0.8" }

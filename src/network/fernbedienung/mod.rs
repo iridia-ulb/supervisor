@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use bytes::BytesMut;
 use macaddr::MacAddr6;
 use regex::Regex;
+use once_cell::sync::Lazy;
 
 use futures::{self, FutureExt, StreamExt, stream::FuturesUnordered};
 use tokio::{net::TcpStream, sync::{mpsc, oneshot}};
@@ -15,16 +16,15 @@ use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use uuid::Uuid;
 
 mod protocol;
-
 pub use protocol::{Upload, process::Process};
 
-lazy_static::lazy_static! {
-    static ref REGEX_LINK_STRENGTH: Regex = 
-        Regex::new(r"signal:\s+(-\d+)\s+dBm+").unwrap();
-    
-    static ref REGEX_MAC_ADDR: Regex = 
-        Regex::new(r"addr\s+([0-9a-fA-F:.-]+)").unwrap();
-}
+static REGEX_LINK_STRENGTH: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"signal:\s+(-\d+)\s+dBm+").unwrap()
+});
+
+static REGEX_MAC_ADDR: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"addr\s+([0-9a-fA-F:.-]+)").unwrap()
+});
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {

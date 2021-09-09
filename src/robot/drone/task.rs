@@ -1,6 +1,6 @@
 use std::{collections::HashMap, time::Duration};
 use anyhow::Context;
-use ansi_parser::{AnsiSequence, Output, AnsiParser};
+use ansi_parser::{Output, AnsiParser}; //AnsiSequence
 use bytes::BytesMut;
 use mavlink::{MavHeader, common::{self, MavMessage, SerialControlDev, SerialControlFlag}};
 use tokio::{net::TcpStream, sync::{broadcast, mpsc, oneshot}};
@@ -9,11 +9,14 @@ use tokio_stream::{self, wrappers::ReceiverStream};
 use tokio_util::codec::Framed;
 
 use crate::network::{fernbedienung, fernbedienung_ext::MjpegStreamerStream, xbee};
-use crate::journal;
-use crate::software;
 use super::codec;
 
-pub use shared::{FernbedienungAction, TerminalAction, drone::{Action, XbeeAction, Descriptor, Update}};
+pub use shared::{
+    FernbedienungAction,
+    TerminalAction,
+    drone::{Action, XbeeAction, Descriptor, Update},
+    experiment::software::Software
+};
 
 const DRONE_BATT_FULL_MV: f32 = 4050.0;
 const DRONE_BATT_EMPTY_MV: f32 = 3500.0;
@@ -49,14 +52,8 @@ const XBEE_DEFAULT_PIN_CONFIG: &[(xbee::Pin, xbee::PinMode)] = &[
 pub enum Request {
     AssociateFernbedienung(fernbedienung::Device),
     AssociateXbee(xbee::Device),
-    Execute(Action),
+    Execute(oneshot::Sender<anyhow::Result<()>>, Action),
     Subscribe(oneshot::Sender<broadcast::Receiver<Update>>),
-    StartExperiment {
-        software: software::Software,
-        journal: mpsc::Sender<journal::Request>,
-        callback: oneshot::Sender<anyhow::Result<()>>
-    },
-    StopExperiment,
 }
 
 pub type Sender = mpsc::Sender<Request>;
@@ -108,78 +105,9 @@ fn xbee_link_margin_stream<'dev>(
     }
 }
 
-// To be set before starting ARGoS, and cleared after ARGoS finishes
-/* configure mux (upcore controls pixhawk) */
-//device.write_outputs(vec![(xbee::Pin::DIO4, true)]).await?;
-
-// async fn mavlink2(
-//     device: &xbee::Device,
-//     mut rx: mpsc::Receiver<TerminalAction>,
-//     updates_tx: broadcast::Sender<Update>,
-// ) {   
-//     let process = futures::future::pending().left_future();
-//     let stdout = futures::stream::pending().left_stream();
-//     let stderr = futures::stream::pending().left_stream();
-//     let mut stdin = None;
-//     let mut terminate = None;
-//     tokio::pin!(process);
-//     tokio::pin!(stdout);
-//     tokio::pin!(stderr);
-//     loop {
-//         tokio::select! {
-//             Some(action) = rx.recv() => match action {
-//                 TerminalAction::Start => {
-//                     /* set up channels */
-//                     let (stdout_tx, stdout_rx) = mpsc::channel(8);
-//                     stdout.set(ReceiverStream::new(stdout_rx).right_stream());
-//                     let (stderr_tx, stderr_rx) = mpsc::channel(8);
-//                     stderr.set(ReceiverStream::new(stderr_rx).right_stream());
-//                     let (stdin_tx, stdin_rx) = mpsc::channel(8);
-//                     stdin = Some(stdin_tx);
-//                     let (terminate_tx, terminate_rx) = oneshot::channel();
-//                     terminate = Some(terminate_tx);
-//                     /* start process */
-//                     let bash = fernbedienung::Process {
-//                         target: "ssh".into(),
-//                         working_dir: None,
-//                         args: vec!["localhost".to_owned()],
-//                     };
-//                     process.set(device.run(bash, terminate_rx, stdin_rx, stdout_tx, stderr_tx).right_future());
-//                     log::info!("Remote Bash instance started");
-//                 },
-//                 TerminalAction::Run(mut command) => if let Some(tx) = stdin.as_ref() {
-//                     command.push_str("\r");
-//                     let _  = tx.send(BytesMut::from(command.as_bytes())).await;
-//                 },
-//                 TerminalAction::Stop => if let Some(tx) = terminate.take() {
-//                     let _ = tx.send(());
-//                 }
-//             },
-//             result = &mut process => {
-//                 process.set(futures::future::pending().left_future());
-//                 stdout.set(futures::stream::pending().left_stream());
-//                 stderr.set(futures::stream::pending().left_stream());
-//                 stdin = None;
-//                 terminate = None;
-//                 log::info!("Remote Bash instance terminated with {:?}", result);
-//             }
-//             Some(stdout) = stdout.next() => {
-//                 let update = Update::Bash(String::from_utf8_lossy(&stdout).into_owned());
-//                 log::info!("{:?}", update);
-//                 let _ = updates_tx.send(update);
-//             },
-//             Some(stderr) = stderr.next() => {
-//                 let update = Update::Bash(String::from_utf8_lossy(&stderr).into_owned());
-//                 log::info!("{:?}", update);
-//                 let _ = updates_tx.send(update);
-//             },
-//         }
-//     }
-// }
-
 async fn mavlink(
     device: &xbee::Device,
-    mut rx: mpsc::Receiver<TerminalAction>,
+    mut rx: mpsc::Receiver<(oneshot::Sender<anyhow::Result<()>>, TerminalAction)>,
     updates_tx: broadcast::Sender<Update>
 ) -> anyhow::Result<()> {
     let connection = TcpStream::connect((device.addr, 9750))
@@ -217,8 +145,8 @@ async fn mavlink(
             Some(heartbeat) = heartbeat_stream_throttled.next() => {
                 let _ = sink.send(heartbeat).await;
             }
-            Some(request) = rx.recv() => {
-                match request {
+            Some((callback, action)) = rx.recv() => {
+                match action {
                     // note that commands should not be run when mavlink is being used by ARGoS
                     TerminalAction::Run(command) => {
                         let command_padded = command.as_bytes()
@@ -293,7 +221,7 @@ async fn mavlink(
 
 async fn xbee(
     device: xbee::Device,
-    mut rx: mpsc::Receiver<XbeeAction>,
+    mut rx: mpsc::Receiver<(oneshot::Sender<anyhow::Result<()>>, XbeeAction)>,
     updates_tx: broadcast::Sender<Update>
 ) -> anyhow::Result<()> {
     device.set_pin_modes(XBEE_DEFAULT_PIN_CONFIG).await
@@ -337,7 +265,7 @@ async fn xbee(
                 }
             },
             recv = rx.recv() => match recv {
-                Some(request) => match request {
+                Some((callback, action)) => match action {
                     XbeeAction::SetUpCorePower(enable) => {
                         if let Err(error) = device.write_outputs(&[(xbee::Pin::DIO11, enable)]).await {
                             log::error!("Could not configure Up Core power: {}", error);
@@ -392,7 +320,7 @@ fn fernbedienung_link_strength_stream<'dev>(
 
 async fn bash(
     device: &fernbedienung::Device,
-    mut rx: mpsc::Receiver<TerminalAction>,
+    mut rx: mpsc::Receiver<(oneshot::Sender<anyhow::Result<()>>, TerminalAction)>,
     updates_tx: broadcast::Sender<Update>,
 ) {   
     let process = futures::future::pending().left_future();
@@ -405,7 +333,7 @@ async fn bash(
     tokio::pin!(stderr);
     loop {
         tokio::select! {
-            Some(action) = rx.recv() => match action {
+            Some((callback, action)) = rx.recv() => match action {
                 TerminalAction::Start => {
                     /* set up channels */
                     let (stdout_tx, stdout_rx) = mpsc::channel(8);
@@ -455,22 +383,59 @@ async fn bash(
     }
 }
 
+async fn experiment(device: &fernbedienung::Device,
+    mut rx: mpsc::Receiver<(oneshot::Sender<anyhow::Result<()>>, ExperimentAction)>,
+    updates_tx: broadcast::Sender<Update>) {
+
+
+    // upload software
+
+    // start argos
+
+    // forward stderr/stdout to journal
+
+    // terminate if either terminate_rx is sent or ARGoS quits
+
+    loop {
+        tokio::select! {
+            _ = terminate_rx => break,
+        }
+    }
+
+}
+
+// can start ARGoS be included as a fbaction?
+// the main issue is that I need to pass the journal to the action
+// what if updates_tx included ARGoSUpdate which journal just subscribed to?
+
+// terminate channel -> this is easy or even irrelevant now
+
+
+
+// update software
+
+
+
 async fn fernbedienung(
     device: fernbedienung::Device,
-    mut rx: mpsc::Receiver<FernbedienungAction>,
+    mut rx: mpsc::Receiver<(oneshot::Sender<anyhow::Result<()>>, FernbedienungAction)>,
     updates_tx: broadcast::Sender<Update>
 ) {
     /* bash task */
     let (mut bash_tx, bash_rx) = mpsc::channel(8);
     let bash_task = bash(&device, bash_rx, updates_tx.clone());
     tokio::pin!(bash_task);
-    /* link strength */
+    /* experiment task */
+    let (mut experiment_tx, experiment_rx) = mpsc::channel(8);
+    let experiment_task = bash(&device, experiment_rx, updates_tx.clone());
+    tokio::pin!(experiment_task);
+    /* link strength stream */
     let link_strength_stream = fernbedienung_link_strength_stream(&device)
         .map_ok(Update::FernbedienungSignal);
     let link_strength_stream_throttled =
         tokio_stream::StreamExt::throttle(link_strength_stream, Duration::from_millis(1000));
     tokio::pin!(link_strength_stream_throttled);
-    /* handle for the camera stream */
+    /* camera stream */
     let mut cameras_stream: tokio_stream::StreamMap<String, _> =
         tokio_stream::StreamMap::new();
     loop {
@@ -490,7 +455,7 @@ async fn fernbedienung(
                 },
             },
             recv = rx.recv() => match recv {
-                Some(request) => match request {
+                Some((callback, action)) => match action {
                     FernbedienungAction::SetCameraStream(enable) => {
                         cameras_stream.clear();
                         if enable {
@@ -500,15 +465,27 @@ async fn fernbedienung(
                                 cameras_stream.insert(camera.to_owned(), Box::pin(stream));
                             }
                         }
+                        let _ = callback.send(Ok(()));
                     },
-                    FernbedienungAction::Halt => if let Err(error) = device.halt().await {
-                        log::warn!("Could not halt Up Core: {}", error);
+                    FernbedienungAction::Halt => {
+                        let result = device.halt().await
+                            .context("Could not halt Up Core");
+                        let _ = callback.send(result);
                     },
-                    FernbedienungAction::Reboot => if let Err(error) = device.reboot().await {
-                        log::warn!("Could not reboot Up Core: {}", error);
+                    FernbedienungAction::Reboot => {
+                        let result = device.reboot().await
+                            .context("Could not reboot Up Core");
+                        let _ = callback.send(result);
                     },
                     FernbedienungAction::Bash(action) => {
-                        let _ = bash_tx.send(action).await;
+                        if let Err(mpsc::error::SendError((callback, _))) = bash_tx.send((callback, action)).await {
+                            let _ = callback.send(Err(anyhow::anyhow!("Could not communicate with Bash task")));
+                        }
+                    },
+                    FernbedienungAction::Experiment(action) => {
+                        if let Err(mpsc::error::SendError((callback, _))) = experiment_tx.send((callback, action)).await {
+                            let _ = callback.send(Err(anyhow::anyhow!("Could not communicate with experiment task")));
+                        }
                     },
                     FernbedienungAction::GetKernelMessages => {},
                     FernbedienungAction::Identify => {},
@@ -520,6 +497,12 @@ async fn fernbedienung(
                 let (tx, rx) = mpsc::channel(8);
                 bash_tx = tx;
                 bash_task.set(bash(&device, rx, updates_tx.clone()));
+            },
+            _ = &mut experiment_task => {
+                /* restart task */
+                let (tx, rx) = mpsc::channel(8);
+                experiment_tx = tx;
+                experiment_task.set(experiment(&device, rx, updates_tx.clone()));
             },
         }
     }
@@ -558,16 +541,20 @@ pub async fn new(mut request_rx: Receiver) {
                     let _ = updates_tx.send(Update::XbeeConnected(device.addr));
                     xbee_task.set(xbee(device, rx, updates_tx.clone()).right_future());
                 },
-                Request::Execute(action) => match action {
-                    Action::Fernbedienung(action) => match &fernbedienung_tx {
+                Request::Execute((callback, action)) => match action {
+                    Action::Fernbedienung(action) => match fernbedienung_tx.as_ref() {
                         Some(tx) => {
-                            let _ = tx.send(action).await;
+                            let _ = tx.send((callback, action)).await;
                         },
-                        None => log::error!("Could not execute {:?}: Fernbedienung is not connected.", action)
+                        None => {
+                            let _ = callback
+                                .send(Err(anyhow::anyhow!("Could not execute {:?}: Fernbedienung is not connected.", action)))
+                            //log::error!("Could not execute {:?}: Fernbedienung is not connected.", action)
+                        }
                     },
-                    Action::Xbee(action) => match &xbee_tx {
+                    Action::Xbee(action) => match xbee_tx.as_ref() {
                         Some(tx) => {
-                            let _ = tx.send(action).await;
+                            let _ = tx.send((callback, action)).await;
                         },
                         None => log::error!("Could not execute {:?}: Xbee is not connected.", action)
                     },
@@ -584,8 +571,6 @@ pub async fn new(mut request_rx: Receiver) {
                         }
                     }
                 },
-                Request::StartExperiment { software, journal, callback } => log::warn!("not implemented"),
-                Request::StopExperiment => log::warn!("not implemented"),
             },
             _ = &mut fernbedienung_task => {
                 fernbedienung_tx = None;

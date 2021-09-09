@@ -17,15 +17,6 @@ impl Display for Descriptor {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub enum Action {
-    RpiHalt,
-    RpiReboot,
-    StartCameraStream,
-    StopCameraStream,
-    GetKernelMessages,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum Update {
     // sends camera footage
     Camera {
@@ -40,5 +31,14 @@ pub enum Update {
     FernbedienungSignal(Result<i32, String>)
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum Request {
+    BashTerminalStart,
+    BashTerminalStop,
+    BashTerminalRun(String),
+    CameraStreamEnable(bool),
+    RaspberryPiHalt,
+    RaspberryPiReboot,
+}
 
 

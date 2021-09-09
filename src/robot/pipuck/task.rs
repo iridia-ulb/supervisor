@@ -33,7 +33,6 @@ pub enum Request {
     Subscribe(oneshot::Sender<broadcast::Receiver<Update>>),
 
     StartExperiment {
-        software: software::Software,
         journal: mpsc::Sender<journal::Request>,
         callback: oneshot::Sender<Result<(), Error>>
     },
@@ -161,7 +160,11 @@ pub async fn new(mut request_rx: Receiver) {
                         //
                     }
                 },
-                Request::StartExperiment { software, journal, callback } => log::warn!("not implemented"),
+                Request::StartExperiment { journal, callback } => {
+                    if let Some(tx) = &fernbedienung_tx {
+
+                    }
+                },
                 Request::StopExperiment => log::warn!("not implemented"),
                 
             },

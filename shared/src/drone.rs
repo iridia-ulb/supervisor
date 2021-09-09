@@ -1,7 +1,6 @@
 use std::{fmt::Display, net::Ipv4Addr};
 use bytes::Bytes;
 use serde::{Serialize, Deserialize};
-use crate::{TerminalAction, FernbedienungAction};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub struct Descriptor {
@@ -15,19 +14,6 @@ impl Display for Descriptor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.id)
     }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub enum Action {
-    Fernbedienung(FernbedienungAction),
-    Xbee(XbeeAction)
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub enum XbeeAction {
-    SetUpCorePower(bool),
-    SetPixhawkPower(bool),
-    Mavlink(TerminalAction),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -49,5 +35,20 @@ pub enum Update {
         pixhawk: bool,
         upcore: bool,
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum Request {
+    BashTerminalStart,
+    BashTerminalStop,
+    BashTerminalRun(String),
+    CameraStreamEnable(bool),
+    PixhawkPowerEnable(bool),
+    MavlinkTerminalStart,
+    MavlinkTerminalStop,
+    MavlinkTerminalRun(String),
+    UpCorePowerEnable(bool),
+    UpCoreHalt,
+    UpCoreReboot,   
 }
 

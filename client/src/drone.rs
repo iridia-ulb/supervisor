@@ -1,8 +1,7 @@
 use std::{cell::RefCell, collections::HashMap, net::Ipv4Addr, rc::Rc};
-use shared::{UpMessage, FernbedienungAction, TerminalAction, drone::{Action, XbeeAction, Descriptor, Update}};
-use web_sys::{Element, HtmlInputElement};
-use yew::{prelude::*, services::ConsoleService, web_sys::HtmlTextAreaElement};
-//use wasm_bindgen::prelude::*;
+use shared::{BackEndRequest, drone::{Descriptor, Request, Update}};
+use web_sys::HtmlInputElement;
+use yew::{prelude::*, web_sys::HtmlTextAreaElement};
 
 enum Pixhawk {
     Connected {
@@ -52,7 +51,7 @@ impl Instance {
         match update {
             Update::Battery(reading) => if let Pixhawk::Connected { battery, ..} = &mut self.pixhawk {
                 *battery = Ok(reading);
-        },
+            },
             Update::Camera { camera, result } => {
                 self.camera_stream
                     .insert(camera, result
@@ -91,7 +90,7 @@ impl Instance {
             Update::PowerState { upcore, pixhawk } => {
                 self.pixhawk_power = pixhawk;
                 self.upcore_power = upcore;
-            }
+            },
         }
     }
 }
@@ -123,7 +122,6 @@ pub enum Msg {
     ToggleBashTerminal,
     ToggleMavlinkTerminal,
     ToggleCameraStream,
-    SendAction(Action),
     SendBashCommand,
     SendMavlinkCommand,
 }
@@ -165,22 +163,20 @@ impl Component for Card {
         match msg {
             Msg::SendMavlinkCommand => match self.mavlink_input.cast::<HtmlInputElement>() {
                 Some(input) => {
-                    let term_action = TerminalAction::Run(input.value());
+                    let drone_request = Request::MavlinkTerminalRun(input.value());
                     input.set_value("");
-                    let action = Action::Xbee(XbeeAction::Mavlink(term_action));
-                    let message = UpMessage::DroneAction(drone.descriptor.id.clone(), action);
-                    self.props.parent.send_message(crate::Msg::SendUpMessage(message));
+                    let request = BackEndRequest::DroneRequest(drone.descriptor.id.clone(), drone_request);
+                    self.props.parent.send_message(crate::Msg::SendRequest(request, None));
                     true
                 },
                 _ => false
             },
             Msg::SendBashCommand => match self.bash_input.cast::<HtmlInputElement>() {
                 Some(input) => {
-                    let term_action = TerminalAction::Run(input.value());
+                    let drone_request = Request::BashTerminalRun(input.value());
                     input.set_value("");
-                    let action = Action::Fernbedienung(FernbedienungAction::Bash(term_action));
-                    let message = UpMessage::DroneAction(drone.descriptor.id.clone(), action);
-                    self.props.parent.send_message(crate::Msg::SendUpMessage(message));
+                    let request = BackEndRequest::DroneRequest(drone.descriptor.id.clone(), drone_request);
+                    self.props.parent.send_message(crate::Msg::SendRequest(request, None));
                     true
                 },
                 _ => false
@@ -191,47 +187,58 @@ impl Component for Card {
                         if let UpCore::Connected { terminal, .. } = &mut drone.upcore {
                             terminal.clear();
                         }
-                        let action = Action::Fernbedienung(FernbedienungAction::Bash(TerminalAction::Start));
-                        let message = UpMessage::DroneAction(drone.descriptor.id.clone(), action);
-                        self.props.parent.send_message(crate::Msg::SendUpMessage(message));
+                        let drone_request = Request::BashTerminalStart;
+                        let request = BackEndRequest::DroneRequest(drone.descriptor.id.clone(), drone_request);
+                        self.props.parent.send_message(crate::Msg::SendRequest(request, None));
                         self.bash_terminal_visible = true;
                     },
                     true => {
-                        let action = Action::Fernbedienung(FernbedienungAction::Bash(TerminalAction::Stop));
-                        let message = UpMessage::DroneAction(drone.descriptor.id.clone(), action);
-                        self.props.parent.send_message(crate::Msg::SendUpMessage(message));
+                        let drone_request = Request::BashTerminalStop;
+                        let request = BackEndRequest::DroneRequest(drone.descriptor.id.clone(), drone_request);
+                        self.props.parent.send_message(crate::Msg::SendRequest(request, None));
                         self.bash_terminal_visible = false;
                     }
                 }
                 true
             },
             Msg::ToggleMavlinkTerminal => {
-                self.mavlink_terminal_visible = !self.mavlink_terminal_visible;
+                match self.mavlink_terminal_visible {
+                    false => {
+                        if let Pixhawk::Connected { terminal, .. } = &mut drone.pixhawk {
+                            terminal.clear();
+                        }
+                        let drone_request = Request::MavlinkTerminalStart;
+                        let request = BackEndRequest::DroneRequest(drone.descriptor.id.clone(), drone_request);
+                        self.props.parent.send_message(crate::Msg::SendRequest(request, None));
+                        self.mavlink_terminal_visible = true;
+                    },
+                    true => {
+                        let drone_request = Request::MavlinkTerminalStop;
+                        let request = BackEndRequest::DroneRequest(drone.descriptor.id.clone(), drone_request);
+                        self.props.parent.send_message(crate::Msg::SendRequest(request, None));
+                        self.mavlink_terminal_visible = false;
+                    }
+                }
                 true
             },
             Msg::ToggleCameraStream => {
                 match self.camera_dialog_active {
                     false => {
-                        let action = Action::Fernbedienung(FernbedienungAction::SetCameraStream(true));
-                        let message = UpMessage::DroneAction(drone.descriptor.id.clone(), action);
-                        self.props.parent.send_message(crate::Msg::SendUpMessage(message));
+                        let drone_request = Request::CameraStreamEnable(true);
+                        let request = BackEndRequest::DroneRequest(drone.descriptor.id.clone(), drone_request);
+                        self.props.parent.send_message(crate::Msg::SendRequest(request, None));
                         drone.camera_stream.clear();
                         self.camera_dialog_active = true;
                     },
                     true => {
-                        let action = Action::Fernbedienung(FernbedienungAction::SetCameraStream(false));
-                        let message = UpMessage::DroneAction(drone.descriptor.id.clone(), action);
-                        self.props.parent.send_message(crate::Msg::SendUpMessage(message));
+                        let drone_request = Request::CameraStreamEnable(false);
+                        let request = BackEndRequest::DroneRequest(drone.descriptor.id.clone(), drone_request);
+                        self.props.parent.send_message(crate::Msg::SendRequest(request, None));
                         self.camera_dialog_active = false;
                     }
                 }
                 true
             },
-            Msg::SendAction(action) => {
-                let message = UpMessage::DroneAction(drone.descriptor.id.clone(), action);
-                self.props.parent.send_message(crate::Msg::SendUpMessage(message));
-                false
-            }
         }
     }
 
@@ -555,18 +562,27 @@ impl Card {
 
     fn render_menu(&self, drone: &Instance) -> Html {
         let toggle_onclick = self.link.callback(|_| Msg::ToggleCameraStream);
+
+        let drone_request = Request::UpCorePowerEnable(true);
+        let request = BackEndRequest::DroneRequest(drone.descriptor.id.clone(), drone_request);
         let power_on_upcore_onclick = 
-            self.link.callback(|_|
-                    Msg::SendAction(Action::Xbee(XbeeAction::SetUpCorePower(true))));
+            self.props.parent.callback(move |_| crate::Msg::SendRequest(request.clone(), None));
+        
+        let drone_request = Request::UpCorePowerEnable(false);
+        let request = BackEndRequest::DroneRequest(drone.descriptor.id.clone(), drone_request);
         let power_off_upcore_onclick =
-            self.link.callback(|_|
-                Msg::SendAction(Action::Xbee(XbeeAction::SetUpCorePower(false))));
-        let reboot_upcore_onclick = 
-            self.link.callback(|_|
-                Msg::SendAction(Action::Fernbedienung(FernbedienungAction::Reboot)));
-        let halt_upcore_onclick = 
-            self.link.callback(|_|
-                Msg::SendAction(Action::Fernbedienung(FernbedienungAction::Halt)));
+            self.props.parent.callback(move |_| crate::Msg::SendRequest(request.clone(), None));
+
+        let drone_request = Request::UpCoreReboot;
+        let request = BackEndRequest::DroneRequest(drone.descriptor.id.clone(), drone_request);
+        let reboot_upcore_onclick =
+            self.props.parent.callback(move |_| crate::Msg::SendRequest(request.clone(), None));
+
+        let drone_request = Request::UpCoreHalt;
+        let request = BackEndRequest::DroneRequest(drone.descriptor.id.clone(), drone_request);
+        let halt_upcore_onclick =
+            self.props.parent.callback(move |_| crate::Msg::SendRequest(request.clone(), None));
+
         html! {
             <footer class="card-footer">
                 <a class="card-footer-item" onclick=toggle_onclick>{ "Show cameras" }</a>

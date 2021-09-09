@@ -1,11 +1,4 @@
-
-use serde::{Deserialize, Serialize};
-
-#[derive(Serialize, Deserialize, Debug)]
-pub enum Action {
-    Upload,
-    Clear,
-}
+use serde::{Serialize, Deserialize};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -29,7 +22,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 pub type Checksums = Vec<(String, md5::Digest)>;
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Deserialize, Default, Debug, Serialize)]
 pub struct Software(pub Vec<(String, Vec<u8>)>);
 
 impl Software {
@@ -61,10 +54,10 @@ impl Software {
                 entry.0.ends_with(".argos")
             })
             .collect::<Vec<_>>();
-        match config.len() {
-            0 => Err(Error::MissingConfigurationFile),
-            1 => Ok(config[0]),
-            _ => Err(Error::MultipleConfigurationFiles)
+        match &config[..] {
+            [] => Err(Error::MissingConfigurationFile),
+            [config] => Ok(config),
+            [_, _, ..] => Err(Error::MultipleConfigurationFiles),
         }
     }
    
