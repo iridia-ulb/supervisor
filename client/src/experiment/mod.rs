@@ -1,10 +1,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
-use uuid::Uuid;
-
-use shared::UpMessage;
 use yew::prelude::*;
 
+use yew::services::ConsoleService;
 use yew::{html, Component, ComponentLink, Html, ShouldRender};
 
 use shared::experiment::{software::Software, Request};
@@ -31,9 +29,6 @@ pub struct Props {
 }
 
 pub enum Msg {
-    UploadExperiment {
-        start: bool,
-    },
     StartExperiment,
     StopExperiment,
 }
@@ -57,24 +52,11 @@ impl Component for Interface {
 
     fn update(&mut self, message: Self::Message) -> ShouldRender {
         match message {
-            Msg::UploadExperiment { start } => {
-                let request = BackEndRequest::ExperimentRequest(Request::Configure {
+            Msg::StartExperiment => {
+                let request = BackEndRequest::ExperimentRequest(Request::Start {
                     pipuck_software: self.pipuck_software.borrow().clone(),
                     drone_software: self.drone_software.borrow().clone(),
                 });
-                let callback = if start {
-                    Some(self.link.batch_callback(|result| match result {
-                        Ok(_) => Some(Msg::StartExperiment),
-                        Err(_) => None,
-                    }))
-                }
-                else {
-                    None
-                };
-                self.props.parent.send_message(crate::Msg::SendRequest(request, callback));
-            },
-            Msg::StartExperiment => {
-                let request = BackEndRequest::ExperimentRequest(Request::Start);
                 self.props.parent.send_message(crate::Msg::SendRequest(request, None));
             },
             Msg::StopExperiment => {

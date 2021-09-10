@@ -3,11 +3,10 @@ pub mod software;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum Request {
-    Configure {
+    Start {
         drone_software: software::Software,
         pipuck_software: software::Software,
     },
-    Start,
     Stop,
 }
 

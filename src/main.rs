@@ -12,14 +12,6 @@ mod optitrack;
 mod journal;
 mod router;
 
-// supervisor changes
-// - configuration comes from XML (done)
-// - network module just searches for fernbedienung/xbee instances and sends them to the arena (with the mac address?).
-// - network module sends Ferbedienung(Macaddr6, Ipv4Addr) or Xbee(Macaddr6, Ipv4Addr) to the arena
-// - if the arena does not have a robot associated with that Mac, a warning is printed and the address is no longer probed.
-// - how do addresses get back to the network module? oneshot channel?
-// - arena creates drones and pipucks as specified in the XML. These actor are initialised without connections. Requests are made over bounded channels to associate a fernbedienung or xbee device.
-
 #[derive(Debug, StructOpt)]
 #[structopt(name = "supervisor", about = "A supervisor for experiments with swarms of robots")]
 struct Options {
@@ -45,7 +37,6 @@ async fn main() -> anyhow::Result<()> {
     /* create a task for tracking the robots and state of the experiment */
     let (arena_requests_tx, arena_requests_rx) = mpsc::channel(8);
     let (journal_requests_tx, journal_requests_rx) = mpsc::channel(8);
-    let (webui_requests_tx, _) = broadcast::channel(8);
     /* listen for the ctrl-c shutdown signal */
     let sigint_task = tokio::signal::ctrl_c();
     /* create journal task */
@@ -54,7 +45,6 @@ async fn main() -> anyhow::Result<()> {
     let arena_task =
         arena::new(arena_requests_rx,
                    &journal_requests_tx,
-                   webui_requests_tx.clone(),
                    pipucks,
                    drones);
     /* create network task */
@@ -66,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
     /* create the backend task */
     let webui_socket = webui_socket
         .ok_or(anyhow::anyhow!("A socket for the web interface must be provided"))?;
-    let webui_task = webui::run(webui_socket, webui_requests_tx, arena_requests_tx.clone());
+    let webui_task = webui::run(webui_socket, arena_requests_tx.clone());
     /* pin the futures so that they can be polled via &mut */
     tokio::pin!(arena_task);
     tokio::pin!(journal_task);
@@ -98,27 +88,6 @@ async fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
-
-/*
-<?xml version="1.0" ?>
-<configuration>
-    <supervisor>
-        <router socket="localhost:1234" />
-        <webui socket="localhost:8000" />
-    </supervisor>
-    <robots network="192.168.1.0/24">
-        <drone  id="drone1" 
-                xbee_addr="FFFFFFFFFFFF"
-                upcore_addr="FFFFFFFFFFFF"
-                optitrack_id="1" />
-        <pipuck id="pipuck1" 
-                rpi_addr="FFFFFFFFFFFF"
-                optitrack_id="2"
-                apriltag_id="20" />
-    </robots>
-</configuration>
-
- */
 
 #[derive(Debug)]
 struct Configuration {

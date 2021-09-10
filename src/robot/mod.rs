@@ -1,11 +1,27 @@
 pub mod drone;
 pub mod pipuck;
 
-#[derive(thiserror::Error, Debug)]
-pub enum Error {
-    #[error(transparent)]
-    NetworkError(#[from] crate::network::fernbedienung::Error),
+#[derive(Debug)]
+pub enum FernbedienungAction {
+    Halt,
+    Reboot,
+    Bash(TerminalAction),
+    SetCameraStream(bool),
+    UploadToTemporaryPath(Vec<(String, Vec<u8>)>),
+    GetKernelMessages,
+    Identify,
+}
 
-    #[error(transparent)]
-    PiPuckError(#[from] pipuck::Error),
+#[derive(Debug)]
+pub enum XbeeAction {
+    SetUpCorePower(bool),
+    SetPixhawkPower(bool),
+    Mavlink(TerminalAction),
+}
+
+#[derive(Debug)]
+pub enum TerminalAction {
+    Start,
+    Run(String),
+    Stop,
 }

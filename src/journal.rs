@@ -4,9 +4,7 @@ use std::io::BufWriter;
 use bytes::BytesMut;
 use serde::Serialize;
 use std::time::{SystemTime, SystemTimeError};
-
 use tokio::sync::{mpsc, oneshot};
-use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -22,7 +20,7 @@ pub enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-pub enum Request {
+pub enum Action {
     Start(oneshot::Sender<Result<()>>),
     Stop,
     Record(Event),
@@ -48,14 +46,13 @@ struct Entry {
 }
 
 // todo spawn a logging task here and return a channel for logging messages
-pub async fn new(rx: mpsc::Receiver<Request>) -> Result<()> {
-    let mut requests = ReceiverStream::new(rx);
+pub async fn new(mut rx: mpsc::Receiver<Action>) -> Result<()> {
     let mut start: Option<Instant> = None;
     let mut writer: Option<BufWriter<_>> = None;
-    while let Some(request) = requests.next().await {
-        match request {
+    while let Some(action) = rx.recv().await {
+        match action {
             // TODO add a callback from here to abort starting the experiment if the log file isn't good
-            Request::Start(callback) => {
+            Action::Start(callback) => {
                 let response = match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
                     Err(error) => Err(Error::SystemTimeError(error)),
                     Ok(since_unix_epoch) => {
@@ -74,12 +71,12 @@ pub async fn new(rx: mpsc::Receiver<Request>) -> Result<()> {
                     log::error!("Could not respond to start experiment request");
                 }
             },
-            Request::Stop => {
+            Action::Stop => {
                 /* clear the start time and close the file */
                 start = None;
                 writer = None;
             },
-            Request::Record(event) => if let Some(start) = start.as_ref() {
+            Action::Record(event) => if let Some(start) = start.as_ref() {
                 if let Some(writer) = writer.as_mut() {
                     let entry = Entry { timestamp: start.elapsed(), event };
                     if let Err(error) = serde_pickle::ser::to_writer(writer, &entry, true) {

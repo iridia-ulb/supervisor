@@ -68,3 +68,4 @@ impl<S: futures::Stream> Stream for MjpegStreamerStream<'_, S>  {
         self.project().stream.poll_next(cx)
     }
 }
+

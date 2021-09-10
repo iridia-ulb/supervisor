@@ -233,7 +233,7 @@ type Peers = Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<Bytes>>>>;
 async fn client_handler(stream: TcpStream,
                         addr: SocketAddr,
                         peers: Peers,
-                        journal: mpsc::Sender<journal::Request>) {
+                        journal: mpsc::Sender<journal::Action>) {
     log::info!("Robot {} connected to message router", addr);
     /* set up a channel for communicating with other robot sockets */
     let (tx, rx) = mpsc::channel::<Bytes>(32);
@@ -261,7 +261,7 @@ async fn client_handler(stream: TcpStream,
                     }
                     if let Ok(decoded) = decode_lua_table(&mut message) {
                         let event = journal::Event::Broadcast(addr, decoded);
-                        if let Err(error) = journal.send(journal::Request::Record(event)).await {
+                        if let Err(error) = journal.send(journal::Action::Record(event)).await {
                             log::error!("Could not record event in journal: {}", error);
                         }
                     }
@@ -277,7 +277,7 @@ async fn client_handler(stream: TcpStream,
     log::info!("Robot {} disconnected from message router", addr);
 }
 
-pub async fn new(addr: SocketAddr, journal: mpsc::Sender<journal::Request>) -> io::Result<()> {
+pub async fn new(addr: SocketAddr, journal: mpsc::Sender<journal::Action>) -> io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     log::info!("Message router running on: {:?}", listener.local_addr());
     /* create an atomic map of all peers */

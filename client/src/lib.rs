@@ -1,6 +1,5 @@
 use std::{cell::RefCell, collections::HashMap, convert::AsRef, rc::Rc};
-use anyhow::Context;
-use shared::{DownMessage, FrontEndRequest, UpMessage};
+use shared::{DownMessage, UpMessage};
 use strum::{EnumProperty, IntoEnumIterator};
 use strum_macros::{AsRefStr, EnumIter, EnumProperty};
 use uuid::Uuid;
@@ -112,8 +111,8 @@ impl Component for UserInterface {
                                     self.requests.insert(id, callback);
                                 }
                             },
-                            Err(err) => if let Some(callback) = callback {
-                                callback.emit(Err(String::from("Could not serialize request")));
+                            Err(error) => if let Some(callback) = callback {
+                                callback.emit(Err(format!("Could not serialize request: {}", error)));
                             }
                         }
                     }
@@ -126,7 +125,7 @@ impl Component for UserInterface {
             Msg::WebSocketRxData(data) => match data {
                 Ok(data) => match bincode::deserialize::<DownMessage>(&data) {
                     Ok(decoded) => match decoded {
-                        DownMessage::Request(uuid, request) => match request {
+                        DownMessage::Request(_uuid, request) => match request {
                             shared::FrontEndRequest::AddDrone(desc) => {
                                 self.drones.entry(desc.id.clone())
                                     .or_insert_with(|| Rc::new(RefCell::new(drone::Instance::new(desc))));
@@ -150,18 +149,18 @@ impl Component for UserInterface {
                         }
                     },
                     Err(error) => {
-                        ConsoleService::log("Could not deserialize backend message");
+                        ConsoleService::log(&format!("Could not deserialize backend message: {}", error));
                         false
                     }
                 },
-                Err(err) => {
-                    ConsoleService::log("Could not recieve backend message");
+                Err(error) => {
+                    ConsoleService::log(&format!("Could not recieve backend message: {}", error));
                     false
                 },
             },
             Msg::WebSocketNotifcation(notification) => {
                 ConsoleService::log(&format!("{:?}", notification));
-                true
+                false
             }
             Msg::SetDroneConfigComp(link) => {
                 self.drone_config_comp = Some(link);

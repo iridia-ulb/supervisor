@@ -16,7 +16,7 @@ use crate::arena;
 /// This function represents the main task of the network module. It takes a network and a channel for
 /// making requests to the arena. IP addresses belonging to this network are repeated probed for an
 /// xbee or for the fernbedienung service until they are associated
-pub async fn new(network: Ipv4Net, arena_request_tx: &mpsc::Sender<arena::Request>) {
+pub async fn new(network: Ipv4Net, arena_request_tx: &mpsc::Sender<arena::Action>) {
     /* probe for xbees on all addresses */
     let (mut xbee_returned_addrs, mut probe_xbee_queue) : (FuturesUnordered<_>, FuturesUnordered<_>) = network
         .hosts()
@@ -32,7 +32,7 @@ pub async fn new(network: Ipv4Net, arena_request_tx: &mpsc::Sender<arena::Reques
         tokio::select!{
             Some(result) = probe_xbee_queue.next() => {
                 if let Ok((mac_addr, device)) = result {
-                    let _ = arena_request_tx.send(arena::Request::AddXbee(device, mac_addr)).await;
+                    let _ = arena_request_tx.send(arena::Action::AddXbee(device, mac_addr)).await;
                 }
             },
             Some(result) = xbee_returned_addrs.next() => match result {
@@ -47,7 +47,7 @@ pub async fn new(network: Ipv4Net, arena_request_tx: &mpsc::Sender<arena::Reques
             },
             Some(result) = probe_fernbedienung_queue.next() => {
                 if let Ok((mac_addr, device)) = result {
-                    let _ = arena_request_tx.send(arena::Request::AddFernbedienung(device, mac_addr)).await;
+                    let _ = arena_request_tx.send(arena::Action::AddFernbedienung(device, mac_addr)).await;
                 }
             },
             Some(result) = fernbedienung_returned_addrs.next() => match result {
