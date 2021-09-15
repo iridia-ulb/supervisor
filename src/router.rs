@@ -234,7 +234,7 @@ async fn client_handler(stream: TcpStream,
                         addr: SocketAddr,
                         peers: Peers,
                         journal: mpsc::Sender<journal::Action>) {
-    log::info!("Robot {} connected to message router", addr);
+    log::info!("connected to from {}", addr);
     /* set up a channel for communicating with other robot sockets */
     let (tx, rx) = mpsc::channel::<Bytes>(32);
     let rx_stream = ReceiverStream::new(rx);

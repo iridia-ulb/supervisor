@@ -303,9 +303,14 @@ impl Device {
         uuid
     }
 
-    pub async fn upload(&self, path: PathBuf, filename: PathBuf, contents: Vec<u8>) -> Result<()> {
+    pub async fn upload<P, F, C>(
+        &self,
+        path: P,
+        filename: F,
+        contents: C
+    ) -> Result<()> where P: Into<PathBuf>, F: Into<PathBuf>, C: Into<Vec<u8>> {
         let upload = protocol::Upload {
-            path, filename, contents,
+            path: path.into(), filename: filename.into(), contents: contents.into(),
         };
         let (result_tx, result_rx) = oneshot::channel();
         self.request_tx

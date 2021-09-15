@@ -1,19 +1,26 @@
 pub mod drone;
 pub mod pipuck;
 
+use shared::experiment::software::Software;
+use tokio::sync::mpsc;
+use crate::journal;
+
 #[derive(Debug)]
 pub enum FernbedienungAction {
     Halt,
     Reboot,
     Bash(TerminalAction),
     SetCameraStream(bool),
-    UploadToTemporaryPath(Vec<(String, Vec<u8>)>),
+    SetupExperiment(String, Software, mpsc::Sender<journal::Action>),
+    StartExperiment,
+    StopExperiment,
     GetKernelMessages,
     Identify,
 }
 
 #[derive(Debug)]
 pub enum XbeeAction {
+    SetAutonomousMode(bool),
     SetUpCorePower(bool),
     SetPixhawkPower(bool),
     Mavlink(TerminalAction),

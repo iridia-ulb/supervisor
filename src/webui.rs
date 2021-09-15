@@ -249,6 +249,8 @@ async fn handle_drone_request(
             Action::ExecuteFernbedienungAction(callback_tx, FernbedienungAction::Bash(TerminalAction::Run(command))),
         Request::CameraStreamEnable(on) => 
             Action::ExecuteFernbedienungAction(callback_tx, FernbedienungAction::SetCameraStream(on)),
+        Request::Identify => 
+            Action::ExecuteFernbedienungAction(callback_tx, FernbedienungAction::Identify),
         Request::PixhawkPowerEnable(on) => 
             Action::ExecuteXbeeAction(callback_tx, XbeeAction::SetPixhawkPower(on)),
         Request::MavlinkTerminalStart => 

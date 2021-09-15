@@ -235,11 +235,16 @@ async fn start_experiment(
     /* start the experiment */
     /* start pi-pucks first since they are less dangerous */
     
-    /* upload the drone software */
+    /* set up the experiment on the drones */
     drones.iter()
-        .map(|(_, instance)| {
+        .map(|(desc, instance)| {
             let (callback_tx, callback_rx) = oneshot::channel();
-            let action = drone::Action::UploadExperiment(callback_tx, drone_software.clone());
+            let action = drone::Action::SetupExperiment(
+                callback_tx, 
+                desc.id.clone(),
+                drone_software.clone(),
+                journal_requests_tx.clone()
+            );
             async move {
                 instance.action_tx.send(action).await
                     .map_err(|_| anyhow::anyhow!("Could not send action to drone"))?;

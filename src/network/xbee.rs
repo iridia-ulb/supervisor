@@ -1,5 +1,6 @@
 use bytes::{BytesMut, Buf, BufMut};
 use bitvec::view::BitView;
+use futures::FutureExt;
 use futures::{StreamExt, TryStreamExt, SinkExt, stream::FuturesUnordered};
 use macaddr::MacAddr6;
 use std::fmt::Debug;
@@ -426,27 +427,38 @@ impl Device {
         Ok(())
     }
 
-    pub async fn set_pin_modes(&self, modes: &[(Pin, PinMode)]) -> Result<()> {
-        for (pin, mode) in modes.iter() {
-            let request = 
-                Request::SetParameter(<[u8; 2]>::from(*pin),
-                                      BytesMut::from(&[*mode as u8][..]),
-                                      true);
-            self.request_tx.send(request).await.map_err(|_| Error::RequestFailed)?
-        }
-        self.request_tx.send(Request::ApplyChanges).await.map_err(|_| Error::RequestFailed)?;
+    pub async fn set_pin_modes<'m, M>(&self, modes: M) -> Result<()>
+        where M: Iterator<Item = &'m (Pin, PinMode)> {
+        /* send pin configurations */
+        let configuration = modes
+            .map(|&(pin, mode)| {
+                let request = Request::SetParameter(
+                    <[u8; 2]>::from(pin),
+                    BytesMut::from(&[mode as u8][..]),
+                    true
+                );
+                self.request_tx.send(request).map(move |result| match result {
+                    Ok(_) => Ok((pin, mode)),
+                    Err(_) => Err(Error::RequestFailed)
+                })
+            })
+            .collect::<FuturesUnordered<_>>()
+            .try_collect::<Vec<_>>().await?;
+        /* apply changes */
+        self.request_tx.send(Request::ApplyChanges).await
+            .map_err(|_| Error::RequestFailed)?;
         /* check if the modes were actually applied */
-        modes.into_iter()
+        configuration.into_iter()
             .map(|(pin, mode)| {
                 let (response_tx, response_rx) = oneshot::channel();
-                let request = Request::GetParameter(<[u8; 2]>::from(*pin), response_tx);
+                let request = Request::GetParameter(<[u8; 2]>::from(pin), response_tx);
                 let result = self.request_tx.send(request);
                 async move {
                     match result.await {
                         Ok(_) => match response_rx.await {
                             Ok(response) => match response {
                                 Ok(mut response) => match response.has_remaining() {
-                                    true => match response.get_u8() == *mode as u8 {
+                                    true => match response.get_u8() == mode as u8 {
                                         true => Ok(()),
                                         _ => Err(Error::RequestFailed) 
                                     },

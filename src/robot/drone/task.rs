@@ -1,15 +1,16 @@
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, path::Path, time::Duration};
 use anyhow::Context;
 use ansi_parser::{Output, AnsiParser}; //AnsiSequence
 use bytes::BytesMut;
 use mavlink::{MavHeader, common::{self, MavMessage, SerialControlDev, SerialControlFlag}};
-use tokio::{net::TcpStream, sync::{broadcast, mpsc, oneshot}};
+use tokio::{net::{TcpStream, UdpSocket}, sync::{broadcast, mpsc, oneshot}};
 use futures::{FutureExt, SinkExt, Stream, StreamExt, TryStreamExt};
 use tokio_stream::{self, wrappers::ReceiverStream};
 use tokio_util::codec::Framed;
 
 use crate::network::{fernbedienung, fernbedienung_ext::MjpegStreamerStream, xbee};
 use crate::robot::{FernbedienungAction, XbeeAction, TerminalAction};
+use crate::journal;
 use super::codec;
 
 pub use shared::{
@@ -55,7 +56,7 @@ pub enum Action {
     ExecuteFernbedienungAction(oneshot::Sender<anyhow::Result<()>>, FernbedienungAction),
     Subscribe(oneshot::Sender<broadcast::Receiver<Update>>),
     // its good to keep this one seperate since start exp need to interact with xbee and fernbedienung
-    UploadExperiment(oneshot::Sender<anyhow::Result<()>>, Software),
+    SetupExperiment(oneshot::Sender<anyhow::Result<()>>, String, Software, mpsc::Sender<journal::Action>),
     StartExperiment(oneshot::Sender<anyhow::Result<()>>),
     StopExperiment,
 }
@@ -109,6 +110,8 @@ fn xbee_link_margin_stream<'dev>(
     }
 }
 
+// this function needs to be revisited to get the Mavlink console working and
+// also to not send commands while autonomous mode is enabled
 async fn mavlink(
     device: &xbee::Device,
     mut rx: mpsc::Receiver<(oneshot::Sender<anyhow::Result<()>>, TerminalAction)>,
@@ -186,7 +189,7 @@ async fn mavlink(
             Some(Ok((header, body))) = stream.next() => {
                 match body {
                     MavMessage::HEARTBEAT(_) => {
-                        log::info!("heartbeat from {}:{}", header.system_id, header.component_id);
+                        //log::info!("heartbeat from {}:{}", header.system_id, header.component_id);
                     },
                     MavMessage::BATTERY_STATUS(data) => {
                         let mut battery_reading = data.voltages[0] as f32;
@@ -228,24 +231,42 @@ async fn xbee(
     mut rx: mpsc::Receiver<(oneshot::Sender<anyhow::Result<()>>, XbeeAction)>,
     updates_tx: broadcast::Sender<Update>
 ) -> anyhow::Result<()> {
-    device.set_pin_modes(XBEE_DEFAULT_PIN_CONFIG).await
-        .context("Could not set Xbee pin modes")?;
     /* set the serial communication service to TCP mode */
     device.set_scs_mode(true).await
         .context("Could not enable serial communication service")?;
     /* set the baud rate to match the baud rate of the Pixhawk */
     device.set_baud_rate(115200).await
         .context("Could not set serial baud rate")?;
-    /* link margin stream */
-    let link_margin_stream = xbee_link_margin_stream(&device);
-    let link_margin_stream_throttled =
-        tokio_stream::StreamExt::throttle(link_margin_stream, Duration::from_millis(1000));       
-    tokio::pin!(link_margin_stream_throttled);
     /* pin states stream */
     let pin_states_stream = xbee_pin_states_stream(&device);
     let pin_states_stream_throttled =
         tokio_stream::StreamExt::throttle(pin_states_stream, Duration::from_millis(1000));       
     tokio::pin!(pin_states_stream_throttled);
+    /* since we may be just reconnecting to the xbee, do not turn off the upcore and
+       pixhawk power if they are currently switched on */
+    if let Some(Ok(pin_states)) = pin_states_stream_throttled.next().await {
+        let remove_upcore =
+            pin_states.get(&xbee::Pin::DIO11).cloned().unwrap_or_default();
+        let remove_pixhawk =
+            pin_states.get(&xbee::Pin::DIO12).cloned().unwrap_or_default();
+        let pin_modes = XBEE_DEFAULT_PIN_CONFIG.iter()
+            .filter(|&(pin, _)| match pin {
+                xbee::Pin::DIO11 => !remove_upcore,
+                xbee::Pin::DIO12 => !remove_pixhawk,
+                _ => true,
+            });
+        device.set_pin_modes(pin_modes).await
+            .context("Could not set Xbee pin modes")?;
+    }
+    else {
+        device.set_pin_modes(XBEE_DEFAULT_PIN_CONFIG.into_iter()).await
+            .context("Could not set Xbee pin modes")?;
+    }
+    /* link margin stream */
+    let link_margin_stream = xbee_link_margin_stream(&device);
+    let link_margin_stream_throttled =
+        tokio_stream::StreamExt::throttle(link_margin_stream, Duration::from_millis(1000));       
+    tokio::pin!(link_margin_stream_throttled);
     /* mavlink task */
     let (mut mavlink_tx, mavlink_rx) = mpsc::channel(8);
     let mavlink_task = mavlink(&device, mavlink_rx, updates_tx.clone());
@@ -270,6 +291,11 @@ async fn xbee(
             },
             recv = rx.recv() => match recv {
                 Some((callback, action)) => match action {
+                    XbeeAction::SetAutonomousMode(enable) => {
+                        let result = device.write_outputs(&[(xbee::Pin::DIO4, enable)]).await
+                            .context("Could not set autonomous mode");
+                        let _ = callback.send(result);
+                    }
                     XbeeAction::SetUpCorePower(enable) => {
                         let result = device.write_outputs(&[(xbee::Pin::DIO11, enable)]).await
                             .context("Could not configure Up Core power");
@@ -389,52 +415,135 @@ async fn bash(
     }
 }
 
-// async fn experiment(device: &fernbedienung::Device,
-//     mut rx: mpsc::Receiver<(oneshot::Sender<anyhow::Result<()>>, ExperimentAction)>,
-//     updates_tx: broadcast::Sender<Update>) {
 
+// I want to know if something has failed before calling start experiment
+// If `experiment` does not return, then we need to use channels
+// since we are just coordinating 
+// oneshot signals to start/stop?
+async fn argos(device: &fernbedienung::Device,
+    id: String,
+    software: Software,
+    journal: mpsc::Sender<journal::Action>,
+    callback: oneshot::Sender<anyhow::Result<()>>,
+    start_rx: oneshot::Receiver<()>,
+    stop_rx: oneshot::Receiver<()>,
+) {
+    /* create temp directory */
+    let path = match device.create_temp_dir().await {
+        Ok(path) => path,
+        Err(error) => {
+            let result = Err(error).context("Could not create temporary directory");
+            let _ = callback.send(result);
+            return;
+        }
+    };
+    /* get the name of the configuration file */
+    let (config, _) = match software.argos_config() {
+        Ok(config) => config,
+        Err(error) => {
+            let result = Err(error).context("Could not get ARGoS configuration file");
+            let _ = callback.send(result);
+            return;
+        }
+    };
+    /* upload the control software */
+    for (filename, contents) in software.0.iter() {
+        match device.upload(&path, filename, contents.clone()).await {
+            Ok(_) => continue,
+            Err(error) => {
+                let result = Err(error).context("Could not upload software");
+                let _ = callback.send(result);
+                return;
+            }
+        }
+    }
+    /* get the correct local address of the supervisor */
+    let get_local_addr = async {
+        let socket = UdpSocket::bind("0.0.0.0:0").await?;
+        socket.connect((device.addr, 80)).await?;
+        let mut local_addr = socket.local_addr()?;
+        local_addr.set_port(4950);
+        std::io::Result::<SocketAddr>::Ok(local_addr)
+    };
+    let local_addr = match get_local_addr.await {
+        Ok(local_addr) => local_addr,
+        Err(error) => {
+            let result = Err(error).context("Could not get local address");
+            let _ = callback.send(result);
+            return;
+        }
+    };
+    if let Err(_) = callback.send(Ok(())) {
+        /* abort if the callback was dropped before we
+           could signal that we are ready */
+        return;
+    }
+    /* wait until start_tx before starting ARGoS */
+    tokio::pin!(start_rx);
+    tokio::pin!(stop_rx);
+    tokio::select! {
+        result = &mut start_rx => match result {
+            Ok(_) => {} /* proceed with running ARGoS */
+            Err(_) => return, /* abort */
+        },
+        _ = &mut stop_rx => {
+            return; /* abort */
+        },
+    }
 
-//     // upload software
-
-//     // start argos
-
-//     // forward stderr/stdout to journal
-
-//     // terminate if either terminate_rx is sent or ARGoS quits
-
-//     loop {
-//         tokio::select! {
-//             _ = terminate_rx => break,
-//         }
-//     }
-
-// }
-
-// can start ARGoS be included as a fbaction?
-// the main issue is that I need to pass the journal to the action
-// what if updates_tx included ARGoSUpdate which journal just subscribed to?
-
-// terminate channel -> this is easy or even irrelevant now
-
-
-
-// update software
-
-
+    log::info!("starting argos");
+    /* start ARGoS */
+    let process = fernbedienung::Process {
+        target: "argos3".into(),
+        working_dir: Some(path.into()),
+        args: vec![
+            "--config".to_owned(), config.to_owned(),
+            "--pixhawk".to_owned(), "/dev/ttyS1:921600".to_owned(),
+            "--router".to_owned(), local_addr.to_string(),
+            "--id".to_owned(), id.clone(),
+        ],
+    };
+    let (stdout_tx, mut stdout_rx) = mpsc::channel(8);
+    let (stderr_tx, mut stderr_rx) = mpsc::channel(8);
+    let (terminate_tx, terminate_rx) = oneshot::channel();  
+    let argos = device.run(process, terminate_rx, None, stdout_tx, stderr_tx);
+    tokio::pin!(argos);
+    use journal::{Robot, Event, Action};
+    loop {
+        tokio::select! {
+            Some(data) = stdout_rx.recv() => {
+                let event = Event::Robot(id.clone(), Robot::StandardOutput(data));
+                let _ = journal.send(Action::Record(event));
+            },
+            Some(data) = stderr_rx.recv() => {
+                let event = Event::Robot(id.clone(), Robot::StandardError(data));
+                let _ = journal.send(Action::Record(event));
+            },
+            /* local shutdown */
+            _ = &mut stop_rx => {
+                let _ = terminate_tx.send(());
+                break;
+            }
+            /* remote shutdown (argos finished) */
+            _ = &mut argos => break,
+        }
+    }
+}
 
 async fn fernbedienung(
     device: fernbedienung::Device,
     mut rx: mpsc::Receiver<(oneshot::Sender<anyhow::Result<()>>, FernbedienungAction)>,
     updates_tx: broadcast::Sender<Update>
 ) {
+    /* ARGos task */
+    let argos_task = futures::future::pending().left_future();
+    let mut argos_start_tx = Option::default();
+    let mut argos_stop_tx = Option::default();
+    tokio::pin!(argos_task);
     /* bash task */
     let (mut bash_tx, bash_rx) = mpsc::channel(8);
     let bash_task = bash(&device, bash_rx, updates_tx.clone());
     tokio::pin!(bash_task);
-    /* experiment task */
-    // let (mut experiment_tx, experiment_rx) = mpsc::channel(8);
-    // let experiment_task = bash(&device, experiment_rx, updates_tx.clone());
-    // tokio::pin!(experiment_task);
     /* link strength stream */
     let link_strength_stream = fernbedienung_link_strength_stream(&device)
         .map_ok(Update::FernbedienungSignal);
@@ -444,6 +553,7 @@ async fn fernbedienung(
     /* camera stream */
     let mut cameras_stream: tokio_stream::StreamMap<String, _> =
         tokio_stream::StreamMap::new();
+    
     loop {
         tokio::select! {
             Some((camera, result)) = cameras_stream.next() => {
@@ -488,11 +598,42 @@ async fn fernbedienung(
                             let _ = callback.send(Err(anyhow::anyhow!("Could not send {:?} to Bash terminal", action)));
                         }
                     },
-                    FernbedienungAction::UploadToTemporaryPath(files) => {
-                        todo!()
-                    }
+                    FernbedienungAction::SetupExperiment(id, software, journal) => match argos_stop_tx.as_ref() {
+                        Some(_) => {
+                            let _ = callback.send(Err(anyhow::anyhow!("ARGoS is already setup or running")));
+                        }
+                        None => {
+                            let (start_tx, start_rx) = oneshot::channel();
+                            let (stop_tx, stop_rx) = oneshot::channel();
+                            argos_task.set(argos(&device, id, software, journal, callback, start_rx, stop_rx).right_future());
+                            argos_start_tx = Some(start_tx);
+                            argos_stop_tx = Some(stop_tx);
+                        }
+                    },
+                    FernbedienungAction::StartExperiment => match argos_start_tx.take() {
+                        Some(start_tx) => {
+                            let _ = callback.send(
+                                start_tx.send(()).map_err(|_| anyhow::anyhow!("Could not start ARGoS")));
+                        },
+                        None => {
+                            let _ = callback.send(Err(anyhow::anyhow!("Experiment has not been set up")));
+                        }
+                    },
+                    FernbedienungAction::StopExperiment => match argos_stop_tx.take() {
+                        Some(stop_tx) => {
+                            let _ = callback.send(
+                                stop_tx.send(()).map_err(|_| anyhow::anyhow!("Could not stop ARGoS")));
+                        },
+                        None => {
+                            let _ = callback.send(Err(anyhow::anyhow!("Experiment has not been set up")));
+                        }
+                    },
                     FernbedienungAction::GetKernelMessages => {},
-                    FernbedienungAction::Identify => {},
+                    FernbedienungAction::Identify => {
+                        // using the same code as setup & s tart experiment, load drone_indentify.lua and .argos
+
+
+                    },
                 },
                 None => break,
             },
@@ -502,12 +643,12 @@ async fn fernbedienung(
                 bash_tx = tx;
                 bash_task.set(bash(&device, rx, updates_tx.clone()));
             },
-            // _ = &mut experiment_task => {
-            //     /* restart task */
-            //     let (tx, rx) = mpsc::channel(8);
-            //     experiment_tx = tx;
-            //     //experiment_task.set(experiment(&device, rx, updates_tx.clone()));
-            // },
+            _ = &mut argos_task => {
+                /* set task to pending */
+                argos_task.set(futures::future::pending().left_future());
+                argos_start_tx = None;
+                argos_stop_tx = None;
+            },
         }
     }
 }
@@ -525,8 +666,7 @@ pub async fn new(mut action_rx: Receiver) {
     tokio::pin!(xbee_task);
     /* updates_tx is for sending changes in state to subscribers (e.g., the webui) */
     let (updates_tx, _) = broadcast::channel(16);
-    /* path to the most recently uploaded experiment */
-    let mut experiment_path: Option<String> = None;
+    
 
     // TODO: for a clean shutdown we may want to consider the case where updates_tx hangs up
     loop {
@@ -537,18 +677,22 @@ pub async fn new(mut action_rx: Receiver) {
                     fernbedienung_tx = Some(tx);
                     fernbedienung_addr = Some(device.addr);
                     let _ = updates_tx.send(Update::FernbedienungConnected(device.addr));
-                    fernbedienung_task.set(fernbedienung(device, rx, updates_tx.clone()).right_future());
+                    let task = tokio::spawn(fernbedienung(device, rx, updates_tx.clone()));
+                    fernbedienung_task.set(task.right_future());
                 },
                 Action::AssociateXbee(device) => {
                     let (tx, rx) = mpsc::channel(8);
                     xbee_tx = Some(tx);
                     xbee_addr = Some(device.addr);
                     let _ = updates_tx.send(Update::XbeeConnected(device.addr));
-                    xbee_task.set(xbee(device, rx, updates_tx.clone()).right_future());
+                    let task = tokio::spawn(xbee(device, rx, updates_tx.clone()));
+                    xbee_task.set(task.right_future());
                 },
                 Action::ExecuteXbeeAction(callback, action) => match xbee_tx.as_ref() {
                     Some(tx) => {
-                        let _ = tx.send((callback, action)).await;
+                        if let Err(mpsc::error::SendError((callback, _))) = tx.send((callback, action)).await {
+                            let _ = callback.send(Err(anyhow::anyhow!("Could not communicate with Xbee task")));
+                        }
                     },
                     None => {
                         let error = anyhow::anyhow!("Could not execute {:?}: Xbee is not connected.", action);
@@ -557,7 +701,9 @@ pub async fn new(mut action_rx: Receiver) {
                 },
                 Action::ExecuteFernbedienungAction(callback, action) => match fernbedienung_tx.as_ref() {
                     Some(tx) => {
-                        let _ = tx.send((callback, action)).await;
+                        if let Err(mpsc::error::SendError((callback, _))) = tx.send((callback, action)).await {
+                            let _ = callback.send(Err(anyhow::anyhow!("Could not communicate with Fernbedienung task")));
+                        }
                     },
                     None => {
                         let error = anyhow::anyhow!("Could not execute {:?}: Fernbedienung is not connected.", action);
@@ -576,17 +722,75 @@ pub async fn new(mut action_rx: Receiver) {
                         }
                     }
                 },
-                Action::UploadExperiment(callback, software) => match fernbedienung_tx.as_ref() {
+                // upload is a separate action since we want to verify that this was successful before continuing
+                // these experiment actions should be local since we need to interact with the Xbee as well as Fernbedienung
+
+                Action::SetupExperiment(callback, id, software, journal) => match fernbedienung_tx.as_ref() {
                     Some(tx) => {
-                        tx.send((callback, FernbedienungAction::UploadToTemporaryPath(software.0))).await;
+                        let action = FernbedienungAction::SetupExperiment(id, software, journal);
+                        if let Err(mpsc::error::SendError((callback, _))) = tx.send((callback, action)).await {
+                            let _ = callback.send(Err(anyhow::anyhow!("Could not communicate with Fernbedienung task")));
+                        }
                     }
-                    None => {}
+                    None => {
+                        let error = anyhow::anyhow!("Fernbedienung is not connected.");
+                        let _ = callback.send(Err(error));
+                    }
                 },
                 Action::StartExperiment(callback) => {
-
+                    let result = async {
+                        let xbee_tx = xbee_tx.as_ref()
+                            .ok_or(anyhow::anyhow!("Xbee is not connected"))?;
+                        let (xbee_callback_tx, xbee_callback_rx) = oneshot::channel();
+                        xbee_tx.send((xbee_callback_tx, XbeeAction::SetAutonomousMode(true))).await
+                            .context("Could not communicate with Xbee task")?;
+                        xbee_callback_rx.await
+                            .context("Xbee did not respond")??;
+                        let fernbedienung_tx = fernbedienung_tx.as_ref()
+                            .ok_or(anyhow::anyhow!("Fernbedienung is not connected"))?;
+                        let (fernbedienung_callback_tx, fernbedienung_callback_rx) = oneshot::channel();
+                        // as above with fernbedienung
+                        fernbedienung_tx.send((fernbedienung_callback_tx, FernbedienungAction::StartExperiment)).await
+                            .context("Could not communicate with Fernbedienung task")?;
+                        fernbedienung_callback_rx.await
+                            .context("Fernbedienung did not respond")??;
+                        anyhow::Result::<()>::Ok(())
+                    };
+                    let _ = callback.send(result.await.context("Could not start experiment"));
                 },
                 Action::StopExperiment => {
-                    
+                    let terminate_argos = async {
+                        let fernbedienung_tx = fernbedienung_tx.as_ref()
+                            .ok_or(anyhow::anyhow!("Fernbedienung is not connected"))?;
+                        let (fernbedienung_callback_tx, fernbedienung_callback_rx) = oneshot::channel();
+                        fernbedienung_tx.send((fernbedienung_callback_tx, FernbedienungAction::StopExperiment)).await
+                            .context("Fernbedienung is not available")?;
+                        fernbedienung_callback_rx.await
+                            .context("Fernbedienung did not respond")??;
+                        anyhow::Result::<()>::Ok(())
+                    };
+                    let disable_autonomous_mode = async {
+                        let xbee_tx = xbee_tx.as_ref()
+                            .ok_or(anyhow::anyhow!("Xbee is not connected"))?;
+                        let (xbee_callback_tx, xbee_callback_rx) = oneshot::channel();
+                        xbee_tx.send((xbee_callback_tx, XbeeAction::SetAutonomousMode(false))).await
+                            .context("Xbee is not available")?;
+                        xbee_callback_rx.await
+                            .context("Xbee did not respond")??;
+                        anyhow::Result::<()>::Ok(())
+                    };
+                    // !!! this logic will impact safety during experiments -- modify with caution !!!
+                    // the Pixhawk is programmed to go into the off-board fail safe, so just disable autonomous
+                    // mode here. Be careful that we are not sending heartbeat messages or the drone will keep
+                    // flying. Using tokio::join! below we simulatenously shutdown ARGoS and disable autonomous
+                    // mode.
+                    let result = tokio::join!(terminate_argos, disable_autonomous_mode);
+                    if let Err(error) = result.0 {
+                        log::error!("{}", error);
+                    }
+                    if let Err(error) = result.1 {
+                        log::error!("{}", error);
+                    }
                 },
             },
             _ = &mut fernbedienung_task => {

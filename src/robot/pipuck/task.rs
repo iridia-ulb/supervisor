@@ -19,6 +19,16 @@ pub enum Action {
 pub type Sender = mpsc::Sender<Action>;
 pub type Receiver = mpsc::Receiver<Action>;
 
-pub async fn new(rx: Receiver) {
+pub async fn new(mut rx: Receiver) {
+    let (updates_tx, _) = broadcast::channel(8);
+
+    while let Some(action) = rx.recv().await {
+        match action {
+            Action::Subscribe(callback) => {
+                let _ = callback.send(updates_tx.subscribe());
+            },
+            _ => log::info!("{:?} is not implemented", action),
+        }
+    }
 
 }

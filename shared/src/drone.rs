@@ -43,12 +43,14 @@ pub enum Request {
     BashTerminalStop,
     BashTerminalRun(String),
     CameraStreamEnable(bool),
+    Identify,
     PixhawkPowerEnable(bool),
     MavlinkTerminalStart,
     MavlinkTerminalStop,
     MavlinkTerminalRun(String),
     UpCorePowerEnable(bool),
     UpCoreHalt,
-    UpCoreReboot,   
+    UpCoreReboot,
+    
 }
 
