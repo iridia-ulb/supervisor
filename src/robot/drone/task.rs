@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, path::Path, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, time::Duration};
 use anyhow::Context;
 use ansi_parser::{Output, AnsiParser}; //AnsiSequence
 use bytes::BytesMut;
@@ -32,6 +32,8 @@ const DRONE_CAMERAS_CONFIG: &[(&str, u16, u16, u16)] = &[
     ("/dev/camera2", 1024, 768, 8002),
     ("/dev/camera3", 1024, 768, 8003),
 ];
+
+const PIXHAWK_PORT: &'static str = "/dev/ttyS1:921600";
 
 const XBEE_DEFAULT_PIN_CONFIG: &[(xbee::Pin, xbee::PinMode)] = &[
     /* UART pins: TX: DOUT, RTS: DIO6, RX: DIN, CTS: DIO7 */
@@ -420,19 +422,21 @@ async fn bash(
     }
 }
 
-
-// I want to know if something has failed before calling start experiment
-// If `experiment` does not return, then we need to use channels
-// since we are just coordinating 
-// oneshot signals to start/stop?
 async fn argos(device: &fernbedienung::Device,
-    id: String,
-    software: Software,
-    journal: impl Into<Option<mpsc::Sender<journal::Action>>>,
     callback: oneshot::Sender<anyhow::Result<()>>,
-    start_rx: oneshot::Receiver<()>,
+    software: Software,
+    id: impl Into<Option<String>>,
+    router_socket: impl Into<Option<SocketAddr>>,
+    pixhawk_port: impl Into<Option<String>>,
+    journal: impl Into<Option<mpsc::Sender<journal::Action>>>,
+    wait_rx: impl Into<Option<oneshot::Receiver<()>>>,
     stop_rx: oneshot::Receiver<()>,
 ) {
+    let id = id.into();
+    let router_socket = router_socket.into();
+    let pixhawk_port = pixhawk_port.into();
+    let journal = journal.into();
+    let wait_rx = wait_rx.into();
     /* create temp directory */
     let path = match device.create_temp_dir().await {
         Ok(path) => path,
@@ -462,88 +466,77 @@ async fn argos(device: &fernbedienung::Device,
             }
         }
     }
-    /* get the correct local address of the supervisor */
-    let get_local_addr = async {
-        let socket = UdpSocket::bind("0.0.0.0:0").await?;
-        socket.connect((device.addr, 80)).await?;
-        let mut local_addr = socket.local_addr()?;
-        local_addr.set_port(4950);
-        std::io::Result::<SocketAddr>::Ok(local_addr)
-    };
-    let local_addr = match get_local_addr.await {
-        Ok(local_addr) => local_addr,
-        Err(error) => {
-            let result = Err(error).context("Could not get local address");
-            let _ = callback.send(result);
-            return;
-        }
-    };
     if let Err(_) = callback.send(Ok(())) {
         /* abort if the callback was dropped before we
            could signal that we are ready */
         return;
     }
-    /* wait until start_tx before starting ARGoS */
-    tokio::pin!(start_rx);
+    /* if wait_tx was provided, wait for this signal before starting ARGoS */
     tokio::pin!(stop_rx);
-    tokio::select! {
-        result = &mut start_rx => match result {
-            Ok(_) => {} /* proceed with running ARGoS */
-            Err(_) => return, /* abort */
-        },
-        _ = &mut stop_rx => {
-            return; /* abort */
-        },
+    if let Some(wait_rx) = wait_rx {
+        tokio::pin!(wait_rx);
+        tokio::select! {
+            result = &mut wait_rx => match result {
+                Ok(_) => {} /* proceed with running ARGoS */
+                Err(_) => return, /* abort */
+            },
+            _ = &mut stop_rx => {
+                return; /* abort */
+            },
+        }
     }
-
-    log::info!("starting argos");
     /* start ARGoS */
+    let mut args = vec!["--config".to_owned(), config.to_owned()];
+    args.extend(router_socket.into_iter().flat_map(|socket| vec!["--router".to_owned(), socket.to_string()]));
+    args.extend(id.iter().flat_map(|id| vec!["--id".to_owned(), id.clone()]));
+    args.extend(pixhawk_port.into_iter().flat_map(|port| vec!["--pixhawk".to_owned(), port]));
     let process = fernbedienung::Process {
         target: "argos3".into(),
         working_dir: Some(path.into()),
-        args: vec![
-            "--config".to_owned(), config.to_owned(),
-            "--pixhawk".to_owned(), "/dev/ttyS1:921600".to_owned(),
-            "--router".to_owned(), local_addr.to_string(),
-            "--id".to_owned(), id.clone(),
-        ],
+        args,
     };
-
-    let (stdout_tx, mut forward_stdout, stderr_tx, mut forward_stderr) = match journal.into() {
-        None => {
-            (None, futures::future::pending().left_future(),
-             None, futures::future::pending().left_future())
-        }
-        Some(journal) => {
+    let (stdout_tx, mut forward_stdout, stderr_tx, mut forward_stderr) = match (journal, id) {
+        (Some(journal), Some(id)) => {
             use journal::{Robot, Event, Action};
             let (stdout_tx, stdout_rx) = mpsc::channel(8);
             let (stderr_tx, stderr_rx) = mpsc::channel(8);
             let stdout_stream = ReceiverStream::new(stdout_rx);
             let stderr_stream = ReceiverStream::new(stderr_rx);
             let journal_sink = PollSender::new(journal.clone());
-            let forward_stdout = stdout_stream.map(|data: BytesMut| 
-                Ok(Action::Record(Event::Robot(id.clone(), Robot::StandardOutput(data)))))
+            let stdout_robot_id = id.clone();
+            let forward_stdout = stdout_stream.map(move |data: BytesMut| 
+                Ok(Action::Record(Event::Robot(stdout_robot_id.clone(), Robot::StandardOutput(data)))))
                     .forward(journal_sink).right_future();
             let journal_sink = PollSender::new(journal);
-            let forward_stderr = stderr_stream.map(|data: BytesMut| 
+            let forward_stderr = stderr_stream.map(move |data: BytesMut| 
                 Ok(Action::Record(Event::Robot(id.clone(), Robot::StandardError(data)))))
                     .forward(journal_sink).right_future();
             (Some(stdout_tx), forward_stdout, Some(stderr_tx), forward_stderr)
         },
+        (_, _) => {
+            (None, futures::future::pending().left_future(),
+             None, futures::future::pending().left_future())
+        }
     };
     let (terminate_tx, terminate_rx) = oneshot::channel();      
     let argos = device.run(process, terminate_rx, None, stdout_tx, stderr_tx);
     tokio::pin!(argos);
     loop {
         tokio::select! {
-            _ = &mut forward_stdout => {},
-            _ = &mut forward_stderr => {},
+            _ = &mut forward_stdout => {
+                /* disable while we wait for the other futures to finish */
+                forward_stdout = futures::future::pending().left_future();
+            },
+            _ = &mut forward_stderr => {
+                /* disable while we wait for the other futures to finish */
+                forward_stderr = futures::future::pending().left_future();
+            },
             /* local shutdown */
             _ = &mut stop_rx => {
                 let _ = terminate_tx.send(());
                 break;
             }
-            /* remote shutdown (argos finished) */
+            /* argos finished */
             _ = &mut argos => break,
         }
     }
@@ -628,12 +621,37 @@ async fn fernbedienung(
                             let _ = callback.send(Err(anyhow::anyhow!("ARGoS is already setup or running")));
                         }
                         None => {
-                            let (start_tx, start_rx) = oneshot::channel();
-                            let (stop_tx, stop_rx) = oneshot::channel();
-                            let task = argos(&device, id, software, journal, callback, start_rx, stop_rx);
-                            argos_task.set(task.left_future().right_future());
-                            argos_start_tx = Some(start_tx);
-                            argos_stop_tx = Some(stop_tx);
+                            /* get the correct local address of the supervisor */
+                            let get_local_addr = async {
+                                let socket = UdpSocket::bind("0.0.0.0:0").await?;
+                                socket.connect((device.addr, 80)).await?;
+                                let mut local_addr = socket.local_addr()?;
+                                local_addr.set_port(4950);
+                                std::io::Result::<SocketAddr>::Ok(local_addr)
+                            };
+                            match get_local_addr.await {
+                                Err(error) => {
+                                    let result = Err(error).context("Could not get local address");
+                                    let _ = callback.send(result);
+                                }
+                                Ok(local_addr) => {
+                                    let (start_tx, start_rx) = oneshot::channel();
+                                    let (stop_tx, stop_rx) = oneshot::channel();
+                                    let task = argos(
+                                        &device,
+                                        callback,
+                                        software,
+                                        id,
+                                        local_addr,
+                                        PIXHAWK_PORT.to_owned(),
+                                        journal,
+                                        start_rx,
+                                        stop_rx);
+                                    argos_task.set(task.left_future().right_future());
+                                    argos_start_tx = Some(start_tx);
+                                    argos_stop_tx = Some(stop_tx);
+                                },
+                            };
                         }
                     },
                     FernbedienungAction::StartExperiment => match argos_start_tx.take() {
@@ -672,7 +690,7 @@ async fn fernbedienung(
                                     let (start_tx, start_rx) = oneshot::channel();
                                     start_tx.send(()).unwrap();
                                     let (stop_tx, stop_rx) = oneshot::channel();
-                                    let task = argos(&device, String::from("identify"), software, None, callback, start_rx, stop_rx);
+                                    let task = argos(&device, callback, software, None, None, None, None, start_rx, stop_rx);
                                     argos_task.set(task.right_future().right_future());
                                     argos_stop_tx = Some(stop_tx);
                                 }
