@@ -3,7 +3,7 @@ use shared::{BackEndRequest, drone::{Descriptor, Request, Update}};
 use web_sys::HtmlInputElement;
 use yew::{prelude::*, web_sys::HtmlTextAreaElement};
 
-enum Pixhawk {
+enum Xbee {
     Connected {
         addr: Ipv4Addr,
         signal: Result<i32, String>,
@@ -27,7 +27,7 @@ pub struct Instance {
     optitrack_pos: [f32; 3],
     upcore: UpCore,
     upcore_power: bool,
-    pixhawk: Pixhawk,
+    xbee: Xbee,
     pixhawk_power: bool,
     camera_stream: HashMap<String, Result<String, String>>,
 }
@@ -41,7 +41,7 @@ impl Instance {
             optitrack_pos: [0.0, 0.0, 0.0],
             upcore: UpCore::Disconnected,
             upcore_power: false,
-            pixhawk: Pixhawk::Disconnected,
+            xbee: Xbee::Disconnected,
             pixhawk_power: false,
             camera_stream: Default::default(),
         }
@@ -49,7 +49,7 @@ impl Instance {
 
     pub fn update(&mut self, update: Update) {
         match update {
-            Update::Battery(reading) => if let Pixhawk::Connected { battery, ..} = &mut self.pixhawk {
+            Update::Battery(reading) => if let Xbee::Connected { battery, ..} = &mut self.xbee {
                 *battery = Ok(reading);
             },
             Update::Camera { camera, result } => {
@@ -70,21 +70,21 @@ impl Instance {
                     *signal = Ok(strength);
                 },
             Update::XbeeConnected(addr) => 
-                self.pixhawk = Pixhawk::Connected {
+                self.xbee = Xbee::Connected {
                     addr,
                     battery: Err(String::from("Unknown")),
                     signal: Err(String::from("Unknown")),
                     terminal: Default::default(),
                 },
             Update::XbeeDisconnected => 
-                self.pixhawk = Pixhawk::Disconnected,
-            Update::XbeeSignal(strength) => if let Pixhawk::Connected { signal, ..} = &mut self.pixhawk {
+                self.xbee = Xbee::Disconnected,
+            Update::XbeeSignal(strength) => if let Xbee::Connected { signal, ..} = &mut self.xbee {
                     *signal = Ok(strength);
             },
             Update::Bash(response) => if let UpCore::Connected { terminal, ..} = &mut self.upcore {
                 terminal.push_str(&response);
             },
-            Update::Mavlink(response) => if let Pixhawk::Connected { terminal, ..} = &mut self.pixhawk {
+            Update::Mavlink(response) => if let Xbee::Connected { terminal, ..} = &mut self.xbee {
                 terminal.push_str(&response);
             },
             Update::PowerState { upcore, pixhawk } => {
@@ -204,7 +204,7 @@ impl Component for Card {
             Msg::ToggleMavlinkTerminal => {
                 match self.mavlink_terminal_visible {
                     false => {
-                        if let Pixhawk::Connected { terminal, .. } = &mut drone.pixhawk {
+                        if let Xbee::Connected { terminal, .. } = &mut drone.xbee {
                             terminal.clear();
                         }
                         let drone_request = Request::MavlinkTerminalStart;
@@ -247,16 +247,11 @@ impl Component for Card {
         true
     }
 
-    // `self.link.callback(...)` can only be created with a struct that impl Component
-    // `|_: ClickEvent| { Msg::Click }` can probably be stored anywhere, i.e., external to the component
-    // 
     fn view(&self) -> Html {
-        //let toggle_upcore_power = self.link.callback(|e: MouseEvent| Msg::ToggleUpcorePower);
         let drone = self.props.instance.borrow();
-
-        let (batt_level, batt_info) = match &drone.pixhawk {
-            Pixhawk::Disconnected => (0, String::from("Unknown")),
-            Pixhawk::Connected { battery, .. } => match battery {
+        let (batt_level, batt_info) = match &drone.xbee {
+            Xbee::Disconnected => (0, String::from("Unknown")),
+            Xbee::Connected { battery, .. } => match battery {
                 Err(message) => (0, message.clone()),
                 Ok(level) => (match level {
                     0..=24 => 1,
@@ -284,7 +279,7 @@ impl Component for Card {
                 <div class="card-content">
                     <div class="content">
                         { self.render_upcore(&drone) }
-                        { self.render_pixhawk(&drone) }
+                        { self.render_xbee(&drone) }
                         { self.render_identifiers(&drone) }
                     </div>
                 </div>
@@ -432,10 +427,10 @@ impl Card {
         }
     }
     
-    fn render_pixhawk(&self, drone: &Instance) -> Html {
-        let (wifi_signal_level, wifi_signal_info) = match &drone.pixhawk {
-            Pixhawk::Disconnected => (0, String::from("Disconnected")),
-            Pixhawk::Connected { signal, .. } => match signal {
+    fn render_xbee(&self, drone: &Instance) -> Html {
+        let (wifi_signal_level, wifi_signal_info) = match &drone.xbee {
+            Xbee::Disconnected => (0, String::from("Disconnected")),
+            Xbee::Connected { signal, .. } => match signal {
                 Err(message) => (0, message.clone()),
                 Ok(level) => (match level {
                     0..=24 => 1,
@@ -445,9 +440,9 @@ impl Card {
                 }, format!("{}%", level))
             }
         };
-        let (term_disabled, term_content) = match &drone.pixhawk {
-            Pixhawk::Disconnected => (true, String::new()),
-            Pixhawk::Connected { terminal, ..} => (false, terminal.clone())
+        let (term_disabled, term_content) = match &drone.xbee {
+            Xbee::Disconnected => (true, String::new()),
+            Xbee::Connected { terminal, ..} => (false, terminal.clone())
         };
         let mut term_classes = classes!("column", "is-full");
         if !self.mavlink_terminal_visible {
@@ -462,7 +457,7 @@ impl Card {
             <>
                 <nav class="level is-mobile">
                     <div class="level-left">
-                        <p class="level-item">{ "Pixhawk" }</p>
+                        <p class="level-item">{ "Xbee" }</p>
                     </div>
                     <div class="level-right">
                         <button class="level-item button" onclick=term_btn_onclick disabled=term_disabled> {
@@ -510,9 +505,9 @@ impl Card {
                     <div class="column is-two-fifths">
                         <div class="notification has-text-centered">
                             <p style="line-height:32px"> {
-                                match drone.pixhawk {
-                                    Pixhawk::Connected { addr, .. } => addr.to_string(),
-                                    Pixhawk::Disconnected => "Disconnected".to_owned()
+                                match drone.xbee {
+                                    Xbee::Connected { addr, .. } => addr.to_string(),
+                                    Xbee::Disconnected => "Disconnected".to_owned()
                                 }
                             } </p>
                         </div>
@@ -561,7 +556,17 @@ impl Card {
     }
 
     fn render_menu(&self, drone: &Instance) -> Html {
-        let toggle_onclick = self.link.callback(|_| Msg::ToggleCameraStream);
+        let toggle_camera_stream_onclick = self.link.callback(|_| Msg::ToggleCameraStream);
+
+        let drone_request = Request::PixhawkPowerEnable(true);
+        let request = BackEndRequest::DroneRequest(drone.descriptor.id.clone(), drone_request);
+        let power_on_pixhawk_onclick = 
+            self.props.parent.callback(move |_| crate::Msg::SendRequest(request.clone(), None));
+        
+        let drone_request = Request::PixhawkPowerEnable(false);
+        let request = BackEndRequest::DroneRequest(drone.descriptor.id.clone(), drone_request);
+        let power_off_pixhawk_onclick =
+            self.props.parent.callback(move |_| crate::Msg::SendRequest(request.clone(), None));
 
         let drone_request = Request::UpCorePowerEnable(true);
         let request = BackEndRequest::DroneRequest(drone.descriptor.id.clone(), drone_request);
@@ -590,8 +595,22 @@ impl Card {
 
         html! {
             <footer class="card-footer">
-                <a class="card-footer-item" onclick=toggle_onclick>{ "Show cameras" }</a>
-                <a class="card-footer-item" onclick=identify_onclick>{ "Identify" }</a>
+                {
+                    match drone.upcore {
+                        UpCore::Connected {..} => html! {
+                            <>
+                                <a class="card-footer-item" onclick=toggle_camera_stream_onclick>{ "Show cameras" }</a>
+                                <a class="card-footer-item" onclick=identify_onclick>{ "Identify" }</a>
+                            </>
+                        },
+                        UpCore::Disconnected => html! {
+                            <>
+                                <p class="card-footer-item has-text-grey-light">{ "Show cameras" }</p>
+                                <p class="card-footer-item has-text-grey-light">{ "Identify" }</p>
+                            </>
+                        },
+                    }
+                }
                 <div class="card-footer-item dropdown is-hoverable">
                     <div class="dropdown-trigger">
                         <a>
@@ -602,25 +621,39 @@ impl Card {
                         </a>
                     </div>
                     <div class="dropdown-menu" id="dropdown-menu" role="menu">
-                        <div class="dropdown-content">
-                            <a class="dropdown-item" onclick=halt_upcore_onclick>{ "Halt" }</a>
-                            <a class="dropdown-item" onclick=reboot_upcore_onclick>{ "Reboot" }</a>
-                            {
-                                match drone.pixhawk {
-                                    Pixhawk::Connected { .. } => match drone.upcore_power {
-                                        true => html! {
-                                            <a class="dropdown-item" onclick=power_off_upcore_onclick>{ "Power Off" }</a>
-                                        },
-                                        false => html! {
-                                            <a class="dropdown-item" onclick=power_on_upcore_onclick>{ "Power On" }</a>
-                                        }
-                                    }
-                                    Pixhawk::Disconnected => html! {
-                                        <p class="dropdown-item has-text-grey-light">{ "Power On" }</p>
+                        <div class="dropdown-content"> {
+                            match drone.upcore {
+                                UpCore::Connected {..} => html! {
+                                    <a class="dropdown-item" onclick=halt_upcore_onclick>{ "Halt" }</a>
+                                },
+                                UpCore::Disconnected => html! {
+                                    <p class="dropdown-item has-text-grey-light">{ "Halt" }</p>
+                                },
+                            }
+                        } {
+                            match drone.upcore {
+                                UpCore::Connected {..} => html! {
+                                    <a class="dropdown-item" onclick=reboot_upcore_onclick>{ "Reboot" }</a>
+                                },
+                                UpCore::Disconnected => html! {
+                                    <p class="dropdown-item has-text-grey-light">{ "Reboot" }</p>
+                                },
+                            }
+                        } {
+                            match drone.xbee {
+                                Xbee::Connected { .. } => match drone.upcore_power {
+                                    true => html! {
+                                        <a class="dropdown-item" onclick=power_off_upcore_onclick>{ "Power Off" }</a>
+                                    },
+                                    false => html! {
+                                        <a class="dropdown-item" onclick=power_on_upcore_onclick>{ "Power On" }</a>
                                     }
                                 }
+                                Xbee::Disconnected => html! {
+                                    <p class="dropdown-item has-text-grey-light">{ "Power On" }</p>
+                                }
                             }
-                        </div>
+                        } </div>
                     </div>
                 </div>
                 <div class="card-footer-item dropdown is-hoverable">
@@ -633,9 +666,21 @@ impl Card {
                         </a>
                     </div>
                     <div class="dropdown-menu" id="dropdown-menu" role="menu">
-                        <div class="dropdown-content">
-                            <a class="dropdown-item">{ "Power Off" }</a>
-                        </div>
+                        <div class="dropdown-content"> {
+                            match drone.xbee {
+                                Xbee::Connected { .. } => match drone.pixhawk_power {
+                                    true => html! {
+                                        <a class="dropdown-item" onclick=power_off_pixhawk_onclick>{ "Power Off" }</a>
+                                    },
+                                    false => html! {
+                                        <a class="dropdown-item" onclick=power_on_pixhawk_onclick>{ "Power On" }</a>
+                                    }
+                                }
+                                Xbee::Disconnected => html! {
+                                    <p class="dropdown-item has-text-grey-light">{ "Power On" }</p>
+                                }
+                            }
+                        } </div>
                     </div>
                 </div>
             </footer>

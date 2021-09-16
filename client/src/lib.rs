@@ -1,4 +1,5 @@
 use std::{cell::RefCell, collections::HashMap, convert::AsRef, rc::Rc};
+use shared::experiment::software::Software;
 use shared::{DownMessage, UpMessage};
 use strum::{EnumProperty, IntoEnumIterator};
 use strum_macros::{AsRefStr, EnumIter, EnumProperty};
@@ -7,6 +8,7 @@ use wasm_bindgen::prelude::*;
 use yew::prelude::*;
 use yew::services::websocket::{WebSocketService, WebSocketStatus, WebSocketTask};
 use yew::services::ConsoleService;
+
 
 mod drone;
 mod experiment;
@@ -33,6 +35,10 @@ pub struct UserInterface {
     drone_config_comp: Option<ComponentLink<experiment::drone::ConfigCard>>,
     //pipuck_config_comp: Option<ComponentLink<experiment::pipuck::ConfigCard>>,
     control_config_comp: Option<ComponentLink<experiment::Interface>>,
+
+    drone_software: Rc<RefCell<Software>>,
+    pipuck_software: Rc<RefCell<Software>>,
+
 }
 
 
@@ -81,7 +87,7 @@ impl Component for UserInterface {
                     None
                 }
             },
-            active_tab: Tab::Experiment,
+            active_tab: Tab::Drones,
             drones: Default::default(),
 
             requests: Default::default(),
@@ -90,6 +96,10 @@ impl Component for UserInterface {
             drone_config_comp: None,
             //pipuck_config_comp: None,
             control_config_comp: None,
+            
+            drone_software: Default::default(),
+            
+            pipuck_software: Default::default(),
         }
     }
 
@@ -198,7 +208,9 @@ impl Component for UserInterface {
                                     html! {}
                                 },
                                 Tab::Experiment => html! {
-                                    <experiment::Interface parent=self.link.clone() />
+                                    <experiment::Interface parent=self.link.clone()
+                                        drone_software=self.drone_software.clone()
+                                        pipuck_software=self.pipuck_software.clone() />
                                 }
                             }
                         } </div>

@@ -10,21 +10,19 @@ use shared::BackEndRequest;
 
 use crate::UserInterface;
 
-
-
 pub mod drone;
 
 pub struct Interface {
     link: ComponentLink<Self>,
     props: Props,
-    pub drone_software: Rc<RefCell<Software>>,
-    pub pipuck_software: Rc<RefCell<Software>>,
 }
 
 // what if properties was just drone::Instance itself?
 #[derive(Clone, Properties)]
 pub struct Props {
     pub parent: ComponentLink<UserInterface>,
+    pub drone_software: Rc<RefCell<Software>>,
+    pub pipuck_software: Rc<RefCell<Software>>,
 }
 
 pub enum Msg {
@@ -38,14 +36,13 @@ impl Component for Interface {
     type Properties = Props;
 
     fn create(props: Props, link: ComponentLink<Self>) -> Self {
+        yew::services::ConsoleService::log("creating experiment interface");
         // are these messages necessary now?
         props.parent.send_message(crate::Msg::SetControlConfigComp(link.clone()));
         // if props contains a closure, I could use that to communicate with the actual instance
         Interface { 
             props,
             link,
-            drone_software: Default::default(),
-            pipuck_software: Default::default(),
         }
     }
 
@@ -53,8 +50,8 @@ impl Component for Interface {
         match message {
             Msg::StartExperiment => {
                 let request = BackEndRequest::ExperimentRequest(Request::Start {
-                    pipuck_software: self.pipuck_software.borrow().clone(),
-                    drone_software: self.drone_software.borrow().clone(),
+                    pipuck_software: self.props.pipuck_software.borrow().clone(),
+                    drone_software: self.props.drone_software.borrow().clone(),
                 });
                 self.props.parent.send_message(crate::Msg::SendRequest(request, None));
             },
@@ -78,7 +75,7 @@ impl Component for Interface {
         html! {
             <>
                 <div class="column is-full-mobile is-full-tablet is-full-desktop is-half-widescreen is-one-third-fullhd">
-                    <drone::ConfigCard software=self.drone_software.clone() />
+                    <drone::ConfigCard software=self.props.drone_software.clone() />
                 </div>
                 <div class="column is-full-mobile is-full-tablet is-half-desktop is-third-widescreen is-one-quarter-fullhd">
                     <div class="card">
@@ -89,6 +86,7 @@ impl Component for Interface {
                             </div>
                         </nav>
                     </header>
+                    // TODO list connected robots?
                     // <div class="card-content">
                     //     // <div class="content">
                             

@@ -24,3 +24,4 @@ anyhow = { version = "1.0" }
 web-sys = { version = "0.3", features = ["HtmlTextAreaElement"] }
 js-sys = { version = "0.3" }
 uuid = { version = "0.8", features = ["serde", "wasm-bindgen", "v4"] }
+once_cell = { version = "1.8" }
