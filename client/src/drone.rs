@@ -583,10 +583,15 @@ impl Card {
         let halt_upcore_onclick =
             self.props.parent.callback(move |_| crate::Msg::SendRequest(request.clone(), None));
 
+        let drone_request = Request::Identify;
+        let request = BackEndRequest::DroneRequest(drone.descriptor.id.clone(), drone_request);
+        let identify_onclick =
+            self.props.parent.callback(move |_| crate::Msg::SendRequest(request.clone(), None));
+
         html! {
             <footer class="card-footer">
                 <a class="card-footer-item" onclick=toggle_onclick>{ "Show cameras" }</a>
-                <a class="card-footer-item">{ "Identify" }</a>
+                <a class="card-footer-item" onclick=identify_onclick>{ "Identify" }</a>
                 <div class="card-footer-item dropdown is-hoverable">
                     <div class="dropdown-trigger">
                         <a>

@@ -6,7 +6,7 @@ use mavlink::{MavHeader, common::{self, MavMessage, SerialControlDev, SerialCont
 use tokio::{net::{TcpStream, UdpSocket}, sync::{broadcast, mpsc, oneshot}};
 use futures::{FutureExt, SinkExt, Stream, StreamExt, TryStreamExt};
 use tokio_stream::{self, wrappers::ReceiverStream};
-use tokio_util::codec::Framed;
+use tokio_util::{codec::Framed, sync::PollSender};
 
 use crate::network::{fernbedienung, fernbedienung_ext::MjpegStreamerStream, xbee};
 use crate::robot::{FernbedienungAction, XbeeAction, TerminalAction};
@@ -17,6 +17,11 @@ pub use shared::{
     drone::{Descriptor, Update},
     experiment::software::Software
 };
+
+const IDENTIFY_DRONE_ARGOS: (&'static str, &'static [u8]) = 
+    ("identify_drone.argos", include_bytes!("identify_drone.argos"));
+const IDENTIFY_DRONE_LUA: (&'static str, &'static [u8]) = 
+    ("identify_drone.lua", include_bytes!("identify_drone.lua"));
 
 const DRONE_BATT_FULL_MV: f32 = 4050.0;
 const DRONE_BATT_EMPTY_MV: f32 = 3500.0;
@@ -423,7 +428,7 @@ async fn bash(
 async fn argos(device: &fernbedienung::Device,
     id: String,
     software: Software,
-    journal: mpsc::Sender<journal::Action>,
+    journal: impl Into<Option<mpsc::Sender<journal::Action>>>,
     callback: oneshot::Sender<anyhow::Result<()>>,
     start_rx: oneshot::Receiver<()>,
     stop_rx: oneshot::Receiver<()>,
@@ -503,22 +508,36 @@ async fn argos(device: &fernbedienung::Device,
             "--id".to_owned(), id.clone(),
         ],
     };
-    let (stdout_tx, mut stdout_rx) = mpsc::channel(8);
-    let (stderr_tx, mut stderr_rx) = mpsc::channel(8);
-    let (terminate_tx, terminate_rx) = oneshot::channel();  
+
+    let (stdout_tx, mut forward_stdout, stderr_tx, mut forward_stderr) = match journal.into() {
+        None => {
+            (None, futures::future::pending().left_future(),
+             None, futures::future::pending().left_future())
+        }
+        Some(journal) => {
+            use journal::{Robot, Event, Action};
+            let (stdout_tx, stdout_rx) = mpsc::channel(8);
+            let (stderr_tx, stderr_rx) = mpsc::channel(8);
+            let stdout_stream = ReceiverStream::new(stdout_rx);
+            let stderr_stream = ReceiverStream::new(stderr_rx);
+            let journal_sink = PollSender::new(journal.clone());
+            let forward_stdout = stdout_stream.map(|data: BytesMut| 
+                Ok(Action::Record(Event::Robot(id.clone(), Robot::StandardOutput(data)))))
+                    .forward(journal_sink).right_future();
+            let journal_sink = PollSender::new(journal);
+            let forward_stderr = stderr_stream.map(|data: BytesMut| 
+                Ok(Action::Record(Event::Robot(id.clone(), Robot::StandardError(data)))))
+                    .forward(journal_sink).right_future();
+            (Some(stdout_tx), forward_stdout, Some(stderr_tx), forward_stderr)
+        },
+    };
+    let (terminate_tx, terminate_rx) = oneshot::channel();      
     let argos = device.run(process, terminate_rx, None, stdout_tx, stderr_tx);
     tokio::pin!(argos);
-    use journal::{Robot, Event, Action};
     loop {
         tokio::select! {
-            Some(data) = stdout_rx.recv() => {
-                let event = Event::Robot(id.clone(), Robot::StandardOutput(data));
-                let _ = journal.send(Action::Record(event));
-            },
-            Some(data) = stderr_rx.recv() => {
-                let event = Event::Robot(id.clone(), Robot::StandardError(data));
-                let _ = journal.send(Action::Record(event));
-            },
+            _ = &mut forward_stdout => {},
+            _ = &mut forward_stderr => {},
             /* local shutdown */
             _ = &mut stop_rx => {
                 let _ = terminate_tx.send(());
@@ -593,10 +612,16 @@ async fn fernbedienung(
                             .context("Could not reboot Up Core");
                         let _ = callback.send(result);
                     },
-                    FernbedienungAction::Bash(action) => {
-                        if let Err(mpsc::error::SendError((callback, action))) = bash_tx.send((callback, action)).await {
-                            let _ = callback.send(Err(anyhow::anyhow!("Could not send {:?} to Bash terminal", action)));
-                        }
+                    /* the Bash future runs on the same task as fernbedienung, so use try_send to send messages
+                       and avoid deadlock from await on a full channel */
+                    FernbedienungAction::Bash(action) => if let Err(error) = bash_tx.try_send((callback, action)) {
+                        let (callback, action, reason) = match error {
+                            mpsc::error::TrySendError::Full((callback, action)) => (callback, action, "full"),
+                            mpsc::error::TrySendError::Closed((callback, action)) => (callback, action, "closed"),
+                        };
+                        let error = 
+                            anyhow::anyhow!("Could not send {:?} to Bash terminal: channel is {}", action, reason);
+                        let _ = callback.send(Err(error));
                     },
                     FernbedienungAction::SetupExperiment(id, software, journal) => match argos_stop_tx.as_ref() {
                         Some(_) => {
@@ -605,7 +630,8 @@ async fn fernbedienung(
                         None => {
                             let (start_tx, start_rx) = oneshot::channel();
                             let (stop_tx, stop_rx) = oneshot::channel();
-                            argos_task.set(argos(&device, id, software, journal, callback, start_rx, stop_rx).right_future());
+                            let task = argos(&device, id, software, journal, callback, start_rx, stop_rx);
+                            argos_task.set(task.left_future().right_future());
                             argos_start_tx = Some(start_tx);
                             argos_stop_tx = Some(stop_tx);
                         }
@@ -629,10 +655,29 @@ async fn fernbedienung(
                         }
                     },
                     FernbedienungAction::GetKernelMessages => {},
-                    FernbedienungAction::Identify => {
-                        // using the same code as setup & s tart experiment, load drone_indentify.lua and .argos
-
-
+                    FernbedienungAction::Identify => match argos_stop_tx.as_ref() {
+                        Some(_) => {
+                            let _ = callback.send(Err(anyhow::anyhow!("ARGoS is already running")));
+                        }
+                        None => {
+                            let software = Software(vec![
+                                (IDENTIFY_DRONE_ARGOS.0.to_owned(), IDENTIFY_DRONE_ARGOS.1.to_vec()),
+                                (IDENTIFY_DRONE_LUA.0.to_owned(), IDENTIFY_DRONE_LUA.1.to_vec())
+                            ]);
+                            match software.check_config() {
+                                Err(error) => {
+                                    let _ = callback.send(Err(error).context("Identify software error"));
+                                }
+                                Ok(_) => {
+                                    let (start_tx, start_rx) = oneshot::channel();
+                                    start_tx.send(()).unwrap();
+                                    let (stop_tx, stop_rx) = oneshot::channel();
+                                    let task = argos(&device, String::from("identify"), software, None, callback, start_rx, stop_rx);
+                                    argos_task.set(task.right_future().right_future());
+                                    argos_stop_tx = Some(stop_tx);
+                                }
+                            }
+                        }
                     },
                 },
                 None => break,

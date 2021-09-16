@@ -2,7 +2,6 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use yew::prelude::*;
 
-use yew::services::ConsoleService;
 use yew::{html, Component, ComponentLink, Html, ShouldRender};
 
 use shared::experiment::{software::Software, Request};
