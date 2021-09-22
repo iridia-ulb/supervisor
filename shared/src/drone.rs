@@ -34,7 +34,7 @@ pub enum Update {
     PowerState {
         pixhawk: bool,
         upcore: bool,
-    }
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

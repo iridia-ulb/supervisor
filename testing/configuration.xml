@@ -3,6 +3,7 @@
     <supervisor>
         <router socket="0.0.0.0:4950" />
         <webui socket="127.0.0.1:3030" />
+        <optitrack version="2.9.0" bind_port="1511" multicast_addr="239.255.42.99" />
     </supervisor>
     <robots network="192.168.1.0/24">
         <drone  id="drone1"

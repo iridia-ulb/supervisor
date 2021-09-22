@@ -40,6 +40,8 @@ itertools = { version = "0.9" }
 bitvec = { version = "0.21" }
 rand = { version = "0.8" }
 ansi-parser = { version = "0.8" }
+chrono = { version = "0.4" }
+nalgebra = { version = "0.10" }
 
 semver = { version = "0.4"}
 log = { version = "0.4" }

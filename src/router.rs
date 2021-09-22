@@ -4,14 +4,12 @@ use std::{io, collections::HashMap, sync::Arc, net::SocketAddr};
 use log;
 use serde::Serialize;
 
-use tokio::{net::{TcpListener, TcpStream}, sync::{Mutex, mpsc}};
+use tokio::{net::{TcpListener, TcpStream}, sync::{Mutex, broadcast, mpsc, oneshot}};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::codec::{Decoder, Encoder, Framed};
 use futures::StreamExt;
 
 use std::mem::size_of;
-
-use crate::journal;
 
 const LUA_TNIL: i8 = 0;
 const LUA_TBOOLEAN: i8 = 1;
@@ -27,7 +25,7 @@ const LUA_TUSERDATA_VECTOR3: u8 = 2;
 const LUA_TUSERDATA_QUATERNION: u8 = 3;
 const MAX_MANTISSA: f64 = 9223372036854775806.0;
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(untagged)]
 pub enum LuaType {
     String(String),
@@ -233,8 +231,9 @@ type Peers = Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<Bytes>>>>;
 async fn client_handler(stream: TcpStream,
                         addr: SocketAddr,
                         peers: Peers,
-                        journal: mpsc::Sender<journal::Action>) {
+                        updates_tx: broadcast::Sender<(SocketAddr, LuaType)>) {
     log::info!("connected to from {}", addr);
+
     /* set up a channel for communicating with other robot sockets */
     let (tx, rx) = mpsc::channel::<Bytes>(32);
     let rx_stream = ReceiverStream::new(rx);
@@ -246,11 +245,10 @@ async fn client_handler(stream: TcpStream,
     }
 
     /* send and receive messages concurrently */
-    let mut forward = rx_stream.map(|msg| Ok(msg)).forward(sink);
+    let mut forward = rx_stream.map(Result::Ok).forward(sink);
 
     loop {
         tokio::select! {
-            biased;
             Some(message) = stream.next() => match message {
                 Ok(mut message) => {
                     for (peer_addr, tx) in peers.lock().await.iter() {
@@ -260,10 +258,7 @@ async fn client_handler(stream: TcpStream,
                         }
                     }
                     if let Ok(decoded) = decode_lua_table(&mut message) {
-                        let event = journal::Event::Broadcast(addr, decoded);
-                        if let Err(error) = journal.send(journal::Action::Record(event)).await {
-                            log::error!("Could not record event in journal: {}", error);
-                        }
+                        let _ = updates_tx.send((addr, decoded));
                     }
                 },
                 Err(_) => break
@@ -277,23 +272,40 @@ async fn client_handler(stream: TcpStream,
     log::info!("Robot {} disconnected from message router", addr);
 }
 
-pub async fn new(addr: SocketAddr, journal: mpsc::Sender<journal::Action>) -> io::Result<()> {
+pub enum Action {
+    Subscribe(oneshot::Sender<broadcast::Receiver<(SocketAddr, LuaType)>>),
+}
+
+pub async fn new(addr: SocketAddr, mut requests_rx: mpsc::Receiver<Action>) -> io::Result<()> {
+    
     let listener = TcpListener::bind(addr).await?;
     log::info!("Message router running on: {:?}", listener.local_addr());
     /* create an atomic map of all peers */
     let peers = Peers::default();
+    /* update channel (for the journal) */
+    let (updates_tx, _) = broadcast::channel(32);
     /* start the main loop */
     loop {
-        match listener.accept().await {
-            Ok((stream, addr)) => {
-                let journal = journal.clone();
-                let peers = Arc::clone(&peers);
-                /* spawn a handler for the newly connected client */
-                tokio::spawn(client_handler(stream, addr, peers, journal));
+        tokio::select! {
+            result = listener.accept() => match result {
+                Ok((stream, addr)) => {
+                    let peers = Arc::clone(&peers);
+                    /* spawn a handler for the newly connected client */
+                    tokio::spawn(client_handler(stream, addr, peers, updates_tx.clone()));
+                }
+                Err(err) => {
+                    log::error!("Error accepting incoming connection: {}", err);
+                }
+            },
+            request = requests_rx.recv() => match request {
+                Some(action) => match action {
+                    Action::Subscribe(callback) => {
+                        let _ = callback.send(updates_tx.subscribe());
+                    },
+                },
+                None => break,
             }
-            Err(err) => {
-                log::error!("Error accepting incoming connection: {}", err);
-            }
-        }   
+        }
     }
+    Ok(())
 }

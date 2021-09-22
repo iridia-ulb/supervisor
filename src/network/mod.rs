@@ -16,7 +16,7 @@ use crate::arena;
 /// This function represents the main task of the network module. It takes a network and a channel for
 /// making requests to the arena. IP addresses belonging to this network are repeated probed for an
 /// xbee or for the fernbedienung service until they are associated
-pub async fn new(network: Ipv4Net, arena_request_tx: &mpsc::Sender<arena::Action>) {
+pub async fn new(network: Ipv4Net, arena_request_tx: mpsc::Sender<arena::Action>) {
     /* probe for xbees on all addresses */
     let (mut xbee_returned_addrs, mut probe_xbee_queue) : (FuturesUnordered<_>, FuturesUnordered<_>) = network
         .hosts()

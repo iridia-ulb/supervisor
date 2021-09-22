@@ -497,7 +497,7 @@ async fn argos(device: &fernbedienung::Device,
     };
     let (stdout_tx, mut forward_stdout, stderr_tx, mut forward_stderr) = match (journal, id) {
         (Some(journal), Some(id)) => {
-            use journal::{Robot, Event, Action};
+            use journal::{ARGoS, Event, Action};
             let (stdout_tx, stdout_rx) = mpsc::channel(8);
             let (stderr_tx, stderr_rx) = mpsc::channel(8);
             let stdout_stream = ReceiverStream::new(stdout_rx);
@@ -505,11 +505,11 @@ async fn argos(device: &fernbedienung::Device,
             let journal_sink = PollSender::new(journal.clone());
             let stdout_robot_id = id.clone();
             let forward_stdout = stdout_stream.map(move |data: BytesMut| 
-                Ok(Action::Record(Event::Robot(stdout_robot_id.clone(), Robot::StandardOutput(data)))))
+                Ok(Action::Record(Event::ARGoS(stdout_robot_id.clone(), ARGoS::StandardOutput(data)))))
                     .forward(journal_sink).right_future();
             let journal_sink = PollSender::new(journal);
             let forward_stderr = stderr_stream.map(move |data: BytesMut| 
-                Ok(Action::Record(Event::Robot(id.clone(), Robot::StandardError(data)))))
+                Ok(Action::Record(Event::ARGoS(id.clone(), ARGoS::StandardError(data)))))
                     .forward(journal_sink).right_future();
             (Some(stdout_tx), forward_stdout, Some(stderr_tx), forward_stderr)
         },

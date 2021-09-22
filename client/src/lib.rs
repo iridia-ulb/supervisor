@@ -150,6 +150,19 @@ impl Component for UserInterface {
                             shared::FrontEndRequest::AddPiPuck(_) => todo!(),
                             shared::FrontEndRequest::UpdatePiPuck(_, _) => todo!(),
                             shared::FrontEndRequest::UpdateExperiment(_) => todo!(),
+                            shared::FrontEndRequest::UpdateTrackingSystem(updates) => {
+                                for update in updates {
+                                    for drone in self.drones.values() {
+                                        let mut drone = drone.borrow_mut();
+                                        if let Some(id) = drone.descriptor.optitrack_id {
+                                            if update.id == id {
+                                                drone.optitrack_pos = update.position;
+                                            }
+                                        }
+                                    }
+                                }
+                                true
+                            },
                         },
                         DownMessage::Response(uuid, result) => {
                             if let Some(callback) = self.requests.remove(&uuid) {

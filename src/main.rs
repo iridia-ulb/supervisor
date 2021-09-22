@@ -1,8 +1,9 @@
-use std::{net::SocketAddr, path::{Path, PathBuf}};
+use std::{net::{Ipv4Addr, SocketAddr}, path::{Path, PathBuf}};
 use ipnet::Ipv4Net;
 use structopt::StructOpt;
 use anyhow::Context;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
+use serde::Serialize;
 
 mod arena;
 mod robot;
@@ -19,6 +20,9 @@ struct Options {
     config: PathBuf,
 }
 
+// target messaging semantic
+// journal and webui should subscribe to the information they want
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     /* initialize the logger */
@@ -27,6 +31,7 @@ async fn main() -> anyhow::Result<()> {
     /* parse the configuration file */
     let options = Options::from_args();
     let Configuration {
+        optitrack_config,
         router_socket,
         webui_socket,
         robot_network,
@@ -34,29 +39,39 @@ async fn main() -> anyhow::Result<()> {
         drones,
     } = parse_config(&options.config)
             .context(format!("Could not parse configuration file {:?}", options.config))?;
-    /* create a task for tracking the robots and state of the experiment */
-    let (arena_requests_tx, arena_requests_rx) = mpsc::channel(8);
+    /* channels for task communication */
     let (journal_requests_tx, journal_requests_rx) = mpsc::channel(8);
-    /* listen for the ctrl-c shutdown signal */
-    let sigint_task = tokio::signal::ctrl_c();
+    let (arena_requests_tx, arena_requests_rx) = mpsc::channel(8);
+    let (optitrack_requests_tx, optitrack_requests_rx) = mpsc::channel(8);
+    let (router_requests_tx, router_requests_rx) = mpsc::channel(8);
     /* create journal task */
-    let journal_task = journal::new(journal_requests_rx);
+    let journal_task =
+        journal::new(journal_requests_rx,
+                     optitrack_requests_tx.clone(),
+                     router_requests_tx);
     /* create arena task */
     let arena_task =
         arena::new(arena_requests_rx,
-                   &journal_requests_tx,
+                   journal_requests_tx,
                    pipucks,
                    drones);
     /* create network task */
-    let network_task = network::new(robot_network, &arena_requests_tx);
+    let network_task = network::new(robot_network, arena_requests_tx.clone());
     /* create message router task */
-    let router_addr = router_socket
+    let router_socket = router_socket
         .ok_or(anyhow::anyhow!("A socket for the message router must be provided"))?;
-    let router_task = router::new(router_addr, journal_requests_tx.clone());
+    let router_task = router::new(router_socket, router_requests_rx);
+    /* create optitrack task */
+    let optitrack_config = optitrack_config
+        .ok_or(anyhow::anyhow!("Optitrack configuration must be specified"))?;
+    let optitrack_task = optitrack::new(optitrack_config, optitrack_requests_rx);
     /* create the backend task */
     let webui_socket = webui_socket
         .ok_or(anyhow::anyhow!("A socket for the web interface must be provided"))?;
-    let webui_task = webui::run(webui_socket, arena_requests_tx.clone());
+    let webui_task = webui::new(webui_socket, arena_requests_tx.clone(), optitrack_requests_tx.clone());
+
+    /* listen for the ctrl-c shutdown signal */
+    let sigint_task = tokio::signal::ctrl_c();
     /* pin the futures so that they can be polled via &mut */
     tokio::pin!(arena_task);
     tokio::pin!(journal_task);
@@ -64,6 +79,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::pin!(webui_task);
     tokio::pin!(sigint_task);
     tokio::pin!(router_task);
+    tokio::pin!(optitrack_task);
     /* no point in implementing automatic browser opening */
     /* https://bugzilla.mozilla.org/show_bug.cgi?id=1512438 */
     let server_addr = format!("http://{}/", webui_socket);
@@ -73,6 +89,7 @@ async fn main() -> anyhow::Result<()> {
     };
     
     tokio::select! {
+        _ = &mut optitrack_task => {},
         _ = &mut arena_task => {},
         _ = &mut journal_task => {},
         _ = &mut network_task => {},
@@ -91,6 +108,7 @@ async fn main() -> anyhow::Result<()> {
 
 #[derive(Debug)]
 struct Configuration {
+    optitrack_config: Option<optitrack::Configuration>,
     router_socket: Option<SocketAddr>,
     webui_socket: Option<SocketAddr>,
     robot_network: Ipv4Net,
@@ -109,6 +127,40 @@ fn parse_config(config: &Path) -> anyhow::Result<Configuration> {
         .descendants()
         .find(|node| node.tag_name().name() == "supervisor")
         .ok_or(anyhow::anyhow!("Could not find node <supervisor>"))?;
+    let optitrack_config = supervisor
+        .descendants()
+        .find(|node| node.tag_name().name() == "optitrack")
+        .map(|node| -> anyhow::Result<optitrack::Configuration> {
+            let version = node
+                .attribute("version")
+                .ok_or(anyhow::anyhow!("Could not find attribute \"version\" in <optitrack>"))?
+                .parse::<semver::Version>()
+                .context("Could not parse attribute \"version\" in <optitrack>")?;
+            let bind_addr = node
+                .attribute("bind_addr")
+                .map(|addr| addr
+                    .parse::<Ipv4Addr>()
+                    .context("Could not parse attribute \"bind_addr\" in <optitrack>"))
+                .unwrap_or(Ok(Ipv4Addr::UNSPECIFIED))?;
+            let bind_port = node
+                .attribute("bind_port")
+                .ok_or(anyhow::anyhow!("Could not find attribute \"bind_port\" in <optitrack>"))?
+                .parse::<u16>()
+                .context("Could not parse attribute \"bind_port\" in <optitrack>")?;
+            let multicast_addr = node
+                .attribute("multicast_addr")
+                .ok_or(anyhow::anyhow!("Could not find attribute \"multicast_addr\" in <optitrack>"))?
+                .parse::<Ipv4Addr>()
+                .context("Could not parse attribute \"multicast_addr\" in <optitrack>")?;
+            let iface_addr = node
+                .attribute("iface_addr")
+                .map(|addr| addr
+                    .parse::<Ipv4Addr>()
+                    .context("Could not parse attribute \"iface_addr\" in <optitrack>"))
+                .unwrap_or(Ok(Ipv4Addr::UNSPECIFIED))?;
+            Ok(optitrack::Configuration { version, bind_addr, bind_port, multicast_addr, iface_addr })
+        })
+        .transpose()?;
     let webui_socket = supervisor
         .descendants()
         .find(|node| node.tag_name().name() == "webui")
@@ -179,6 +231,7 @@ fn parse_config(config: &Path) -> anyhow::Result<Configuration> {
         }))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Configuration { 
+        optitrack_config,
         router_socket,
         webui_socket,
         robot_network,

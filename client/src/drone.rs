@@ -24,7 +24,7 @@ enum UpCore {
 
 pub struct Instance {
     pub descriptor: Descriptor,
-    optitrack_pos: [f32; 3],
+    pub optitrack_pos: [f32; 3],
     upcore: UpCore,
     upcore_power: bool,
     xbee: Xbee,

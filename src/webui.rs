@@ -1,13 +1,13 @@
 use anyhow::Context;
 use futures::{FutureExt, SinkExt, StreamExt, TryFutureExt, TryStreamExt, stream::{self, FuturesUnordered}};
-use shared::{BackEndRequest, DownMessage, FrontEndRequest, UpMessage};
+use shared::{BackEndRequest, DownMessage, FrontEndRequest, UpMessage, tracking_system};
 use std::{net::SocketAddr, ops::Deref, sync::Arc};
 use tokio::{self, sync::{broadcast, mpsc, oneshot}};
 use tokio_stream::{StreamMap, wrappers::{BroadcastStream, errors::BroadcastStreamRecvError}};
 use warp::Filter;
 use uuid::Uuid;
 
-use crate::{arena, robot::{self, drone}, robot::pipuck};
+use crate::{arena, optitrack, robot::{self, drone, pipuck}};
 
 // down message (from backend to the client)
 // up message (from client to the backend)
@@ -16,9 +16,10 @@ use crate::{arena, robot::{self, drone}, robot::pipuck};
 const CLIENT_WASM_BYTES: &'static [u8] = include_bytes!(env!("CLIENT_WASM"));
 const CLIENT_JS_BYTES: &'static [u8] = include_bytes!(env!("CLIENT_JS"));
 
-pub async fn run(
+pub async fn new(
     server_addr: SocketAddr,
-    arena_tx: mpsc::Sender<arena::Action>
+    arena_tx: mpsc::Sender<arena::Action>,
+    optitrack_tx: mpsc::Sender<optitrack::Action>
 ) {
     /* start the server */
     let wasm_route = warp::path("client_bg.wasm")
@@ -28,12 +29,14 @@ pub async fn run(
         .and(warp::path::end())
         .map(|| warp::reply::with_header(CLIENT_JS_BYTES, "content-type", "application/javascript"));
     let arena_tx = warp::any().map(move || arena_tx.clone());
+    let optitrack_tx = warp::any().map(move || optitrack_tx.clone());
     let socket_route = warp::path("socket")
         .and(warp::path::end())
         .and(warp::ws())
         .and(arena_tx)
-        .map(|websocket: warp::ws::Ws, arena_tx| {
-            websocket.on_upgrade(move |socket| handle_client(socket, arena_tx))
+        .and(optitrack_tx)
+        .map(|websocket: warp::ws::Ws, arena_tx, optitrack_tx| {
+            websocket.on_upgrade(move |socket| handle_client(socket, arena_tx, optitrack_tx))
         });
     let static_route = warp::get()
         .and(static_dir::static_dir!("client/public/"));
@@ -44,6 +47,7 @@ pub async fn run(
 async fn handle_client(
     ws: warp::ws::WebSocket,
     arena_tx: mpsc::Sender<arena::Action>,
+    optitrack_tx: mpsc::Sender<optitrack::Action>
 ) {
     /* subscribe to drone updates and map them to websocket messages */
     let drone_updates = match subscribe_drone_updates(&arena_tx).await {
@@ -105,7 +109,37 @@ async fn handle_client(
             return;
         }
     };
+    /* subscribe to optitrack updates */
+    let (callback_tx, callback_rx) = oneshot::channel();
+    let optitrack_updates = optitrack_tx.send(optitrack::Action::Subscribe(callback_tx))
+        .map_err(|_| anyhow::anyhow!("Could not subscribe to tracking system updates"))
+        .and_then(move |_| callback_rx
+            .map_err(|_| anyhow::anyhow!("Could not subscribe to tracking system updates")));
+    let optitrack_stream = match optitrack_updates.await {
+        Ok(optitrack_updates) => {
+            BroadcastStream::new(optitrack_updates)
+                .filter_map(|item: Result<Vec<tracking_system::Update>, BroadcastStreamRecvError>| async move {
+                    match item {
+                        Ok(update) => {
+                            Some(DownMessage::Request(Uuid::new_v4(), FrontEndRequest::UpdateTrackingSystem(update)))
+                        }
+                        Err(BroadcastStreamRecvError::Lagged(count)) => {
+                            log::warn!("Client missed {} tracking system messages", count);
+                            None
+                        }
+                    }
+                })
+                .map(|message| bincode::serialize(&message)
+                    .context("Could not serialize tracking system message"))
+                .map_ok(|encoded| warp::ws::Message::binary(encoded))
+        },
+        Err(error) => {
+            log::error!("Could not initialize client: {}", error);
+            return;
+        }
+    };
     /* response to client requests and forward updates to client */
+    tokio::pin!(optitrack_stream);
     tokio::pin!(pipuck_updates);
     tokio::pin!(drone_updates);
     let (mut websocket_tx, mut websocket_rx) = ws.split();
@@ -150,6 +184,17 @@ async fn handle_client(
                     log::warn!("{}", error);
                 }
             },
+            /* stream optitrack updated to client */
+            Some(result) = optitrack_stream.next() => {
+                match result {
+                    Ok(message) => {
+                        if let Err(error) = websocket_tx.send(message).await {
+                            log::error!("Could not send message to client: {}", error);
+                        }
+                    },
+                    Err(error) => log::error!("{}", error),
+                }
+            }
             /* stream pipuck updates to client */
             Some(result) = pipuck_updates.next() => {
                 match result {

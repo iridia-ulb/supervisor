@@ -34,7 +34,7 @@ pub enum Action {
 
 pub async fn new(
     mut arena_action_rx: mpsc::Receiver<Action>,
-    journal_action_tx: &mpsc::Sender<journal::Action>,
+    journal_action_tx: mpsc::Sender<journal::Action>,
     pipucks: Vec<pipuck::Descriptor>,
     drones: Vec<drone::Descriptor>
 ) {
@@ -228,10 +228,21 @@ async fn start_experiment(
     let (callback_tx, callback_rx) = oneshot::channel();
     journal_requests_tx
         .send(journal::Action::Start(callback_tx)).await
-        .map_err(|_| journal::Error::RequestError)?;
+        .map_err(|_| anyhow::anyhow!("Could not start journal"))?;
     callback_rx.await
-        .map_err(|_| journal::Error::ResponseError)
-        .and_then(|error| error)?;
+        .map_err(|_| anyhow::anyhow!("No response from journal"))??;
+    /* send all descriptors */
+    let pipuck_descriptors = pipucks
+        .keys()
+        .map(|desc| pipuck::Descriptor::clone(desc))
+        .collect::<Vec<_>>();
+    let drone_descriptors = drones
+        .keys()
+        .map(|desc| drone::Descriptor::clone(desc))
+        .collect::<Vec<_>>();
+    let descriptor_event = journal::Event::Descriptors(pipuck_descriptors, drone_descriptors);
+    journal_requests_tx.send(journal::Action::Record(descriptor_event)).await
+        .map_err(|_| anyhow::anyhow!("Could not send robot descriptors to journal"))?;
     /* start the experiment */
     /* start pi-pucks first since they are less dangerous */
     
