@@ -69,7 +69,6 @@ async fn main() -> anyhow::Result<()> {
     let webui_socket = webui_socket
         .ok_or(anyhow::anyhow!("A socket for the web interface must be provided"))?;
     let webui_task = webui::new(webui_socket, arena_requests_tx.clone(), optitrack_requests_tx.clone());
-
     /* listen for the ctrl-c shutdown signal */
     let sigint_task = tokio::signal::ctrl_c();
     /* pin the futures so that they can be polled via &mut */
