@@ -48,7 +48,7 @@ const XBEE_DEFAULT_PIN_CONFIG: &[(xbee::Pin, xbee::PinMode)] = &[
     (xbee::Pin::DIO2, xbee::PinMode::Input),
     (xbee::Pin::DIO3, xbee::PinMode::Input),
     /* Output pins for controlling power and mux */
-    (xbee::Pin::DIO4, xbee::PinMode::OutputDefaultLow),
+    (xbee::Pin::DIO4, xbee::PinMode::OutputDefaultHigh),
     (xbee::Pin::DIO11, xbee::PinMode::OutputDefaultLow),
     (xbee::Pin::DIO12, xbee::PinMode::OutputDefaultLow),
 ];
@@ -299,9 +299,11 @@ async fn xbee(
             recv = rx.recv() => match recv {
                 Some((callback, action)) => match action {
                     XbeeAction::SetAutonomousMode(enable) => {
-                        let result = device.write_outputs(&[(xbee::Pin::DIO4, enable)]).await
-                            .context("Could not set autonomous mode");
-                        let _ = callback.send(result);
+                        // let result = device.write_outputs(&[(xbee::Pin::DIO4, enable)]).await
+                        //     .context("Could not set autonomous mode");
+                        // let _ = callback.send(result);
+                        log::warn!("Setting autonomous mode to {} is disabled", enable);
+                        let _ = callback.send(Ok(()));
                     }
                     XbeeAction::SetUpCorePower(enable) => {
                         let result = device.write_outputs(&[(xbee::Pin::DIO11, enable)]).await
