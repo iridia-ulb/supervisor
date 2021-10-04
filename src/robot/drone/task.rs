@@ -48,7 +48,7 @@ const XBEE_DEFAULT_PIN_CONFIG: &[(xbee::Pin, xbee::PinMode)] = &[
     (xbee::Pin::DIO2, xbee::PinMode::Input),
     (xbee::Pin::DIO3, xbee::PinMode::Input),
     /* Output pins for controlling power and mux */
-    (xbee::Pin::DIO4, xbee::PinMode::OutputDefaultHigh),
+    (xbee::Pin::DIO4, xbee::PinMode::OutputDefaultLow),
     (xbee::Pin::DIO11, xbee::PinMode::OutputDefaultLow),
     (xbee::Pin::DIO12, xbee::PinMode::OutputDefaultLow),
 ];
@@ -275,9 +275,9 @@ async fn xbee(
         tokio_stream::StreamExt::throttle(link_margin_stream, Duration::from_millis(1000));       
     tokio::pin!(link_margin_stream_throttled);
     /* mavlink task */
-    // let (mut mavlink_tx, mavlink_rx) = mpsc::channel(8);
-    // let mavlink_task = mavlink(&device, mavlink_rx, updates_tx.clone());
-    // tokio::pin!(mavlink_task);
+    let (mut mavlink_tx, mavlink_rx) = mpsc::channel(8);
+    let mavlink_task = mavlink(&device, mavlink_rx, updates_tx.clone());
+    tokio::pin!(mavlink_task);
 
     loop {
         tokio::select! {
@@ -299,11 +299,9 @@ async fn xbee(
             recv = rx.recv() => match recv {
                 Some((callback, action)) => match action {
                     XbeeAction::SetAutonomousMode(enable) => {
-                        // let result = device.write_outputs(&[(xbee::Pin::DIO4, enable)]).await
-                        //     .context("Could not set autonomous mode");
-                        // let _ = callback.send(result);
-                        log::warn!("Setting autonomous mode to {} is disabled", enable);
-                        let _ = callback.send(Ok(()));
+                        let result = device.write_outputs(&[(xbee::Pin::DIO4, enable)]).await
+                            .context("Could not set autonomous mode");
+                        let _ = callback.send(result);
                     }
                     XbeeAction::SetUpCorePower(enable) => {
                         let result = device.write_outputs(&[(xbee::Pin::DIO11, enable)]).await
@@ -316,23 +314,22 @@ async fn xbee(
                         let _ = callback.send(result);
                     },
                     XbeeAction::Mavlink(action) => {
-                        log::warn!("Could not execute {:?}: Supervisor MAVLink is disabled", action);
-                        // if let Err(mpsc::error::SendError((callback, action))) = mavlink_tx.send((callback, action)).await {
-                        //     let _ = callback.send(Err(anyhow::anyhow!("Could not send {:?} to MAVLink terminal", action)));
-                        // }
+                        if let Err(mpsc::error::SendError((callback, action))) = mavlink_tx.send((callback, action)).await {
+                            let _ = callback.send(Err(anyhow::anyhow!("Could not send {:?} to MAVLink terminal", action)));
+                        }
                     },
                 },
                 None => break Ok(()), // normal shutdown
             },
-            // result = &mut mavlink_task => {
-            //     if let Err(error) = result {
-            //         log::error!("Mavlink task terminated: {}", error);
-            //     }
-            //     /* restart task */
-            //     let (tx, rx) = mpsc::channel(8);
-            //     mavlink_tx = tx;
-            //     mavlink_task.set(mavlink(&device, rx, updates_tx.clone()));
-            // }
+            result = &mut mavlink_task => {
+                if let Err(error) = result {
+                    log::error!("Mavlink task terminated: {}", error);
+                }
+                /* restart task */
+                let (tx, rx) = mpsc::channel(8);
+                mavlink_tx = tx;
+                mavlink_task.set(mavlink(&device, rx, updates_tx.clone()));
+            }
         }
     }
 }

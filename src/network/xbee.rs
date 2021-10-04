@@ -49,7 +49,7 @@ pub enum PinMode {
     Alternate = 1,
     Input = 3,
     OutputDefaultLow = 4,
-    OutputDefaultHigh = 5,
+    //OutputDefaultHigh = 5,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
