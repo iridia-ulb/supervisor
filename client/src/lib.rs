@@ -211,10 +211,10 @@ impl Component for UserInterface {
                         <div class="columns is-multiline is-mobile"> {
                             match self.active_tab {
                                 Tab::Drones => self.drones
-                                    .values()
-                                    .map(|drone| html!{
+                                    .iter()
+                                    .map(|(id, drone)| html! {
                                         <div class="column is-full-mobile is-full-tablet is-full-desktop is-half-widescreen is-one-third-fullhd">
-                                            <drone::Card instance=drone parent=self.link.clone() />
+                                            <drone::Card key=id.clone() instance=drone.clone() parent=self.link.clone() />
                                         </div>
                                     }).collect::<Html>(),
                                 Tab::PiPucks => {
