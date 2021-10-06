@@ -89,12 +89,21 @@ async fn main() -> anyhow::Result<()> {
     };
     
     tokio::select! {
-        _ = &mut optitrack_task => {},
-        _ = &mut arena_task => {},
-        _ = &mut journal_task => {},
-        _ = &mut network_task => {},
-        _ = &mut router_task => {},
-        _ = &mut webui_task => {},
+        result = &mut optitrack_task => match result {
+            Ok(_) => log::info!("Optitrack task completed"),
+            Err(error) => log::warn!("Optitrack task aborted: {}", error)
+        },
+        _ = &mut arena_task => log::info!("Arena task completed"),
+        result = &mut journal_task => match result {
+            Ok(_) => log::info!("Journal task completed"),
+            Err(error) => log::warn!("Journal task aborted: {}", error)
+        },
+        _ = &mut network_task => log::info!("Network task completed"),
+        result = &mut router_task => match result {
+            Ok(_) => log::info!("Router task completed"),
+            Err(error) => log::warn!("Router task aborted: {}", error)
+        },
+        _ = &mut webui_task => log::info!("WebUI task completed"),
         _ = &mut sigint_task => {
             /* TODO: is it safe to do this? should messages be broadcast to robots */
             /* what happens if ARGoS is running on the robots, does breaking the
