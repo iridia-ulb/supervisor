@@ -166,6 +166,9 @@ impl Component for UserInterface {
                         },
                         DownMessage::Response(uuid, result) => {
                             if let Some(callback) = self.requests.remove(&uuid) {
+                                if let Err(message) = result.as_ref() {
+                                    ConsoleService::log(&format!("Error: {}", message));
+                                }
                                 callback.emit(result);
                             }
                             false
@@ -182,7 +185,7 @@ impl Component for UserInterface {
                 },
             },
             Msg::WebSocketNotifcation(notification) => {
-                ConsoleService::log(&format!("{:?}", notification));
+                ConsoleService::log(&format!("Connection to backend: {:?}", notification));
                 false
             }
             Msg::SetDroneConfigComp(link) => {
