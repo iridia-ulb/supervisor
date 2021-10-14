@@ -159,8 +159,9 @@ async fn mavlink(
             Some(heartbeat) = heartbeat_stream_throttled.next() => {
                 let _ = sink.send(heartbeat).await;
             }
-            Some((callback, action)) = rx.recv() => {
-                match action {
+            request = rx.recv() => match request {
+                None => break Ok(()),
+                Some((callback, action)) => match action {
                     // note that commands should not be run when mavlink is being used by ARGoS
                     TerminalAction::Run(command) => {
                         let command_padded = command.as_bytes()
@@ -231,35 +232,48 @@ async fn mavlink(
     }
 }
 
-
-
 async fn xbee(
     device: xbee::Device,
     mut rx: mpsc::Receiver<(oneshot::Sender<anyhow::Result<()>>, XbeeAction)>,
     updates_tx: broadcast::Sender<Update>
 ) -> anyhow::Result<()> {
+    /* create a mavlink task */
+    let mavlink_task = futures::future::pending().left_future();
+    let mut mavlink_tx = Option::default();
+    tokio::pin!(mavlink_task);
     /* set the serial communication service to TCP mode */
     device.set_scs_mode(true).await
         .context("Could not enable serial communication service")?;
     /* set the baud rate to match the baud rate of the Pixhawk */
     device.set_baud_rate(921600).await
         .context("Could not set serial baud rate")?;
+    /* link margin stream */
+    let link_margin_stream = xbee_link_margin_stream(&device);
+    let link_margin_stream_throttled =
+        tokio_stream::StreamExt::throttle(link_margin_stream, Duration::from_millis(1000));
+    tokio::pin!(link_margin_stream_throttled);
     /* pin states stream */
     let pin_states_stream = xbee_pin_states_stream(&device);
     let pin_states_stream_throttled =
-        tokio_stream::StreamExt::throttle(pin_states_stream, Duration::from_millis(1000));       
+        tokio_stream::StreamExt::throttle(pin_states_stream, Duration::from_millis(1000));
     tokio::pin!(pin_states_stream_throttled);
     /* since we may be just reconnecting to the xbee, do not turn off the upcore and
-       pixhawk power if they are currently switched on */
+       pixhawk power if they are currently switched on, likewise, do not de-assert
+       autonomous mode if it is currently asserted */
     if let Some(Ok(pin_states)) = pin_states_stream_throttled.next().await {
-        let remove_upcore =
+        let autonomous_mode =
+            pin_states.get(&xbee::Pin::DIO4).cloned().unwrap_or_default();
+        let upcore_power =
             pin_states.get(&xbee::Pin::DIO11).cloned().unwrap_or_default();
-        let remove_pixhawk =
+        let pixhawk_power =
             pin_states.get(&xbee::Pin::DIO12).cloned().unwrap_or_default();
         let pin_modes = XBEE_DEFAULT_PIN_CONFIG.iter()
             .filter(|&(pin, _)| match pin {
-                xbee::Pin::DIO11 => !remove_upcore,
-                xbee::Pin::DIO12 => !remove_pixhawk,
+                /* if a pin is already set to true, then it should be removed from
+                   the default pin configuration */
+                xbee::Pin::DIO4 => !autonomous_mode,
+                xbee::Pin::DIO11 => !upcore_power,
+                xbee::Pin::DIO12 => !pixhawk_power,
                 _ => true,
             });
         device.set_pin_modes(pin_modes).await
@@ -269,16 +283,6 @@ async fn xbee(
         device.set_pin_modes(XBEE_DEFAULT_PIN_CONFIG.into_iter()).await
             .context("Could not set Xbee pin modes")?;
     }
-    /* link margin stream */
-    let link_margin_stream = xbee_link_margin_stream(&device);
-    let link_margin_stream_throttled =
-        tokio_stream::StreamExt::throttle(link_margin_stream, Duration::from_millis(1000));       
-    tokio::pin!(link_margin_stream_throttled);
-    /* mavlink task */
-    let (mut mavlink_tx, mavlink_rx) = mpsc::channel(8);
-    let mavlink_task = mavlink(&device, mavlink_rx, updates_tx.clone());
-    tokio::pin!(mavlink_task);
-
     loop {
         tokio::select! {
             Some(response) = link_margin_stream_throttled.next() => {
@@ -294,6 +298,16 @@ async fn xbee(
                         let _ = updates_tx.send(Update::PowerState { upcore, pixhawk });
                     },
                     _ => log::warn!("Could not update power state")
+                }
+                if let Some(autonomous_mode) = response.get(&xbee::Pin::DIO4).cloned() {
+                    if autonomous_mode {
+                        mavlink_tx = None;
+                    }
+                    else if matches!(mavlink_tx, None) {
+                        let (tx, rx) = mpsc::channel(8);
+                        mavlink_tx = Some(tx);
+                        mavlink_task.set(mavlink(&device, rx, updates_tx.clone()).right_future());
+                    }
                 }
             },
             recv = rx.recv() => match recv {
@@ -313,9 +327,15 @@ async fn xbee(
                             .context("Could not configure Pixhawk power");
                         let _ = callback.send(result);
                     },
-                    XbeeAction::Mavlink(action) => {
-                        if let Err(mpsc::error::SendError((callback, action))) = mavlink_tx.send((callback, action)).await {
-                            let _ = callback.send(Err(anyhow::anyhow!("Could not send {:?} to MAVLink terminal", action)));
+                    XbeeAction::Mavlink(action) => match mavlink_tx.as_ref() {
+                        Some(tx) => {
+                            if let Err(mpsc::error::SendError((callback, action))) = tx.send((callback, action)).await {
+                                let _ = callback.send(Err(anyhow::anyhow!("Could not send {:?} to terminal", action)));
+                            }
+                        },
+                        None => {
+                            let _ = callback.send(Err(anyhow::anyhow!("Could not send {:?} to terminal", action))
+                                .context("Can not send action in autonomous mode"));
                         }
                     },
                 },
@@ -325,10 +345,8 @@ async fn xbee(
                 if let Err(error) = result {
                     log::error!("Mavlink task terminated: {}", error);
                 }
-                /* restart task */
-                let (tx, rx) = mpsc::channel(8);
-                mavlink_tx = tx;
-                mavlink_task.set(mavlink(&device, rx, updates_tx.clone()));
+                mavlink_tx = None;
+                mavlink_task.set(futures::future::pending().left_future());
             }
         }
     }
