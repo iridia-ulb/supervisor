@@ -242,7 +242,7 @@ async fn xbee(
     device.set_scs_mode(true).await
         .context("Could not enable serial communication service")?;
     /* set the baud rate to match the baud rate of the Pixhawk */
-    device.set_baud_rate(115200).await
+    device.set_baud_rate(921600).await
         .context("Could not set serial baud rate")?;
     /* pin states stream */
     let pin_states_stream = xbee_pin_states_stream(&device);
