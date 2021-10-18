@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, sync::{Arc, atomic::{AtomicU8, Ordering}}, time::Duration};
 use anyhow::Context;
 use ansi_parser::{Output, AnsiParser}; //AnsiSequence
 use bytes::BytesMut;
@@ -133,18 +133,23 @@ async fn mavlink(
             .and_then(|result| result)).await?;
     let (sink, mut stream) = 
         Framed::new(connection, codec::MavMessageCodec::<MavMessage>::new()).split();
-    let mut mavlink_sequence = 0u8;
-    let sink = sink.with(|message| async {
-        let header = MavHeader { system_id: 255, component_id: 190, sequence: 0 };
+    let mavlink_sequence = AtomicU8::new(0);
+    let sink = sink.with(|message| {
+        async {
+            let header = MavHeader {
+                system_id: 255,
+                component_id: 0,
+                sequence: mavlink_sequence.fetch_add(1, Ordering::Relaxed) };
             anyhow::Result::<_>::Ok((header, message))
+        }
     });
     tokio::pin!(sink);
     /* heartbeat stream */
     let heartbeat_stream = futures::stream::iter(std::iter::repeat(
         MavMessage::HEARTBEAT(common::HEARTBEAT_DATA {
             custom_mode: 0,
-            mavtype: common::MavType::MAV_TYPE_GCS,
-            autopilot: common::MavAutopilot::MAV_AUTOPILOT_GENERIC,
+            mavtype: common::MavType::MAV_TYPE_GENERIC,
+            autopilot: common::MavAutopilot::MAV_AUTOPILOT_INVALID,
             base_mode: common::MavModeFlag::empty(),
             system_status: common::MavState::MAV_STATE_UNINIT,
             mavlink_version: 3,
@@ -163,31 +168,38 @@ async fn mavlink(
                 None => break Ok(()),
                 Some((callback, action)) => match action {
                     // note that commands should not be run when mavlink is being used by ARGoS
-                    TerminalAction::Run(command) => {
-                        let command_padded = command.as_bytes()
-                            .iter()
-                            .cloned()
-                            .chain(std::iter::repeat(0u8))
-                            .take(70)
-                            .collect::<Vec<_>>();
-
-                        log::info!("sending \"{}\"", command);
+                    TerminalAction::Start => {
+                        let command = vec![0x0au8];
                         let data = common::SERIAL_CONTROL_DATA {
                             baudrate: 0,
                             timeout: 0,
                             device: SerialControlDev::SERIAL_CONTROL_DEV_SHELL,
-                            flags: SerialControlFlag::SERIAL_CONTROL_FLAG_EXCLUSIVE | 
-                                SerialControlFlag::SERIAL_CONTROL_FLAG_RESPOND |
-                                SerialControlFlag::SERIAL_CONTROL_FLAG_MULTI,
+                            flags: SerialControlFlag::SERIAL_CONTROL_FLAG_RESPOND |
+                                SerialControlFlag::SERIAL_CONTROL_FLAG_EXCLUSIVE,
+                            count: command.len() as u8,
+                            data: command,
+                        };
+                        let message = MavMessage::SERIAL_CONTROL(data);
+                        match sink.send(message).await {
+                            Ok(_) => {}
+                            Err(error) => log::error!("{}", error)
+                        }
+                    },
+                    TerminalAction::Run(command) => {
+                        let mut command_padded = command.as_bytes().to_vec();
+                        command_padded.push(0x0a); // add a line feed to the command
+                        let data = common::SERIAL_CONTROL_DATA {
+                            baudrate: 0,
+                            timeout: 0,
+                            device: SerialControlDev::SERIAL_CONTROL_DEV_SHELL,
+                            flags: SerialControlFlag::SERIAL_CONTROL_FLAG_RESPOND |
+                                SerialControlFlag::SERIAL_CONTROL_FLAG_EXCLUSIVE,
                             count: command_padded.len() as u8,
                             data: command_padded,
                         };
-                        log::info!("sending {} bytes", data.data.len());
                         let message = MavMessage::SERIAL_CONTROL(data);
                         match sink.send(message).await {
-                            Ok(_) => {
-                                mavlink_sequence = mavlink_sequence.wrapping_add(1);
-                            }
+                            Ok(_) => {}
                             Err(error) => log::error!("{}", error)
                         }
                     },
@@ -208,22 +220,19 @@ async fn mavlink(
                         let _ = updates_tx.send(Update::Battery(battery_reading));
                     },
                     MavMessage::SERIAL_CONTROL(common::SERIAL_CONTROL_DATA { data, count, .. }) => {
-                        log::info!("got serial control data");
-                        let valid = match std::str::from_utf8(&data[..count as usize]) {
+                        let data = match std::str::from_utf8(&data[..count as usize]) {
                             Ok(data) => data,
                             Err(error) => {
-                                log::info!("count included non-utf8 data");
                                 std::str::from_utf8(&data[..error.valid_up_to()]).unwrap()
                             }
                         };
-                        log::info!("received \"{}\"", valid);
-                        let parsed: Vec<Output> = valid
+                        let parsed: String = data
                             .ansi_parse()
-                            .collect();
-                        log::info!("received \"{:?}\"", parsed);
-                        // https://github.com/mavlink/qgroundcontrol/blob/master/src/AnalyzeView/MavlinkConsoleController.cc#L168
-                        //let s = .into_owned();
-                        //let _  = updates_tx.send(Update::Mavlink(s));
+                            .fold(String::new(), |output, item| match item {
+                                Output::TextBlock(text) => format!("{}{}", output, text),
+                                Output::Escape(_) => output,
+                            });
+                        let _  = updates_tx.send(Update::Mavlink(parsed));
                     },
                     _ => {}
                 }

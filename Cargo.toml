@@ -49,6 +49,6 @@ env_logger = { version = "0.8" }
 thiserror = { version = "1.0" }
 anyhow = { version = "1.0" }
 
-mavlink = {version = "0.9"}
+mavlink = {version = "0.10"}
 crc-any = {version = "2.3"}
 webbrowser = { version = "0.5" }

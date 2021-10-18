@@ -14,7 +14,6 @@ impl<M: mavlink::Message> MavMessageCodec<M> {
     }
 }
 
-
 impl<M: mavlink::Message> Encoder<(mavlink::MavHeader, M)> for MavMessageCodec<M> {
     type Error = mavlink::error::MessageWriteError;
     
@@ -33,17 +32,13 @@ impl<M: mavlink::Message> Encoder<(mavlink::MavHeader, M)> for MavMessageCodec<M
             ((msgid & 0x00FF00) >> 8) as u8,
             ((msgid & 0xFF0000) >> 16) as u8,
         ];
-
-        let mut crc = CRCu16::crc16mcrf4cc();
-        crc.digest(&header[1..]);
-        crc.digest(&payload[..]);
-        let extra_crc = M::extra_crc(msgid);
-        crc.digest(&[extra_crc]);   
-        let crc_bytes = crc.get_crc().to_le_bytes();
-    
+        let mut crc_calc = CRCu16::crc16mcrf4cc();
+        crc_calc.digest(&header[1..]);
+        crc_calc.digest(&payload[..]);
+        crc_calc.digest(&[M::extra_crc(msgid)]);
         dst.put_slice(header);
         dst.put_slice(&payload[..]);
-        dst.put_slice(&crc_bytes);
+        dst.put_slice(&crc_calc.get_crc().to_le_bytes());
         Ok(())
     }
 }
