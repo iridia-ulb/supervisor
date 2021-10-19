@@ -51,6 +51,5 @@ pub enum Request {
     UpCorePowerEnable(bool),
     UpCoreHalt,
     UpCoreReboot,
-    
 }
 

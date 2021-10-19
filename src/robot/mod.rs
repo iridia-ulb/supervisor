@@ -14,7 +14,6 @@ pub enum FernbedienungAction {
     SetupExperiment(String, Software, mpsc::Sender<journal::Action>),
     StartExperiment,
     StopExperiment,
-    GetKernelMessages,
     Identify,
 }
 

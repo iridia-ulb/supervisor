@@ -3,7 +3,6 @@ use ipnet::Ipv4Net;
 use structopt::StructOpt;
 use anyhow::Context;
 use tokio::sync::mpsc;
-use serde::Serialize;
 
 mod arena;
 mod robot;

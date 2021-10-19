@@ -11,6 +11,7 @@ use shared::BackEndRequest;
 use crate::UserInterface;
 
 pub mod drone;
+pub mod pipuck;
 
 pub struct Interface {
     link: ComponentLink<Self>,
@@ -30,16 +31,12 @@ pub enum Msg {
     StopExperiment,
 }
 
-// is it possible to just add a callback to the update method
 impl Component for Interface {
     type Message = Msg;
     type Properties = Props;
 
     fn create(props: Props, link: ComponentLink<Self>) -> Self {
-        yew::services::ConsoleService::log("creating experiment interface");
-        // are these messages necessary now?
         props.parent.send_message(crate::Msg::SetControlConfigComp(link.clone()));
-        // if props contains a closure, I could use that to communicate with the actual instance
         Interface { 
             props,
             link,
@@ -63,19 +60,18 @@ impl Component for Interface {
         false
     }
 
-    // this fires when the parent changes the properties of this component
     fn change(&mut self, _: Self::Properties) -> ShouldRender {
         true
     }
 
-    // `self.link.callback(...)` can only be created with a struct that impl Component
-    // `|_: ClickEvent| { Msg::Click }` can probably be stored anywhere, i.e., external to the component
-    // 
     fn view(&self) -> Html {
         html! {
             <>
                 <div class="column is-full-mobile is-full-tablet is-full-desktop is-half-widescreen is-one-third-fullhd">
                     <drone::ConfigCard software=self.props.drone_software.clone() />
+                </div>
+                <div class="column is-full-mobile is-full-tablet is-full-desktop is-half-widescreen is-one-third-fullhd">
+                    <pipuck::ConfigCard software=self.props.pipuck_software.clone() />
                 </div>
                 <div class="column is-full-mobile is-full-tablet is-half-desktop is-third-widescreen is-one-quarter-fullhd">
                     <div class="card">
@@ -86,12 +82,6 @@ impl Component for Interface {
                             </div>
                         </nav>
                     </header>
-                    // TODO list connected robots?
-                    // <div class="card-content">
-                    //     // <div class="content">
-                            
-                    //     // </div>
-                    // </div>
                     <footer class="card-footer">
                         <a class="card-footer-item" 
                            onclick=self.link.callback(|_| Msg::StartExperiment)>{ "Start experiment" }</a>

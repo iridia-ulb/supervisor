@@ -331,15 +331,15 @@ impl Device {
         Ok(Device { request_tx, addr, return_addr_tx: Some(return_addr_tx) })
     }
 
-    pub async fn ip(&self) -> Result<Ipv4Addr> {
-        let (response_tx, response_rx) = oneshot::channel();
-        let request = Request::GetParameter([b'M',b'Y'], response_tx);
-        self.request_tx.send(request).await.map_err(|_| Error::RequestFailed)?;
-        let value = response_rx.await.map_err(|_| Error::NoResponse)??;
-        <[u8; 4]>::try_from(&value[..])
-            .map_err(|_| Error::DecodeError)
-            .map(|addr| Ipv4Addr::from(addr))
-    }
+    // pub async fn ip(&self) -> Result<Ipv4Addr> {
+    //     let (response_tx, response_rx) = oneshot::channel();
+    //     let request = Request::GetParameter([b'M',b'Y'], response_tx);
+    //     self.request_tx.send(request).await.map_err(|_| Error::RequestFailed)?;
+    //     let value = response_rx.await.map_err(|_| Error::NoResponse)??;
+    //     <[u8; 4]>::try_from(&value[..])
+    //         .map_err(|_| Error::DecodeError)
+    //         .map(|addr| Ipv4Addr::from(addr))
+    // }
 
     pub async fn mac(&self) -> Result<MacAddr6> {
         /* get the upper 16 bits */

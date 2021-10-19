@@ -2,7 +2,7 @@ use anyhow::Context;
 use futures::{FutureExt, SinkExt, StreamExt, TryFutureExt, TryStreamExt, stream::{self, FuturesUnordered}};
 use shared::{BackEndRequest, DownMessage, FrontEndRequest, UpMessage, tracking_system};
 use std::{net::SocketAddr, ops::Deref, sync::Arc};
-use tokio::{self, sync::{broadcast, mpsc, oneshot}};
+use tokio::{self, sync::{mpsc, oneshot}};
 use tokio_stream::{StreamMap, wrappers::{BroadcastStream, errors::BroadcastStreamRecvError}};
 use warp::Filter;
 use uuid::Uuid;
@@ -317,11 +317,33 @@ async fn handle_drone_request(
 }
 
 async fn handle_pipuck_request(
-    _arena_tx: &mpsc::Sender<arena::Action>,
-    _id: String,
-    _request: shared::pipuck::Request,
+    arena_tx: &mpsc::Sender<arena::Action>,
+    id: String,
+    request: shared::pipuck::Request,
 ) -> anyhow::Result<()> {
-    Ok(())
+    use shared::pipuck::Request;
+    use robot::{FernbedienungAction, TerminalAction};
+    use pipuck::Action;
+    let (callback_tx, callback_rx) = oneshot::channel();
+    let action = match request {
+        Request::BashTerminalStart => 
+            Action::ExecuteFernbedienungAction(callback_tx, FernbedienungAction::Bash(TerminalAction::Start)),
+        Request::BashTerminalStop => 
+            Action::ExecuteFernbedienungAction(callback_tx, FernbedienungAction::Bash(TerminalAction::Stop)),
+        Request::BashTerminalRun(command) => 
+            Action::ExecuteFernbedienungAction(callback_tx, FernbedienungAction::Bash(TerminalAction::Run(command))),
+        Request::CameraStreamEnable(on) => 
+            Action::ExecuteFernbedienungAction(callback_tx, FernbedienungAction::SetCameraStream(on)),
+        Request::Identify => 
+            Action::ExecuteFernbedienungAction(callback_tx, FernbedienungAction::Identify),
+        Request::RaspberryPiHalt => 
+            Action::ExecuteFernbedienungAction(callback_tx, FernbedienungAction::Halt),
+        Request::RaspberryPiReboot =>
+            Action::ExecuteFernbedienungAction(callback_tx, FernbedienungAction::Reboot),
+    };
+    arena_tx.send(arena::Action::ForwardPiPuckAction(id, action)).await
+        .map_err(|_| anyhow::anyhow!("Could not send action to arena"))?;
+    callback_rx.await.map_err(|_| anyhow::anyhow!("No response from arena"))?
 }
 
 async fn handle_experiment_request(

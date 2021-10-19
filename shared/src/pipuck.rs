@@ -18,17 +18,15 @@ impl Display for Descriptor {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum Update {
-    // sends camera footage
+    Battery(i32),
     Camera {
         camera: String,
         result: Result<Bytes, String>
     },
-    // describes static information about Pi-Puck
-    Descriptor(Descriptor),
-    // indicates whether the connection is up or down
-    FernbedienungConnection(Option<Ipv4Addr>),
-    // indicates the signal strength
-    FernbedienungSignal(Result<i32, String>)
+    FernbedienungConnected(Ipv4Addr),
+    FernbedienungDisconnected,
+    FernbedienungSignal(i32),
+    Bash(String),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -37,8 +35,8 @@ pub enum Request {
     BashTerminalStop,
     BashTerminalRun(String),
     CameraStreamEnable(bool),
+    Identify,
     RaspberryPiHalt,
     RaspberryPiReboot,
 }
-
 

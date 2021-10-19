@@ -9,8 +9,8 @@ use yew::prelude::*;
 use yew::services::websocket::{WebSocketService, WebSocketStatus, WebSocketTask};
 use yew::services::ConsoleService;
 
-
 mod drone;
+mod pipuck;
 mod experiment;
 
 #[derive(AsRefStr, EnumProperty, EnumIter, Copy, Clone, PartialEq)]
@@ -28,34 +28,31 @@ pub struct UserInterface {
     socket: Option<WebSocketTask>,
     active_tab: Tab,
     requests: HashMap<Uuid, Callback<Result<(), String>>>,
-
-
-    drones: HashMap<String, Rc<RefCell<drone::Instance>>>,
     
-    drone_config_comp: Option<ComponentLink<experiment::drone::ConfigCard>>,
-    //pipuck_config_comp: Option<ComponentLink<experiment::pipuck::ConfigCard>>,
-    control_config_comp: Option<ComponentLink<experiment::Interface>>,
-
+    drones: HashMap<String, Rc<RefCell<drone::Instance>>>,
     drone_software: Rc<RefCell<Software>>,
+    drone_config_comp: Option<ComponentLink<experiment::drone::ConfigCard>>,
+
+    pipucks: HashMap<String, Rc<RefCell<pipuck::Instance>>>,
     pipuck_software: Rc<RefCell<Software>>,
+    pipuck_config_comp: Option<ComponentLink<experiment::pipuck::ConfigCard>>,
+    
+    control_config_comp: Option<ComponentLink<experiment::Interface>>,
+    
+    
 
 }
 
 
 
 pub enum Msg {
-
     // TODO: handle disconnects by matching against WebSocketStatus::Closed or WebSocketStatus::Error
     WebSocketNotifcation(WebSocketStatus),
     WebSocketRxData(Result<Vec<u8>, anyhow::Error>),
-    
     SetActiveTab(Tab),
-
     SendRequest(shared::BackEndRequest, Option<Callback<Result<(), String>>>),
-    
-
     SetDroneConfigComp(ComponentLink<experiment::drone::ConfigCard>),
-    //SetPiPuckConfigComp(ComponentLink<experiment::drone::ConfigCard>),
+    SetPiPuckConfigComp(ComponentLink<experiment::pipuck::ConfigCard>),
     SetControlConfigComp(ComponentLink<experiment::Interface>),
 }
 
@@ -91,14 +88,13 @@ impl Component for UserInterface {
             drones: Default::default(),
 
             requests: Default::default(),
-            //pipucks: Default::default(),
+            pipucks: Default::default(),
             /* configuration component links */
             drone_config_comp: None,
-            //pipuck_config_comp: None,
+            pipuck_config_comp: None,
             control_config_comp: None,
             
             drone_software: Default::default(),
-            
             pipuck_software: Default::default(),
         }
     }
@@ -147,8 +143,17 @@ impl Component for UserInterface {
                                 }
                                 true
                             },
-                            shared::FrontEndRequest::AddPiPuck(_) => todo!(),
-                            shared::FrontEndRequest::UpdatePiPuck(_, _) => todo!(),
+                            shared::FrontEndRequest::AddPiPuck(desc) => {
+                                self.pipucks.entry(desc.id.clone())
+                                    .or_insert_with(|| Rc::new(RefCell::new(pipuck::Instance::new(desc))));
+                                true
+                            },
+                            shared::FrontEndRequest::UpdatePiPuck(id, update) => {
+                                if let Some(pipuck) = self.pipucks.get(&id) {
+                                    pipuck.borrow_mut().update(update);
+                                }
+                                true
+                            },
                             shared::FrontEndRequest::UpdateExperiment(_) => todo!(),
                             shared::FrontEndRequest::UpdateTrackingSystem(updates) => {
                                 for update in updates {
@@ -190,6 +195,10 @@ impl Component for UserInterface {
             }
             Msg::SetDroneConfigComp(link) => {
                 self.drone_config_comp = Some(link);
+                false
+            },
+            Msg::SetPiPuckConfigComp(link) => {
+                self.pipuck_config_comp = Some(link);
                 false
             },
             Msg::SetControlConfigComp(link) => {

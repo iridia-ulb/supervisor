@@ -243,9 +243,25 @@ async fn start_experiment(
     let descriptor_event = journal::Event::Descriptors(pipuck_descriptors, drone_descriptors);
     journal_requests_tx.send(journal::Action::Record(descriptor_event)).await
         .map_err(|_| anyhow::anyhow!("Could not send robot descriptors to journal"))?;
-    /* start the experiment */
-    /* start pi-pucks first since they are less dangerous */
-    
+    /* set up the experiment on the pi-pucks */
+    pipucks.iter()
+        .map(|(desc, instance)| {
+            let (callback_tx, callback_rx) = oneshot::channel();
+            let action = pipuck::Action::SetupExperiment(
+                callback_tx, 
+                desc.id.clone(),
+                pipuck_software.clone(),
+                journal_requests_tx.clone()
+            );
+            async move {
+                instance.action_tx.send(action).await
+                    .map_err(|_| anyhow::anyhow!("Could not send action to Pi-Puck"))?;
+                callback_rx.await
+                    .map_err(|_| anyhow::anyhow!("No response from Pi-Puck"))?
+            }
+        })
+        .collect::<FuturesUnordered<_>>()
+        .try_collect::<Vec<_>>().await?;
     /* set up the experiment on the drones */
     drones.iter()
         .map(|(desc, instance)| {
@@ -266,6 +282,19 @@ async fn start_experiment(
         .collect::<FuturesUnordered<_>>()
         .try_collect::<Vec<_>>().await?;
     /* start the pipucks */
+    pipucks.iter()
+        .map(|(_, instance)| {
+            let (callback_tx, callback_rx) = oneshot::channel();
+            let action = pipuck::Action::StartExperiment(callback_tx);
+            async move {
+                instance.action_tx.send(action).await
+                    .map_err(|_| anyhow::anyhow!("Could not send action to Pi-Puck"))?;
+                callback_rx.await
+                    .map_err(|_| anyhow::anyhow!("No response from Pi-Puck"))?
+            }
+        })
+        .collect::<FuturesUnordered<_>>()
+        .try_collect::<Vec<_>>().await?;
     /* start the drones */
     drones.iter()
         .map(|(_, instance)| {

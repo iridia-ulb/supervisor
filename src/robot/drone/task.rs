@@ -1,6 +1,6 @@
-use std::{collections::HashMap, net::SocketAddr, sync::{Arc, atomic::{AtomicU8, Ordering}}, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, sync::atomic::{AtomicU8, Ordering}, time::Duration};
 use anyhow::Context;
-use ansi_parser::{Output, AnsiParser}; //AnsiSequence
+use ansi_parser::{Output, AnsiParser};
 use bytes::BytesMut;
 use mavlink::{MavHeader, common::{self, MavMessage, SerialControlDev, SerialControlFlag}};
 use tokio::{net::{TcpStream, UdpSocket}, sync::{broadcast, mpsc, oneshot}};
@@ -134,14 +134,12 @@ async fn mavlink(
     let (sink, mut stream) = 
         Framed::new(connection, codec::MavMessageCodec::<MavMessage>::new()).split();
     let mavlink_sequence = AtomicU8::new(0);
-    let sink = sink.with(|message| {
-        async {
-            let header = MavHeader {
-                system_id: 255,
-                component_id: 0,
-                sequence: mavlink_sequence.fetch_add(1, Ordering::Relaxed) };
-            anyhow::Result::<_>::Ok((header, message))
-        }
+    let sink = sink.with(|message| async {
+        let header = MavHeader {
+            system_id: 255,
+            component_id: 0,
+            sequence: mavlink_sequence.fetch_add(1, Ordering::Relaxed) };
+        anyhow::Result::<_>::Ok((header, message))
     });
     tokio::pin!(sink);
     /* heartbeat stream */
@@ -158,7 +156,7 @@ async fn mavlink(
     let heartbeat_stream_throttled =
         tokio_stream::StreamExt::throttle(heartbeat_stream, Duration::from_millis(500));
     tokio::pin!(heartbeat_stream_throttled);
-
+    /* task loop */
     loop {
         tokio::select! {
             Some(heartbeat) = heartbeat_stream_throttled.next() => {
@@ -180,10 +178,9 @@ async fn mavlink(
                             data: command,
                         };
                         let message = MavMessage::SERIAL_CONTROL(data);
-                        match sink.send(message).await {
-                            Ok(_) => {}
-                            Err(error) => log::error!("{}", error)
-                        }
+                        let result = sink.send(message).await
+                            .context("Could not start MAVLink terminal");
+                        let _ = callback.send(result);
                     },
                     TerminalAction::Run(command) => {
                         let mut command_padded = command.as_bytes().to_vec();
@@ -198,19 +195,21 @@ async fn mavlink(
                             data: command_padded,
                         };
                         let message = MavMessage::SERIAL_CONTROL(data);
-                        match sink.send(message).await {
-                            Ok(_) => {}
-                            Err(error) => log::error!("{}", error)
-                        }
+                        let result = sink.send(message).await
+                            .context("Could not run command in MAVLink terminal");
+                        let _ = callback.send(result);
                     },
-                    _ => {}, // ignore start and stop
+                    TerminalAction::Stop => {
+                        /* nothing to do */
+                        let _ = callback.send(Ok(()));
+                    },
                 }
             },
-            Some(Ok((header, body))) = stream.next() => {
+            Some(Ok((_header, body))) = stream.next() => {
                 match body {
-                    MavMessage::HEARTBEAT(_) => {
-                        //log::info!("heartbeat from {}:{}", header.system_id, header.component_id);
-                    },
+                    // MavMessage::HEARTBEAT(_) => {
+                    //     log::info!("heartbeat from {}:{}", header.system_id, header.component_id);
+                    // },
                     MavMessage::BATTERY_STATUS(data) => {
                         let mut battery_reading = data.voltages[0] as f32;
                         battery_reading /= DRONE_BATT_NUM_CELLS;
@@ -417,14 +416,21 @@ async fn bash(
                         args: vec!["-li".to_owned()],
                     };
                     process.set(device.run(bash, terminate_rx, stdin_rx, stdout_tx, stderr_tx).right_future());
-                    log::info!("Remote Bash instance started");
+                    let _ = callback.send(Ok(()));
                 },
                 TerminalAction::Run(mut command) => if let Some(tx) = stdin.as_ref() {
                     command.push_str("\r");
-                    let _  = tx.send(BytesMut::from(command.as_bytes())).await;
+                    let result = tx.send(BytesMut::from(command.as_bytes())).await
+                        .map_err(|_| {
+                            /* remove the "\r" before including the command in the error message */
+                            command.pop();
+                            anyhow::anyhow!("Could not send \"{}\" to Bash terminal", command)
+                        });
+                    let _ = callback.send(result);
                 },
                 TerminalAction::Stop => if let Some(tx) = terminate.take() {
                     let _ = tx.send(());
+                    let _ = callback.send(Ok(()));
                 }
             },
             result = &mut process => {
@@ -699,7 +705,6 @@ async fn fernbedienung(
                             let _ = callback.send(Err(anyhow::anyhow!("Experiment has not been set up")));
                         }
                     },
-                    FernbedienungAction::GetKernelMessages => {},
                     FernbedienungAction::Identify => match argos_stop_tx.as_ref() {
                         Some(_) => {
                             let _ = callback.send(Err(anyhow::anyhow!("ARGoS is already running")));
@@ -812,9 +817,6 @@ pub async fn new(mut action_rx: Receiver) {
                         }
                     }
                 },
-                // upload is a separate action since we want to verify that this was successful before continuing
-                // these experiment actions should be local since we need to interact with the Xbee as well as Fernbedienung
-
                 Action::SetupExperiment(callback, id, software, journal) => match fernbedienung_tx.as_ref() {
                     Some(tx) => {
                         let action = FernbedienungAction::SetupExperiment(id, software, journal);

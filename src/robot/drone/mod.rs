@@ -9,16 +9,16 @@ pub use task::{
 
 pub struct Instance {
     pub action_tx: Sender,
-    task: JoinHandle<()>
+    _task: JoinHandle<()>
 }
 
 impl Default for Instance {
     fn default() -> Self {
         let (action_tx, action_rx) = mpsc::channel(8);
-        let task = tokio::spawn(task::new(action_rx));
+        let _task = tokio::spawn(task::new(action_rx));
         Self { 
             action_tx,
-            task
+            _task
         }
     }
 }
