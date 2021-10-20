@@ -1,15 +1,15 @@
-use tokio_stream::wrappers::UnboundedReceiverStream;
-use tokio_util::codec::{Decoder, Encoder, Framed};
+use anyhow::{Context, Result};
 use bytes::{BytesMut, Bytes, BufMut, Buf};
 use std::{io, collections::HashMap, sync::Arc, net::SocketAddr};
-use tokio::{net::{TcpListener, TcpStream}, sync::{Mutex, mpsc}};
-use futures::StreamExt;
 use log;
 use serde::Serialize;
 
-use std::mem::size_of;
+use tokio::{net::{TcpListener, TcpStream}, sync::{Mutex, broadcast, mpsc, oneshot}};
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::codec::{Decoder, Encoder, Framed};
+use futures::StreamExt;
 
-use crate::journal;
+use std::mem::size_of;
 
 const LUA_TNIL: i8 = 0;
 const LUA_TBOOLEAN: i8 = 1;
@@ -25,7 +25,7 @@ const LUA_TUSERDATA_VECTOR3: u8 = 2;
 const LUA_TUSERDATA_QUATERNION: u8 = 3;
 const MAX_MANTISSA: f64 = 9223372036854775806.0;
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(untagged)]
 pub enum LuaType {
     String(String),
@@ -37,66 +37,69 @@ pub enum LuaType {
     Table(Vec<(LuaType, LuaType)>),
 }
 
-#[derive(thiserror::Error, Debug)]
-enum Error {
-    #[error("Could not decode message")]
-    DecodeError,
-   
-    #[error(transparent)]
-    IoError(#[from] io::Error),
-}
-
-fn decode_lua_usertype(buf: &mut impl Buf) -> Result<LuaType, Error> {
+fn decode_lua_usertype(buf: &mut impl Buf) -> Result<LuaType> {
     if buf.has_remaining() {
         match buf.get_u8() {
-            LUA_TUSERDATA_VECTOR2 => decode_lua_vector2(buf),
-            LUA_TUSERDATA_VECTOR3 => decode_lua_vector3(buf),
-            LUA_TUSERDATA_QUATERNION => decode_lua_quaternion(buf),
-            _ => Err(Error::DecodeError)
+            LUA_TUSERDATA_VECTOR2 => decode_lua_vector2(buf)
+                .context("Could not decode vector2"),
+            LUA_TUSERDATA_VECTOR3 => decode_lua_vector3(buf)
+                .context("Could not decode vector3"),
+            LUA_TUSERDATA_QUATERNION => decode_lua_quaternion(buf)
+                .context("Could not decode quaternion"),
+            _ => Err(anyhow::anyhow!("Could not decode Lua user type"))
         }
     }
     else {
-        Err(Error::DecodeError)
+        Err(anyhow::anyhow!("Could not decode Lua user type"))
     }
 }
 
-fn decode_lua_vector2(buf: &mut impl Buf) -> Result<LuaType, Error> {
-    let x = decode_lua_number(buf)?;
-    let y = decode_lua_number(buf)?;
+fn decode_lua_vector2(buf: &mut impl Buf) -> Result<LuaType> {
+    let x = decode_lua_number(buf)
+        .context("Could not decode X")?;
+    let y = decode_lua_number(buf)
+        .context("Could not decode Y")?;
     match (x, y) {
         (LuaType::Number(x),
          LuaType::Number(y)) => Ok(LuaType::Vector2(x, y)),
-        _ => Err(Error::DecodeError)
+        _ => Err(anyhow::anyhow!("Either X or Y was not a Lua number"))
     }
 }
 
-fn decode_lua_vector3(buf: &mut impl Buf) -> Result<LuaType, Error> {
-    let x = decode_lua_number(buf)?;
-    let y = decode_lua_number(buf)?;
-    let z = decode_lua_number(buf)?;
+fn decode_lua_vector3(buf: &mut impl Buf) -> Result<LuaType> {
+    let x = decode_lua_number(buf)
+        .context("Could not decode X")?;
+    let y = decode_lua_number(buf)
+        .context("Could not decode Y")?;
+    let z = decode_lua_number(buf)
+        .context("Could not decode Z")?;
     match (x, y, z) {
         (LuaType::Number(x),
          LuaType::Number(y),
          LuaType::Number(z)) => Ok(LuaType::Vector3(x, y, z)),
-        _ => Err(Error::DecodeError)
+        _ => Err(anyhow::anyhow!("Either X, Y, or Z was not a Lua number"))
     }
 }
 
-fn decode_lua_quaternion(buf: &mut impl Buf) -> Result<LuaType, Error> {
-    let w = decode_lua_number(buf)?;
-    let x = decode_lua_number(buf)?;
-    let y = decode_lua_number(buf)?;
-    let z = decode_lua_number(buf)?;
+fn decode_lua_quaternion(buf: &mut impl Buf) -> Result<LuaType> {
+    let w = decode_lua_number(buf)
+        .context("Could not decode W")?;
+    let x = decode_lua_number(buf)
+        .context("Could not decode X")?;
+    let y = decode_lua_number(buf)
+        .context("Could not decode Y")?;
+    let z = decode_lua_number(buf)
+        .context("Could not decode Z")?;
     match (w, x, y, z) {
         (LuaType::Number(w),
          LuaType::Number(x),
          LuaType::Number(y),
          LuaType::Number(z)) => Ok(LuaType::Quaternion(w, x, y, z)),
-        _ => Err(Error::DecodeError)
+         _ => Err(anyhow::anyhow!("Either W, X, Y, or Z was not a Lua number"))
     }
 }
 
-fn decode_lua_number(buf: &mut impl Buf) -> Result<LuaType, Error> {
+fn decode_lua_number(buf: &mut impl Buf) -> Result<LuaType> {
     /* handle Carlo's unusual double encoding */
     if buf.remaining() > size_of::<u64>() + size_of::<u32>() {
         let mantissa = buf.get_i64();
@@ -116,11 +119,11 @@ fn decode_lua_number(buf: &mut impl Buf) -> Result<LuaType, Error> {
         }
     }
     else {
-        Err(Error::DecodeError)
+        Err(anyhow::anyhow!("Could not decode Lua number"))
     }
 }
 
-fn decode_lua_string(buf: &mut impl Buf) -> Result<LuaType, Error> {
+fn decode_lua_string(buf: &mut impl Buf) -> Result<LuaType> {
     /* extract C string */
     let mut data = Vec::new();
     while buf.has_remaining() {
@@ -130,11 +133,11 @@ fn decode_lua_string(buf: &mut impl Buf) -> Result<LuaType, Error> {
         }
     }
     String::from_utf8(data)
-        .map_err(|_| Error::DecodeError)
+        .map_err(|_| anyhow::anyhow!("Could not decode Lua string"))
         .map(|content| LuaType::String(content))
 }
 
-fn decode_lua_boolean(buf: &mut impl Buf) -> Result<LuaType, Error> {
+fn decode_lua_boolean(buf: &mut impl Buf) -> Result<LuaType> {
     if buf.has_remaining() {
         match buf.get_i8() {
             0 => Ok(LuaType::Boolean(false)),
@@ -142,11 +145,11 @@ fn decode_lua_boolean(buf: &mut impl Buf) -> Result<LuaType, Error> {
         }
     }
     else {
-        Err(Error::DecodeError)
+        Err(anyhow::anyhow!("Could not decode Lua boolean"))
     }
 }
 
-fn decode_lua_table(buf: &mut impl Buf) -> Result<LuaType, Error> {
+fn decode_lua_table(buf: &mut impl Buf) -> Result<LuaType> {
     let mut table = Vec::new();
     while buf.has_remaining() {
         /* parse the key */
@@ -157,7 +160,7 @@ fn decode_lua_table(buf: &mut impl Buf) -> Result<LuaType, Error> {
             LUA_TUSERDATA => decode_lua_usertype(buf),
             LUA_TTABLE => decode_lua_table(buf),
             LUA_TNIL => break,
-            _ => Err(Error::DecodeError),
+            _ => Err(anyhow::anyhow!("Could not decode key")),
         }?;
         if buf.has_remaining() {
             /* parse the value */
@@ -167,12 +170,12 @@ fn decode_lua_table(buf: &mut impl Buf) -> Result<LuaType, Error> {
                 LUA_TSTRING => decode_lua_string(buf),
                 LUA_TUSERDATA => decode_lua_usertype(buf),
                 LUA_TTABLE => decode_lua_table(buf),
-                _ => Err(Error::DecodeError),
+                _ => Err(anyhow::anyhow!("Could not decode value")),
             }?;
             table.push((key, value));
         }
         else {
-            return Err(Error::DecodeError);
+            anyhow::bail!("Could not decode value");
         }
     }
     Ok(LuaType::Table(table))
@@ -222,17 +225,18 @@ impl Encoder<Bytes> for ByteArrayCodec {
     }
 }
 
-type Peers = Arc<Mutex<HashMap<SocketAddr, mpsc::UnboundedSender<Bytes>>>>;
+type Peers = Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<Bytes>>>>;
 
 
 async fn client_handler(stream: TcpStream,
                         addr: SocketAddr,
                         peers: Peers,
-                        journal: mpsc::UnboundedSender<journal::Request>) {
-    log::info!("Robot {} connected to message router", addr);
+                        updates_tx: broadcast::Sender<(SocketAddr, LuaType)>) {
+    log::info!("connected to from {}", addr);
+
     /* set up a channel for communicating with other robot sockets */
-    let (tx, rx) = mpsc::unbounded_channel::<Bytes>();
-    let rx_stream = UnboundedReceiverStream::new(rx);
+    let (tx, rx) = mpsc::channel::<Bytes>(32);
+    let rx_stream = ReceiverStream::new(rx);
     /* wrap up socket in our ByteArrayCodec */
     let (sink, mut stream) = Framed::new(stream, ByteArrayCodec::default()).split();
     
@@ -241,11 +245,10 @@ async fn client_handler(stream: TcpStream,
     }
 
     /* send and receive messages concurrently */
-    let mut forward = rx_stream.map(|msg| Ok(msg)).forward(sink);
+    let mut forward = rx_stream.map(Result::Ok).forward(sink);
 
     loop {
         tokio::select! {
-            biased;
             Some(message) = stream.next() => match message {
                 Ok(mut message) => {
                     for (peer_addr, tx) in peers.lock().await.iter() {
@@ -255,10 +258,7 @@ async fn client_handler(stream: TcpStream,
                         }
                     }
                     if let Ok(decoded) = decode_lua_table(&mut message) {
-                        let event = journal::Event::Broadcast(addr, decoded);
-                        if let Err(error) = journal.send(journal::Request::Record(event)) {
-                            log::error!("Could not record event in journal: {}", error);
-                        }
+                        let _ = updates_tx.send((addr, decoded));
                     }
                 },
                 Err(_) => break
@@ -272,24 +272,40 @@ async fn client_handler(stream: TcpStream,
     log::info!("Robot {} disconnected from message router", addr);
 }
 
-pub async fn new(addr: SocketAddr, journal: mpsc::UnboundedSender<journal::Request>) -> io::Result<()> {
+pub enum Action {
+    Subscribe(oneshot::Sender<broadcast::Receiver<(SocketAddr, LuaType)>>),
+}
+
+pub async fn new(addr: SocketAddr, mut requests_rx: mpsc::Receiver<Action>) -> io::Result<()> {
+    
     let listener = TcpListener::bind(addr).await?;
     log::info!("Message router running on: {:?}", listener.local_addr());
     /* create an atomic map of all peers */
     let peers = Peers::default();
+    /* update channel (for the journal) */
+    let (updates_tx, _) = broadcast::channel(32);
     /* start the main loop */
     loop {
-        match listener.accept().await {
-            Ok((stream, addr)) => {
-                let journal = journal.clone();
-                let peers = Arc::clone(&peers);
-                /* spawn a handler for the newly connected client */
-                tokio::spawn(client_handler(stream, addr, peers, journal));
+        tokio::select! {
+            result = listener.accept() => match result {
+                Ok((stream, addr)) => {
+                    let peers = Arc::clone(&peers);
+                    /* spawn a handler for the newly connected client */
+                    tokio::spawn(client_handler(stream, addr, peers, updates_tx.clone()));
+                }
+                Err(err) => {
+                    log::error!("Error accepting incoming connection: {}", err);
+                }
+            },
+            request = requests_rx.recv() => match request {
+                Some(action) => match action {
+                    Action::Subscribe(callback) => {
+                        let _ = callback.send(updates_tx.subscribe());
+                    },
+                },
+                None => break,
             }
-            Err(err) => {
-                log::error!("Error accepting incoming connection: {}", err);
-            }
-        }   
+        }
     }
-    // Ok(())
+    Ok(())
 }

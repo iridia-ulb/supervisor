@@ -1,13 +1,13 @@
 use bytes::{BytesMut, Buf, BufMut};
 use bitvec::view::BitView;
-
-use futures::{SinkExt, stream::FuturesUnordered};
-use tokio::{net::UdpSocket, sync::{oneshot, mpsc}, time::Instant};
-use tokio_stream::StreamExt;
-use tokio_util::{codec::{Decoder, Encoder}, udp::UdpFramed};
-
+use futures::FutureExt;
+use futures::{StreamExt, TryStreamExt, SinkExt, stream::FuturesUnordered};
+use macaddr::MacAddr6;
+use std::fmt::Debug;
 use std::{collections::HashMap, convert::TryFrom, net::SocketAddr, ops::BitXor, time::Duration};
 use std::net::Ipv4Addr;
+use tokio::{net::UdpSocket, sync::{oneshot, mpsc}, time::Instant};
+use tokio_util::{codec::{Decoder, Encoder}, udp::UdpFramed};
 
 const CONFIG_CMD_LEN: usize = 12;
 const CONFIG_CMD_HDR: u16 = 0x4242;
@@ -52,7 +52,7 @@ pub enum PinMode {
     //OutputDefaultHigh = 5,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub enum Pin {
     DIO0 = 0,
     DIO1 = 1,
@@ -123,8 +123,23 @@ pub type Result<T> = std::result::Result<T, Error>;
 struct Codec;
 
 pub struct Device {
-    request_tx: mpsc::UnboundedSender<Request>,
-    pub addr: Ipv4Addr
+    pub addr: Ipv4Addr,
+    request_tx: mpsc::Sender<Request>,
+    return_addr_tx: Option<oneshot::Sender<Ipv4Addr>>,
+}
+
+impl Debug for Device {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Xbee@{}", self.addr)
+    }
+}
+
+impl Drop for Device {
+    fn drop(&mut self) {
+        if let Some(return_addr_tx) = self.return_addr_tx.take() {
+            let _ = return_addr_tx.send(self.addr);
+        }
+    }
 }
 
 enum Request {
@@ -215,12 +230,15 @@ impl Decoder for Codec {
 }
 
 impl Device {
-    pub async fn new(addr: Ipv4Addr, return_addr_tx: mpsc::UnboundedSender<Ipv4Addr>) -> Result<Device> {
+    pub async fn new(addr: Ipv4Addr, return_addr_tx: oneshot::Sender<Ipv4Addr>) -> Result<Device> {
         type RemoteRequest = (Instant, Option<oneshot::Sender<Result<BytesMut>>>, Command, usize);
         /* bind to a random port on any interface */
-        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
-        let (request_tx, mut request_rx) = mpsc::unbounded_channel();
+        let (request_tx, mut request_rx) = mpsc::channel(8);
         tokio::spawn(async move {
+            let socket = match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await {
+                Ok(socket) => socket,
+                Err(_) => return,
+            };
             let socket_addr = SocketAddr::new(addr.into(), 0xBEE);
             let mut framed = UdpFramed::new(socket, Codec);
             let mut remote_requests: HashMap<u8, RemoteRequest> = HashMap::new();
@@ -304,40 +322,54 @@ impl Device {
                                 }
                             }
                         },
-                        /* this should cause this task to shutdown as soon as Device is dropped */
-                        None => {
-                            let _ = return_addr_tx.send(addr);
-                            break
-                        },
+                        /* When Device is dropped the mpsc::Sender is closed  */
+                        None => break,
                     }
                 }
             }
         });
-        Ok(Device { request_tx, addr })
+        Ok(Device { request_tx, addr, return_addr_tx: Some(return_addr_tx) })
     }
 
-    pub async fn ip(&self) -> Result<Ipv4Addr> {
+    // pub async fn ip(&self) -> Result<Ipv4Addr> {
+    //     let (response_tx, response_rx) = oneshot::channel();
+    //     let request = Request::GetParameter([b'M',b'Y'], response_tx);
+    //     self.request_tx.send(request).await.map_err(|_| Error::RequestFailed)?;
+    //     let value = response_rx.await.map_err(|_| Error::NoResponse)??;
+    //     <[u8; 4]>::try_from(&value[..])
+    //         .map_err(|_| Error::DecodeError)
+    //         .map(|addr| Ipv4Addr::from(addr))
+    // }
+
+    pub async fn mac(&self) -> Result<MacAddr6> {
+        /* get the upper 16 bits */
         let (response_tx, response_rx) = oneshot::channel();
-        let request = Request::GetParameter([b'M',b'Y'], response_tx);
-        self.request_tx.send(request).map_err(|_| Error::RequestFailed)?;
-        let value = response_rx.await.map_err(|_| Error::NoResponse)??;
-        <[u8; 4]>::try_from(&value[..])
+        let request = Request::GetParameter([b'S',b'H'], response_tx);
+        self.request_tx.send(request).await.map_err(|_| Error::RequestFailed)?;
+        let mut value = response_rx.await.map_err(|_| Error::NoResponse)??;
+        /* get the lower 32 bits */
+        let (response_tx, response_rx) = oneshot::channel();
+        let request = Request::GetParameter([b'S',b'L'], response_tx);
+        self.request_tx.send(request).await.map_err(|_| Error::RequestFailed)?;
+        value.extend_from_slice(&response_rx.await.map_err(|_| Error::NoResponse)??);
+        /* try build a MacAddr6 from the responses */
+        <[u8; 6]>::try_from(&value[..])
             .map_err(|_| Error::DecodeError)
-            .map(|addr| Ipv4Addr::from(addr))
+            .map(|addr| MacAddr6::from(addr))
     }
 
     pub async fn link_margin(&self) -> Result<i32> {
         let (response_tx, response_rx) = oneshot::channel();
         let request = Request::GetParameter([b'L',b'M'], response_tx);
-        self.request_tx.send(request).map_err(|_| Error::RequestFailed)?;
+        self.request_tx.send(request).await.map_err(|_| Error::RequestFailed)?;
         let value = response_rx.await.map_err(|_| Error::NoResponse)??;
         value.first().cloned().map(|state| state as i32).ok_or(Error::DecodeError)
     }
 
-    pub async fn pin_states(&self) -> Result<Vec<(Pin, bool)>> {
+    pub async fn pin_states(&self) -> Result<HashMap<Pin, bool>> {
         let (response_tx, response_rx) = oneshot::channel();
         let request = Request::GetParameter([b'I',b'S'], response_tx);
-        self.request_tx.send(request).map_err(|_| Error::RequestFailed)?;
+        self.request_tx.send(request).await.map_err(|_| Error::RequestFailed)?;
         let mut value = response_rx.await.map_err(|_| Error::NoResponse)??;
         if value.len() < SAMPLE_CMD_RESP_LEN {
             return Err(Error::DecodeError);
@@ -351,14 +383,14 @@ impl Device {
             let digital_samples = digital_samples.view_bits::<bitvec::order::Lsb0>();
             digital_mask.iter_ones().map(|index| {
                 <Pin>::try_from(index).map(|pin| (pin, digital_samples[index]))
-            }).collect::<Result<Vec<_>>>()
+            }).collect::<Result<HashMap<_,_>>>()
         }
         else {
             Err(Error::DecodeError)
         }
     }
 
-    pub async fn write_outputs(&self, config: Vec<(Pin, bool)>) -> Result<()> {
+    pub async fn write_outputs(&self, config: &[(Pin, bool)]) -> Result<()> {
         let mut om_config: u16 = 0;
         let mut io_config: u16 = 0;
         for (pin, mode) in config.iter() {
@@ -374,20 +406,20 @@ impl Device {
             [b'O', b'M'], 
             BytesMut::from(&om_config.to_be_bytes()[..]),
             true
-        )).map_err(|_| Error::RequestFailed)?;
+        )).await.map_err(|_| Error::RequestFailed)?;
         self.request_tx.send(Request::SetParameter(
             [b'I', b'O'],
             BytesMut::from(&io_config.to_be_bytes()[..]),
             false
-        )).map_err(|_| Error::RequestFailed)?;
+        )).await.map_err(|_| Error::RequestFailed)?;
 
         /* read back the pin states */
         let pin_states = self.pin_states().await?;
         /* check if they were set correctly */
         for (target_pin, target_mode) in config.iter() {
-            pin_states.iter().find(|(pin, _)| pin == target_pin)
+            pin_states.get(target_pin)
                 .ok_or(Error::RequestFailed)
-                .and_then(|(_, mode)| match target_mode == mode {
+                .and_then(|mode| match target_mode == mode {
                     true => Ok(()),
                     false => Err(Error::RequestFailed)
                 })?;
@@ -395,44 +427,53 @@ impl Device {
         Ok(())
     }
 
-    pub async fn set_pin_modes(&self, modes: Vec<(Pin, PinMode)>) -> Result<()> {
-        for (pin, mode) in modes.iter() {
-            let request = 
-                Request::SetParameter(<[u8; 2]>::from(*pin),
-                                      BytesMut::from(&[*mode as u8][..]),
-                                      true);
-            self.request_tx.send(request).map_err(|_| Error::RequestFailed)?
-        }
-        self.request_tx.send(Request::ApplyChanges).map_err(|_| Error::RequestFailed)?;
+    pub async fn set_pin_modes<'m, M>(&self, modes: M) -> Result<()>
+        where M: Iterator<Item = &'m (Pin, PinMode)> {
+        /* send pin configurations */
+        let configuration = modes
+            .map(|&(pin, mode)| {
+                let request = Request::SetParameter(
+                    <[u8; 2]>::from(pin),
+                    BytesMut::from(&[mode as u8][..]),
+                    true
+                );
+                self.request_tx.send(request).map(move |result| match result {
+                    Ok(_) => Ok((pin, mode)),
+                    Err(_) => Err(Error::RequestFailed)
+                })
+            })
+            .collect::<FuturesUnordered<_>>()
+            .try_collect::<Vec<_>>().await?;
+        /* apply changes */
+        self.request_tx.send(Request::ApplyChanges).await
+            .map_err(|_| Error::RequestFailed)?;
         /* check if the modes were actually applied */
-        modes.into_iter()
+        configuration.into_iter()
             .map(|(pin, mode)| {
                 let (response_tx, response_rx) = oneshot::channel();
                 let request = Request::GetParameter(<[u8; 2]>::from(pin), response_tx);
                 let result = self.request_tx.send(request);
                 async move {
-                    (match result {
-                        Ok(_) => response_rx.await
-                            .map_err(|_| Error::RequestFailed)
-                            .and_then(|inner| inner),
-                        Err(_) => Err(Error::RequestFailed)
-                    }, mode)
+                    match result.await {
+                        Ok(_) => match response_rx.await {
+                            Ok(response) => match response {
+                                Ok(mut response) => match response.has_remaining() {
+                                    true => match response.get_u8() == mode as u8 {
+                                        true => Ok(()),
+                                        _ => Err(Error::RequestFailed) 
+                                    },
+                                    _ => Err(Error::RequestFailed)
+                                },
+                                Err(error) => Err(error)
+                            },
+                            Err(_) => Err(Error::RequestFailed),
+                        },
+                        Err(_) => Err(Error::RequestFailed),
+                    }
                 }
             })
             .collect::<FuturesUnordered<_>>()
-            .collect::<Vec<_>>().await.into_iter()
-            .map(|(response, target_mode)| response
-                .and_then(|mut response| {
-                    match response.len() {
-                        1 => match response.get_u8() == target_mode as u8 {
-                            true => Ok(()),
-                            false => Err(Error::RequestFailed)
-                        },
-                        _ => Err(Error::RequestFailed)
-                    }
-                })
-            )
-            .collect::<Result<Vec<_>>>()
+            .try_collect::<Vec<_>>().await
             .map(|_| ())
     }
 
@@ -441,10 +482,10 @@ impl Device {
             [b'I', b'P'],
             BytesMut::from(&(tcp as u8).to_be_bytes()[..]),
             false
-        )).map_err(|_| Error::RequestFailed)?;
+        )).await.map_err(|_| Error::RequestFailed)?;
         let (response_tx, response_rx) = oneshot::channel();
         let request = Request::GetParameter([b'I',b'P'], response_tx);
-        self.request_tx.send(request).map_err(|_| Error::RequestFailed)?;
+        self.request_tx.send(request).await.map_err(|_| Error::RequestFailed)?;
         let mut response = response_rx.await.map_err(|_| Error::NoResponse)??;
         match response.len() {
             1 => match response.get_u8() == (tcp as u8) {
@@ -460,10 +501,10 @@ impl Device {
             [b'B', b'D'],
             BytesMut::from(&baud_rate.to_be_bytes()[..]),
             false
-        )).map_err(|_| Error::RequestFailed)?;
+        )).await.map_err(|_| Error::RequestFailed)?;
         let (response_tx, response_rx) = oneshot::channel();
         let request = Request::GetParameter([b'B',b'D'], response_tx);
-        self.request_tx.send(request).map_err(|_| Error::RequestFailed)?;
+        self.request_tx.send(request).await.map_err(|_| Error::RequestFailed)?;
         let mut response = response_rx.await.map_err(|_| Error::NoResponse)??;
         match response.len() {
             4 => {

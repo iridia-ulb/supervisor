@@ -1,14 +1,33 @@
 pub mod drone;
 pub mod pipuck;
 
-#[derive(thiserror::Error, Debug)]
-pub enum Error {
-    #[error(transparent)]
-    NetworkError(#[from] crate::network::fernbedienung::Error),
+use shared::experiment::software::Software;
+use tokio::sync::mpsc;
+use crate::journal;
 
-    #[error(transparent)]
-    PiPuckError(#[from] pipuck::Error),
+#[derive(Debug)]
+pub enum FernbedienungAction {
+    Halt,
+    Reboot,
+    Bash(TerminalAction),
+    SetCameraStream(bool),
+    SetupExperiment(String, Software, mpsc::Sender<journal::Action>),
+    StartExperiment,
+    StopExperiment,
+    Identify,
+}
 
-    #[error(transparent)]
-    DroneError(#[from] drone::Error),
+#[derive(Debug)]
+pub enum XbeeAction {
+    SetAutonomousMode(bool),
+    SetUpCorePower(bool),
+    SetPixhawkPower(bool),
+    Mavlink(TerminalAction),
+}
+
+#[derive(Debug)]
+pub enum TerminalAction {
+    Start,
+    Run(String),
+    Stop,
 }

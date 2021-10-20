@@ -1,3 +1,4 @@
+/client/target
 /target
 Cargo.lock
 /.vscode
