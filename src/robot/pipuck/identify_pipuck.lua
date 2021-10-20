@@ -1,13 +1,10 @@
 function init()
    robot.leds.set_ring_leds(true)
-   count = 0
+   robot.leds.set_body_led(false)
+   robot.leds.set_front_led(false)
 end
 
 function step()
-   count = count + 1
-   if count == 3 then
-      robot.leds.set_ring_leds(false)
-   end
 end
 
 function reset()

@@ -98,7 +98,7 @@ async fn handle_client(
                         }
                     }
                 });
-            /* send the add drone messages first, then stream the pipuck updates */
+            /* send the add pipuck messages first, then stream the pipuck updates */
             stream::iter(add_pipuck_messages).chain(update_pipuck_messages)
                 .map(|message| bincode::serialize(&message)
                     .context("Could not serialize Pi-Puck message"))

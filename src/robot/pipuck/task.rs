@@ -429,7 +429,6 @@ pub async fn new(mut action_rx: Receiver) {
     /* updates_tx is for sending changes in state to subscribers (e.g., the webui) */
     let (updates_tx, _) = broadcast::channel(16);
     
-
     // TODO: for a clean shutdown we may want to consider the case where updates_tx hangs up
     loop {
         tokio::select! {

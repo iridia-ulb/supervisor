@@ -229,9 +229,13 @@ impl Component for UserInterface {
                                             <drone::Card key=id.clone() instance=drone.clone() parent=self.link.clone() />
                                         </div>
                                     }).collect::<Html>(),
-                                Tab::PiPucks => {
-                                    html! {}
-                                },
+                                Tab::PiPucks => self.pipucks
+                                    .iter()
+                                    .map(|(id, pipuck)| html! {
+                                        <div class="column is-full-mobile is-full-tablet is-full-desktop is-half-widescreen is-one-third-fullhd">
+                                            <pipuck::Card key=id.clone() instance=pipuck.clone() parent=self.link.clone() />
+                                        </div>
+                                    }).collect::<Html>(),
                                 Tab::Experiment => html! {
                                     <experiment::Interface parent=self.link.clone()
                                         drone_software=self.drone_software.clone()
