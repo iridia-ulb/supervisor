@@ -43,8 +43,8 @@ fn fernbedienung_link_strength_stream<'dev>(
         let mut attempts : u8 = 0;
         loop {
             let link_strength_task = tokio::time::timeout(Duration::from_millis(500), device.link_strength()).await
-                .context("Timeout while communicating with Up Core")
-                .and_then(|result| result.context("Could not communicate with Up Core"));
+                .context("Timeout while communicating with Raspberry Pi")
+                .and_then(|result| result.context("Could not communicate with Raspberry Pi"));
             match link_strength_task {
                 Ok(response) => {
                     attempts = 0;
@@ -119,12 +119,10 @@ async fn bash(
             }
             Some(stdout) = stdout.next() => {
                 let update = Update::Bash(String::from_utf8_lossy(&stdout).into_owned());
-                log::info!("{:?}", update);
                 let _ = updates_tx.send(update);
             },
             Some(stderr) = stderr.next() => {
                 let update = Update::Bash(String::from_utf8_lossy(&stderr).into_owned());
-                log::info!("{:?}", update);
                 let _ = updates_tx.send(update);
             },
         }
