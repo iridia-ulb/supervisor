@@ -31,6 +31,32 @@ class Drone:
             print('[error] could not decode logerr')
             return None
 
+class PiPuck:
+   def __init__(self, rpi_macaddr, apriltag_id, optitrack_id):
+         self.rpi_macaddr = rpi_macaddr
+         self.apriltag_id = apriltag_id
+         self.optitrack_id = optitrack_id
+         self.optitrack_data = None
+         self.argos_log = None
+         self.argos_logerr = None
+         self.argos_socketaddr = None
+         self.messages = None
+         
+   def log_as_utf8(self):
+         try:
+            return self.argos_log.decode()
+         except UnicodeDecodeError:
+            print('[error] could not decode log')
+            return None
+
+   def logerr_as_utf8(self):
+         try:
+            return self.argos_logerr.decode()
+         except UnicodeDecodeError:
+            print('[error] could not decode logerr')
+            return None
+
+
 # global dictionary of pipuck (indexed by robot id)
 pipucks = {}
 # global dictionary of drone (indexed by robot id)
@@ -64,11 +90,11 @@ while True:
       elif event_type == 'Descriptors':
          # note: this message should only be present once
          pipucks = {
-            pipuck['id']: {
-                  'rpi_macaddr': pipuck['rpi_macaddr'],
-                  'optitrack_id': pipuck['optitrack_id'],
-                  'apriltag_id': pipuck['apriltag_id']
-            } for pipuck in event[0]
+            pipuck['id']: PiPuck(
+                  pipuck['rpi_macaddr'],
+                  pipuck['apriltag_id'],
+                  pipuck['optitrack_id']
+             ) for pipuck in event[0]
          }
          drones = {
             drone['id']: Drone(
@@ -125,3 +151,26 @@ for drone_id, drone_obj in drones.items():
    # get the tracking system data
    if drone_obj.optitrack_id in tracking_system:
       drone_obj.optitrack_data = tracking_system[drone_obj.optitrack_id]
+
+
+# build data structures for the PiPucks
+for pipuck_id, pipuck_obj in pipucks.items():
+   # check if there is log data to be added
+   if pipuck_id in argos_logs:
+      pipuck_obj.argos_log = argos_logs[pipuck_id]['stdout']
+      pipuck_obj.argos_logerr = argos_logs[pipuck_id]['stderr']
+   else:
+      print('[warning] no logs found for ' + pipuck_id)
+   # extract the local socket address from the logs
+   match = socket_regex.search(pipuck_obj.log_as_utf8())
+   if match:
+      pipuck_obj.socketaddr = match.group(1)
+      if pipuck_obj.socketaddr in messages:
+         pipuck_obj.messages = messages[pipuck_obj.socketaddr]
+      else:
+         print('[warning] no messages found for ' + pipuck_id)
+   else:
+      print('[warning] ARGoS did not report the socket address for ' + drone_id)
+   # get the tracking system data
+   if pipuck_obj.optitrack_id in tracking_system:
+      pipuck_obj.optitrack_data = tracking_system[pipuck_obj.optitrack_id]
