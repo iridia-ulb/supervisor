@@ -55,6 +55,8 @@ pub struct Upload {
 
 #[derive(Debug, Serialize)]
 pub enum RequestKind {
+    Halt,
+    Reboot,
     Upload(Upload),
     Process(process::Request),
 }

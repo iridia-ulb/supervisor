@@ -2,7 +2,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::codec::{Decoder, Encoder, Framed};
 use bytes::{BytesMut, Bytes, BufMut, Buf};
 use std::{io, collections::HashMap, sync::Arc, net::SocketAddr};
-use tokio::{net::TcpListener, sync::{mpsc, RwLock}};
+use tokio::{net::{TcpListener, TcpStream}, sync::{Mutex, mpsc}};
 use futures::StreamExt;
 use log;
 use serde::Serialize;
@@ -178,8 +178,6 @@ fn decode_lua_table(buf: &mut impl Buf) -> Result<LuaType, Error> {
     Ok(LuaType::Table(table))
 }
 
-
-
 #[derive(Debug, Default)]
 struct ByteArrayCodec {
     len: Option<usize>
@@ -190,15 +188,23 @@ impl Decoder for ByteArrayCodec {
     type Error = io::Error;
 
     fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Bytes>, io::Error> {
-        if let Some(len) = self.len {
-            if buf.len() >= len {
-                self.len = None;
-                return Ok(Some(buf.split_to(len).freeze()));
+        loop {
+            if let Some(len) = self.len {
+                if buf.len() >= len {
+                    self.len = None;
+                    return Ok(Some(buf.split_to(len).freeze()));
+                }
+                else {
+                    break;
+                }
             }
-        }
-        else {
-            if buf.len() >= 4 {
-                self.len = Some(buf.get_u32() as usize);
+            else {
+                if buf.len() >= 4 {
+                    self.len = Some(buf.get_u32() as usize);
+                }
+                else {
+                    break;
+                }
             }
         }
         Ok(None)
@@ -216,11 +222,58 @@ impl Encoder<Bytes> for ByteArrayCodec {
     }
 }
 
-type Peers = Arc<RwLock<HashMap<SocketAddr, mpsc::UnboundedSender<Bytes>>>>;
+type Peers = Arc<Mutex<HashMap<SocketAddr, mpsc::UnboundedSender<Bytes>>>>;
 
-pub async fn new(bind_to_addr: SocketAddr,
-                 journal_requests_tx: &mpsc::UnboundedSender<journal::Request>) -> io::Result<()> {
-    let listener = TcpListener::bind(bind_to_addr).await?;
+
+async fn client_handler(stream: TcpStream,
+                        addr: SocketAddr,
+                        peers: Peers,
+                        journal: mpsc::UnboundedSender<journal::Request>) {
+    log::info!("Robot {} connected to message router", addr);
+    /* set up a channel for communicating with other robot sockets */
+    let (tx, rx) = mpsc::unbounded_channel::<Bytes>();
+    let rx_stream = UnboundedReceiverStream::new(rx);
+    /* wrap up socket in our ByteArrayCodec */
+    let (sink, mut stream) = Framed::new(stream, ByteArrayCodec::default()).split();
+    
+    {
+        peers.lock().await.insert(addr, tx);
+    }
+
+    /* send and receive messages concurrently */
+    let mut forward = rx_stream.map(|msg| Ok(msg)).forward(sink);
+
+    loop {
+        tokio::select! {
+            biased;
+            Some(message) = stream.next() => match message {
+                Ok(mut message) => {
+                    for (peer_addr, tx) in peers.lock().await.iter() {
+                        /* do not send messages to the sending robot */   
+                        if peer_addr != &addr {
+                            let _ = tx.send(message.clone());
+                        }
+                    }
+                    if let Ok(decoded) = decode_lua_table(&mut message) {
+                        let event = journal::Event::Broadcast(addr, decoded);
+                        if let Err(error) = journal.send(journal::Request::Record(event)) {
+                            log::error!("Could not record event in journal: {}", error);
+                        }
+                    }
+                },
+                Err(_) => break
+            },
+            _ = &mut forward => break
+        }
+    }
+    {
+        peers.lock().await.remove(&addr);
+    }
+    log::info!("Robot {} disconnected from message router", addr);
+}
+
+pub async fn new(addr: SocketAddr, journal: mpsc::UnboundedSender<journal::Request>) -> io::Result<()> {
+    let listener = TcpListener::bind(addr).await?;
     log::info!("Message router running on: {:?}", listener.local_addr());
     /* create an atomic map of all peers */
     let peers = Peers::default();
@@ -228,45 +281,10 @@ pub async fn new(bind_to_addr: SocketAddr,
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
-                /* clone journal_requests_tx  */
-                let journal_requests_tx = journal_requests_tx.clone();
-                /* clone peers */
+                let journal = journal.clone();
                 let peers = Arc::clone(&peers);
                 /* spawn a handler for the newly connected client */
-                tokio::spawn(async move {
-                    log::info!("Robot {} connected to message router", addr);
-                    /* set up a channel for communicating with other robot sockets */
-                    let (tx, rx) = mpsc::unbounded_channel::<Bytes>();
-                    let rx_stream = UnboundedReceiverStream::new(rx);
-                    /* wrap up socket in our ByteArrayCodec */
-                    let (sink, mut stream) = 
-                        Framed::new(stream, ByteArrayCodec::default()).split();
-                    /* send and receive messages concurrently */
-                    let _ = tokio::join!(rx_stream.map(|msg| Ok(msg)).forward(sink), async {
-                        peers.write().await.insert(addr, tx);
-                        while let Some(message) = stream.next().await {
-                            match message {
-                                Ok(mut message) => {
-                                    for (peer_addr, tx) in peers.read().await.iter() {
-                                        /* do not send messages to the sending robot */   
-                                        if peer_addr != &addr {
-                                            let _ = tx.send(message.clone());
-                                        }
-                                    }
-                                    if let Ok(decoded) = decode_lua_table(&mut message) {
-                                        let event = journal::Event::Broadcast(addr, decoded);
-                                        if let Err(error) = journal_requests_tx.send(journal::Request::Record(event)) {
-                                            log::error!("Could not record event in journal: {}", error);
-                                        }
-                                    }
-                                },
-                                Err(_) => break
-                            }
-                        }
-                        peers.write().await.remove(&addr);
-                    });
-                    log::info!("Robot {} disconnected from message router", addr);
-                });
+                tokio::spawn(client_handler(stream, addr, peers, journal));
             }
             Err(err) => {
                 log::error!("Error accepting incoming connection: {}", err);

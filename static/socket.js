@@ -109,22 +109,17 @@ function contentToHTML(content) {
       container.appendChild(table);
       return container;
    }
-   /* 
-   else if(content.list != null) {
-      var list = document.createElement('ul');
-      list.setAttribute('class', 'mdl-list');
-      for(var item of content.List) {
-         var listItem = document.createElement('li');
-         listItem.setAttribute('class', 'mdl-list__item');
-         var span = document.createElement('span');
-         span.setAttribute('class', 'mdl-list__item-primary-content');
-         span.appendChild(contentToHTML(item));
-         listItem.appendChild(span);
-         list.appendChild(listItem);
-      }
-      return list; // element
+   else if(content.download != null) {
+      // content.download is a base64 encoded string
+      var link = document.createElement('a');
+      link.href = 
+         'data:application/octet-stream;base64,' +
+         content.download.data;
+      link.download = content.download.filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
    }
-   */
    else {
       alert('Cannot convert content to HTML');
    }

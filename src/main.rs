@@ -33,7 +33,7 @@ async fn main() {
     let options = Options::from_args();
     /* initialize the logger */
     let environment = env_logger::Env::default().default_filter_or("mns_supervisor=info");
-    env_logger::Builder::from_env(environment).init();
+    env_logger::Builder::from_env(environment).format_timestamp_millis().init();
     /* create a task for tracking the robots and state of the experiment */
     let (arena_requests_tx, arena_requests_rx) = mpsc::unbounded_channel();
     let (journal_requests_tx, journal_requests_rx) = mpsc::unbounded_channel();
@@ -47,7 +47,7 @@ async fn main() {
     let network_task = network::new(options.network, &arena_requests_tx);
     /* create message router task */
     let message_router_addr : SocketAddr = (Ipv4Addr::UNSPECIFIED, 4950).into();
-    let router_task = router::new(message_router_addr, &journal_requests_tx);
+    let router_task = router::new(message_router_addr, journal_requests_tx.clone());
     /* create webui task */
     /* clone arena requests tx for moving into the closure */
     let arena_requests_tx = arena_requests_tx.clone();
@@ -67,10 +67,10 @@ async fn main() {
     tokio::pin!(arena_task);
     tokio::pin!(journal_task);
     tokio::pin!(network_task);
-    tokio::pin!(router_task);
     tokio::pin!(webui_task);
     tokio::pin!(sigint_task);
 
+    let mut router_task = tokio::spawn(router_task);
     /* no point in implementing automatic browser opening */
     /* https://bugzilla.mozilla.org/show_bug.cgi?id=1512438 */
     let server_addr = format!("http://{}/", server_addr);

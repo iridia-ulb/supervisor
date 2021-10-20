@@ -54,6 +54,10 @@ enum Content {
         header: Vec<String>,
         rows: Vec<Vec<String>>
     },
+    Download  {
+        data: String,
+        filename: String,
+    },
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -456,15 +460,27 @@ async fn connections_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request
             span: 4,
             title: String::from("Pi-Puck"),
             content: vec![
+                Content::Text("Overview".to_owned()),
                 Content::Table {
-                    header: vec!["Unique Identifier".to_owned(), "Raspberry Pi".to_owned(), "Battery".to_owned()],
-                    rows: vec![vec![uuid.to_string(), format!("{} {}", match state.rpi.1 + 90 {
-                        25..=49  => WIFI2_IMG,
-                        50..=74  => WIFI3_IMG,
-                        75..=100  => WIFI4_IMG,
-                        _ => WIFI1_IMG,
-                    }, state.rpi.0), "(not implemented)".to_owned()]]
-                }, 
+                    header: vec!["Unique Identifier".to_owned(), "Battery".to_owned()],
+                    rows: vec![vec![uuid.to_string(), "TODO".to_owned()]]
+                },
+                Content::Text("Connectivity".to_owned()),
+                Content::Table {
+                    header: vec!["Device".to_owned(), "IP Address".to_owned(), "Signal Strength".to_owned()],
+                    rows: vec![
+                        vec![
+                            "Raspberry Pi".to_owned(),
+                            state.rpi.0.to_string(),
+                            format!("{}", match state.rpi.1 + 90 {
+                                25..=49  => WIFI2_IMG,
+                                50..=74  => WIFI3_IMG,
+                                75..=100 => WIFI4_IMG,
+                                _ => WIFI1_IMG,
+                            })
+                        ]
+                    ]
+                }
             ],
             actions: state.actions.into_iter().map(Action::PiPuck).collect(),
         };
@@ -476,44 +492,77 @@ async fn connections_tab(arena_request_tx: &mpsc::UnboundedSender<arena::Request
                 .collect::<String>();
             card.content.push(Content::Text(camera_frames));
         }
+        if let Some(kernel_messages) = state.kernel_messages {
+            let data = base64::encode(kernel_messages.as_bytes());
+            card.content.push(Content::Download { data, filename: "kernel_messages.txt".to_owned() } );
+        }
         cards.push(card);
     }
     /* generate drone cards */
     for (uuid, state) in drones.into_iter() {
+        let mut content = vec![
+            Content::Text("Overview".to_owned()),
+            Content::Table {
+                header: vec!["Unique Identifier".to_owned(), "Battery".to_owned()],
+                rows: vec![
+                    vec![
+                        uuid.to_string(),
+                        match state.battery_remaining {
+                            25..=49  => BATT2_IMG,
+                            50..=74  => BATT3_IMG,
+                            75..=100 => BATT4_IMG,
+                            _ => BATT1_IMG,
+                        }.to_owned()
+                    ]
+                ]
+            },
+            Content::Text("Connectivity".to_owned()),
+            Content::Table {
+                header: vec!["Device".to_owned(), "IP Address".to_owned(), "Signal Strength".to_owned()],
+                rows: vec![
+                    vec![
+                        "Xbee".to_owned(),
+                        state.xbee.0.to_string(),
+                        format!("{}", match state.xbee.1 {
+                            25..=49  => WIFI2_IMG,
+                            50..=74  => WIFI3_IMG,
+                            75..=100 => WIFI4_IMG,
+                            _ => WIFI1_IMG,
+                        })
+                    ],
+                ]
+            },
+            Content::Text("Sensors and actuators".to_owned()),
+            Content::Table {
+                header: vec!["Device".to_owned(), "Location".to_owned()],
+                rows: state.devices.into_iter().map(|(left, right)| vec![left, right]).collect()
+            },
+        ];
+        if let Some(upcore) = state.upcore {
+            let upcore = vec![
+                "UP Core".to_owned(),
+                upcore.0.to_string(),
+                match upcore.1 + 90 {
+                    25..=49  => WIFI2_IMG,
+                    50..=74  => WIFI3_IMG,
+                    75..=100 => WIFI4_IMG,
+                    _ => WIFI1_IMG,
+                }.to_owned()
+            ];
+            /* the third index (fourth entry) should be the connectivity table */
+            if let Some(Content::Table{rows, ..}) = content.get_mut(3) {
+                rows.push(upcore);
+            }
+        }
+        if let Some(kernel_messages) = state.kernel_messages {
+            let data = base64::encode(kernel_messages.as_bytes());
+            content.push(Content::Download { data, filename: "kernel_messages.txt".to_owned() } );
+        }
         let mut card = Card {
             uuid: uuid,
             span: 4,
             title: String::from("Drone"),
-            content: vec![
-                Content::Table {
-                    header: vec!["Unique Identifier".to_owned(), "Xbee".to_owned(), "UP Core".to_owned(), "Battery".to_owned()],
-                    rows: vec![
-                        vec![
-                            uuid.to_string(),
-                            format!("{} {}", match state.xbee.1 {
-                                25..=49  => WIFI2_IMG,
-                                50..=74  => WIFI3_IMG,
-                                75..=100 => WIFI4_IMG,
-                                _ => WIFI1_IMG,
-                            }, state.xbee.0),
-                            state.upcore.map_or_else(|| "-".to_owned(), |upcore| {
-                                format!("{} {}", match upcore.1 + 90 {
-                                    25..=49  => WIFI2_IMG,
-                                    50..=74  => WIFI3_IMG,
-                                    75..=100 => WIFI4_IMG,
-                                    _ => WIFI1_IMG,
-                                }, upcore.0)
-                            }),
-                            match state.battery_remaining {
-                                25..=49  => BATT2_IMG,
-                                50..=74  => BATT3_IMG,
-                                75..=100 => BATT4_IMG,
-                                _ => BATT1_IMG,
-                            }.to_owned()
-                        ]
-                    ]
-                },
-            ],
+            content: content,
             actions: state.actions.into_iter().map(Action::Drone).collect(),
         };
         if state.cameras.len() > 0 {

@@ -27,6 +27,7 @@ pub struct State {
     pub rpi: (Ipv4Addr, i32),
     pub cameras: Vec<Bytes>,
     pub actions: Vec<Action>,
+    pub kernel_messages: Option<String>,
 }
 
 pub enum Request {
@@ -53,6 +54,8 @@ pub enum Action {
     StartCameraStream,
     #[serde(rename = "Stop camera stream")]
     StopCameraStream,
+    #[serde(rename = "Get kernel messages")]
+    GetKernelMessages,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -91,6 +94,8 @@ pub async fn new(uuid: Uuid, mut arena_rx: Receiver, device: fernbedienung::Devi
     let poll_rpi_link_strength_task = poll_rpi_link_strength(&device);
     tokio::pin!(poll_rpi_link_strength_task);
     let mut rpi_link_strength = -100;
+
+    let mut kernel_messages = None;
 
     let mut rpi_camera_stream = futures::stream::pending().left_stream();
     let mut rpi_camera_stream_stop_tx = None;
@@ -140,11 +145,15 @@ pub async fn new(uuid: Uuid, mut arena_rx: Receiver, device: fernbedienung::Devi
                     Request::State(callback) => {
                         let state = State {
                             rpi: (device.addr, rpi_link_strength),
-                            actions: vec![Action::RpiHalt, Action::RpiReboot, match *rpi_camera_task {
-                                Either::Left(_) => Action::StartCameraStream,
-                                Either::Right(_) => Action::StopCameraStream
-                            }],
+                            actions: vec![
+                                Action::RpiHalt, Action::RpiReboot, Action::GetKernelMessages, 
+                                match *rpi_camera_task {
+                                    Either::Left(_) => Action::StartCameraStream,
+                                    Either::Right(_) => Action::StopCameraStream
+                                }
+                            ],
                             cameras: rpi_camera_frames.clone(),
+                            kernel_messages: kernel_messages.take(),
                         };
                         let _ = callback.send(state);
                     }
@@ -160,6 +169,12 @@ pub async fn new(uuid: Uuid, mut arena_rx: Receiver, device: fernbedienung::Devi
                                 log::error!("Halt failed: {}", error);
                             }
                             break;
+                        }
+                        Action::GetKernelMessages => {
+                            match device.kernel_messages().await {
+                                Ok(messages) => kernel_messages = Some(messages),
+                                Err(error) => log::error!("Could not get kernel messages: {}", error),
+                            };
                         }
                         Action::StartCameraStream => {
                             if let Either::Left(_) = *rpi_camera_task {
