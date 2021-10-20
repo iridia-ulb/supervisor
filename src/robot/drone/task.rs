@@ -443,12 +443,10 @@ async fn bash(
             }
             Some(stdout) = stdout.next() => {
                 let update = Update::Bash(String::from_utf8_lossy(&stdout).into_owned());
-                log::info!("{:?}", update);
                 let _ = updates_tx.send(update);
             },
             Some(stderr) = stderr.next() => {
                 let update = Update::Bash(String::from_utf8_lossy(&stderr).into_owned());
-                log::info!("{:?}", update);
                 let _ = updates_tx.send(update);
             },
         }
