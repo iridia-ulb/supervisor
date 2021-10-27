@@ -162,6 +162,9 @@ async fn handle_client(
                                     BackEndRequest::ExperimentRequest(request) => 
                                         handle_experiment_request(&arena_tx, request).await,
                                 };
+                                if let Err(error) = result.as_ref() {
+                                    log::warn!("Error processing request: {}", error);
+                                }
                                 let response = DownMessage::Response(uuid, result.map_err(|e| e.to_string()));
                                 match bincode::serialize(&response) {
                                     Ok(encoded) => {
@@ -177,7 +180,9 @@ async fn handle_client(
                                 log::error!("Request {} failed: {}", uuid, error);
                             }
                         },
-                        Err(_) => todo!(),
+                        Err(_) => {
+                            log::warn!("Could not deserialize UpMessage");
+                        },
                     }
                 }
                 Err(error) => {

@@ -70,6 +70,7 @@ pub struct Card {
     bash_textarea: NodeRef,
     bash_input: NodeRef,
     camera_dialog_active: bool,
+    error: Result<(), String>,
 }
 
 #[derive(Clone, Properties)]
@@ -79,6 +80,7 @@ pub struct Props {
 }
 
 pub enum Msg {
+    SetError(Result<(), String>),
     ToggleBashTerminal,
     ToggleCameraStream,
     SendBashCommand,
@@ -97,10 +99,10 @@ impl Component for Card {
             bash_terminal_visible: false,
             bash_textarea: NodeRef::default(),
             bash_input: NodeRef::default(),
-            camera_dialog_active: false
+            camera_dialog_active: false,
+            error: Ok(())
         }
     }
-
 
     fn rendered(&mut self, _: bool) {
         if let Some(textarea) = self.bash_textarea.cast::<HtmlTextAreaElement>() {
@@ -108,17 +110,20 @@ impl Component for Card {
         }
     }
 
-
-    // this fires when a message needs to be processed
     fn update(&mut self, msg: Self::Message) -> ShouldRender {
         let mut pipuck = self.props.instance.borrow_mut();
         match msg {
+            Msg::SetError(error) => {
+                self.error = error;
+                true
+            },
             Msg::SendBashCommand => match self.bash_input.cast::<HtmlInputElement>() {
                 Some(input) => {
+                    let callback = Some(self.link.callback(|result| Msg::SetError(result)));
                     let pipuck_request = Request::BashTerminalRun(input.value());
                     input.set_value("");
                     let request = BackEndRequest::PiPuckRequest(pipuck.descriptor.id.clone(), pipuck_request);
-                    self.props.parent.send_message(crate::Msg::SendRequest(request, None));
+                    self.props.parent.send_message(crate::Msg::SendRequest(request, callback));
                     true
                 },
                 _ => false
@@ -129,15 +134,17 @@ impl Component for Card {
                         if let RaspberryPi::Connected { terminal, .. } = &mut pipuck.rpi {
                             terminal.clear();
                         }
+                        let callback = Some(self.link.callback(|result| Msg::SetError(result)));
                         let pipuck_request = Request::BashTerminalStart;
                         let request = BackEndRequest::PiPuckRequest(pipuck.descriptor.id.clone(), pipuck_request);
-                        self.props.parent.send_message(crate::Msg::SendRequest(request, None));
+                        self.props.parent.send_message(crate::Msg::SendRequest(request, callback));
                         self.bash_terminal_visible = true;
                     },
                     true => {
+                        let callback = Some(self.link.callback(|result| Msg::SetError(result)));
                         let pipuck_request = Request::BashTerminalStop;
                         let request = BackEndRequest::PiPuckRequest(pipuck.descriptor.id.clone(), pipuck_request);
-                        self.props.parent.send_message(crate::Msg::SendRequest(request, None));
+                        self.props.parent.send_message(crate::Msg::SendRequest(request, callback));
                         self.bash_terminal_visible = false;
                     }
                 }
@@ -146,16 +153,18 @@ impl Component for Card {
             Msg::ToggleCameraStream => {
                 match self.camera_dialog_active {
                     false => {
+                        let callback = Some(self.link.callback(|result| Msg::SetError(result)));
                         let pipuck_request = Request::CameraStreamEnable(true);
                         let request = BackEndRequest::PiPuckRequest(pipuck.descriptor.id.clone(), pipuck_request);
-                        self.props.parent.send_message(crate::Msg::SendRequest(request, None));
+                        self.props.parent.send_message(crate::Msg::SendRequest(request, callback));
                         pipuck.camera_stream.clear();
                         self.camera_dialog_active = true;
                     },
                     true => {
+                        let callback = Some(self.link.callback(|result| Msg::SetError(result)));
                         let pipuck_request = Request::CameraStreamEnable(false);
                         let request = BackEndRequest::PiPuckRequest(pipuck.descriptor.id.clone(), pipuck_request);
-                        self.props.parent.send_message(crate::Msg::SendRequest(request, None));
+                        self.props.parent.send_message(crate::Msg::SendRequest(request, callback));
                         self.camera_dialog_active = false;
                     }
                 }
@@ -206,6 +215,7 @@ impl Component for Card {
                 </div>
                 { self.render_menu(&pipuck) }
                 { self.render_camera_modal(&pipuck) }
+                { self.render_error_modal() }
             </div>
         }
     }
@@ -242,6 +252,30 @@ impl Card {
                             } </div>
                         </div>
                     </div>
+                </div>
+            }
+        }
+        else {
+            html! {}
+        }
+    }
+
+    fn render_error_modal(&self) -> Html {
+        if let Err(error) = self.error.as_ref() {
+            let clear_error_onclick = self.link.callback(|_| Msg::SetError(Ok(())));
+            html! {
+                <div class="modal is-active">
+                    <div class="modal-background" onclick=clear_error_onclick />
+                    <div class="modal-card">
+                    <header class="modal-card-head">
+                      <p class="modal-card-title"> { "Error processing request" } </p>
+                    </header>
+                    <section class="modal-card-body">
+                      { error }
+                    </section>
+                    <footer class="modal-card-foot" />
+                  </div>
+
                 </div>
             }
         }
@@ -382,20 +416,23 @@ impl Card {
     fn render_menu(&self, pipuck: &Instance) -> Html {
         let toggle_camera_stream_onclick = self.link.callback(|_| Msg::ToggleCameraStream);
 
+        let callback = Some(self.link.callback(|result| Msg::SetError(result)));
         let pipuck_request = Request::RaspberryPiReboot;
         let request = BackEndRequest::PiPuckRequest(pipuck.descriptor.id.clone(), pipuck_request);
         let reboot_rpi_onclick =
-            self.props.parent.callback(move |_| crate::Msg::SendRequest(request.clone(), None));
+            self.props.parent.callback(move |_| crate::Msg::SendRequest(request.clone(), callback.clone()));
 
+        let callback = Some(self.link.callback(|result| Msg::SetError(result)));
         let pipuck_request = Request::RaspberryPiHalt;
         let request = BackEndRequest::PiPuckRequest(pipuck.descriptor.id.clone(), pipuck_request);
         let halt_rpi_onclick =
-            self.props.parent.callback(move |_| crate::Msg::SendRequest(request.clone(), None));
+            self.props.parent.callback(move |_| crate::Msg::SendRequest(request.clone(), callback.clone()));
 
+        let callback = Some(self.link.callback(|result| Msg::SetError(result)));
         let pipuck_request = Request::Identify;
         let request = BackEndRequest::PiPuckRequest(pipuck.descriptor.id.clone(), pipuck_request);
         let identify_onclick =
-            self.props.parent.callback(move |_| crate::Msg::SendRequest(request.clone(), None));
+            self.props.parent.callback(move |_| crate::Msg::SendRequest(request.clone(), callback.clone()));
 
         html! {
             <footer class="card-footer">

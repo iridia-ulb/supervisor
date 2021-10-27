@@ -171,8 +171,8 @@ impl Component for UserInterface {
                         },
                         DownMessage::Response(uuid, result) => {
                             if let Some(callback) = self.requests.remove(&uuid) {
-                                if let Err(message) = result.as_ref() {
-                                    ConsoleService::log(&format!("Error: {}", message));
+                                if let Err(error) = result.as_ref() {
+                                    ConsoleService::log(&format!("Error processing request: {}", error));
                                 }
                                 callback.emit(result);
                             }
