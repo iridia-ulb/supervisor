@@ -77,7 +77,7 @@ fn xbee_pin_states_stream<'dev>(
     async_stream::stream! {
         let mut attempts: u8 = 0;
         loop {
-            let link_margin_task = tokio::time::timeout(Duration::from_millis(500), device.pin_states()).await
+            let link_margin_task = tokio::time::timeout(Duration::from_millis(1000), device.pin_states()).await
                 .context("Timeout while communicating with Xbee")
                 .and_then(|result| result.context("Could not communicate with Xbee"));
             match link_margin_task {
@@ -86,7 +86,7 @@ fn xbee_pin_states_stream<'dev>(
                     yield Ok(response);
                 },
                 Err(error) => match attempts {
-                    0..=2 => attempts += 1,
+                    0..=4 => attempts += 1,
                     _ => yield Err(error)
                 }
             }
@@ -100,7 +100,7 @@ fn xbee_link_margin_stream<'dev>(
     async_stream::stream! {
         let mut attempts: u8 = 0;
         loop {
-            let link_margin_task = tokio::time::timeout(Duration::from_millis(500), device.link_margin()).await
+            let link_margin_task = tokio::time::timeout(Duration::from_millis(1000), device.link_margin()).await
                 .context("Timeout while communicating with Xbee")
                 .and_then(|result| result.context("Xbee communication error"));
             match link_margin_task {
@@ -109,7 +109,7 @@ fn xbee_link_margin_stream<'dev>(
                     yield Ok(response);
                 },
                 Err(error) => match attempts {
-                    0..=2 => attempts += 1,
+                    0..=4 => attempts += 1,
                     _ => yield Err(error)
                 }
             }
@@ -366,7 +366,7 @@ fn fernbedienung_link_strength_stream<'dev>(
     async_stream::stream! {
         let mut attempts : u8 = 0;
         loop {
-            let link_strength_task = tokio::time::timeout(Duration::from_millis(500), device.link_strength()).await
+            let link_strength_task = tokio::time::timeout(Duration::from_millis(1000), device.link_strength()).await
                 .context("Timeout while communicating with Up Core")
                 .and_then(|result| result.context("Could not communicate with Up Core"));
             match link_strength_task {
@@ -375,7 +375,7 @@ fn fernbedienung_link_strength_stream<'dev>(
                     yield Ok(response);
                 },
                 Err(error) => match attempts {
-                    0..=2 => attempts += 1,
+                    0..=4 => attempts += 1,
                     _ => yield Err(error)
                 }
             }

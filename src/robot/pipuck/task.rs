@@ -42,7 +42,7 @@ fn fernbedienung_link_strength_stream<'dev>(
     async_stream::stream! {
         let mut attempts : u8 = 0;
         loop {
-            let link_strength_task = tokio::time::timeout(Duration::from_millis(500), device.link_strength()).await
+            let link_strength_task = tokio::time::timeout(Duration::from_millis(1000), device.link_strength()).await
                 .context("Timeout while communicating with Raspberry Pi")
                 .and_then(|result| result.context("Could not communicate with Raspberry Pi"));
             match link_strength_task {
@@ -51,7 +51,7 @@ fn fernbedienung_link_strength_stream<'dev>(
                     yield Ok(response);
                 },
                 Err(error) => match attempts {
-                    0..=2 => attempts += 1,
+                    0..=4 => attempts += 1,
                     _ => yield Err(error)
                 }
             }
