@@ -232,21 +232,16 @@ async fn client_handler(stream: TcpStream,
                         addr: SocketAddr,
                         peers: Peers,
                         updates_tx: broadcast::Sender<(SocketAddr, LuaType)>) {
-    log::info!("connected to from {}", addr);
-
+    log::info!("{} connected to message router", addr);
     /* set up a channel for communicating with other robot sockets */
     let (tx, rx) = mpsc::channel::<Bytes>(32);
-    let rx_stream = ReceiverStream::new(rx);
     /* wrap up socket in our ByteArrayCodec */
     let (sink, mut stream) = Framed::new(stream, ByteArrayCodec::default()).split();
-    
     {
         peers.lock().await.insert(addr, tx);
     }
-
     /* send and receive messages concurrently */
-    let mut forward = rx_stream.map(Result::Ok).forward(sink);
-
+    let mut forward = tokio::spawn(ReceiverStream::new(rx).map(Result::Ok).forward(sink));
     loop {
         tokio::select! {
             Some(message) = stream.next() => match message {
@@ -254,7 +249,7 @@ async fn client_handler(stream: TcpStream,
                     for (peer_addr, tx) in peers.lock().await.iter() {
                         /* do not send messages to the sending robot */   
                         if peer_addr != &addr {
-                            let _ = tx.send(message.clone());
+                            let _ = tx.send(message.clone()).await;
                         }
                     }
                     if let Ok(decoded) = decode_lua_table(&mut message) {
@@ -269,7 +264,7 @@ async fn client_handler(stream: TcpStream,
     {
         peers.lock().await.remove(&addr);
     }
-    log::info!("Robot {} disconnected from message router", addr);
+    log::info!("{} disconnected from message router", addr);
 }
 
 pub enum Action {
