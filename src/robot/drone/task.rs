@@ -889,13 +889,18 @@ pub async fn new(mut action_rx: Receiver) {
                 fernbedienung_task.set(futures::future::pending().left_future());
                 let _ = updates_tx.send(Update::FernbedienungDisconnected);
             },
-            result = &mut xbee_task => {
+            join_result = &mut xbee_task => {
                 xbee_tx = None;
                 xbee_addr = None;
                 xbee_task.set(futures::future::pending().left_future());
                 let _ = updates_tx.send(Update::XbeeDisconnected);
-                if let Err(error) = result {
-                    log::warn!("{}", error);
+                match join_result {
+                    Ok(task_result) => if let Err(error) = task_result {
+                        log::warn!("xbee terminated with: {}", error);
+                    }
+                    Err(joint_error) => {
+                        log::warn!("xbee task failed to rejoin: {}", joint_error);
+                    }
                 }
             }
         }
