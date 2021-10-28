@@ -2,9 +2,9 @@ use std::{collections::HashMap, net::SocketAddr, sync::atomic::{AtomicU8, Orderi
 use anyhow::Context;
 use ansi_parser::{Output, AnsiParser};
 use bytes::BytesMut;
-use mavlink::{MavHeader, common::{self, MavMessage, SerialControlDev, SerialControlFlag}};
+use mavlink::{MavHeader, common::{self, MavMessage, SerialControlDev, SerialControlFlag}, error::MessageReadError};
 use tokio::{net::{TcpStream, UdpSocket}, sync::{broadcast, mpsc, oneshot}};
-use futures::{FutureExt, SinkExt, Stream, StreamExt, TryStreamExt};
+use futures::{FutureExt, Sink, SinkExt, Stream, StreamExt, TryStreamExt};
 use tokio_stream::{self, wrappers::ReceiverStream};
 use tokio_util::{codec::Framed, sync::PollSender};
 
@@ -53,8 +53,6 @@ const XBEE_DEFAULT_PIN_CONFIG: &[(xbee::Pin, xbee::PinMode)] = &[
     (xbee::Pin::DIO12, xbee::PinMode::OutputDefaultLow),
 ];
 
-/* hardware flow control connected but disabled */
-
 #[derive(Debug)]
 pub enum Action {
     AssociateFernbedienung(fernbedienung::Device),
@@ -70,6 +68,40 @@ pub enum Action {
 
 pub type Sender = mpsc::Sender<Action>;
 pub type Receiver = mpsc::Receiver<Action>;
+
+async fn mavlink<'dev>(
+    device: &'dev xbee::Device
+) -> anyhow::Result<impl Stream<Item = Result<(MavHeader, MavMessage), MessageReadError>> + Sink<MavMessage> + 'dev> {
+    /* set the baud rate to match the baud rate of the Pixhawk */
+    device.set_baud_rate(921600).await
+        .context("Could not set serial baud rate")?;
+    /* set the serial communication service to TCP mode */
+    device.set_scs_mode(true).await
+        .context("Could not enable serial communication service")?;
+    /* try to connect */
+    let connection = TcpStream::connect((device.addr, 9750))
+        .map(|result| result
+            .context("Could not connect to serial communication service"));
+    let connection = tokio::time::timeout(Duration::from_secs(1), connection)
+        .map(|result| result
+            .context("Timeout while connecting to serial communication service")
+            .and_then(|result| result)).await?;
+    let framed = Framed::new(connection, codec::MavMessageCodec::<MavMessage>::new());
+    /* automatically add headers to outbound mavlink messages */
+    let mavlink_sequence = AtomicU8::new(0);
+    let framed = framed.with(move |message| {
+        let sequence = mavlink_sequence.fetch_add(1, Ordering::Relaxed);
+        async move {
+            let header = MavHeader {
+                system_id: 255,
+                component_id: 0,
+                sequence
+            };
+            anyhow::Result::<_>::Ok((header, message))
+        }
+    });
+    Ok(framed)
+}
 
 fn xbee_pin_states_stream<'dev>(
     device: &'dev xbee::Device
@@ -117,144 +149,17 @@ fn xbee_link_margin_stream<'dev>(
     }
 }
 
-// this function needs to be revisited to get the Mavlink console working and
-// also to not send commands while autonomous mode is enabled
-async fn mavlink(
-    device: &xbee::Device,
-    mut rx: mpsc::Receiver<(oneshot::Sender<anyhow::Result<()>>, TerminalAction)>,
-    updates_tx: broadcast::Sender<Update>
-) -> anyhow::Result<()> {
-    let connection = TcpStream::connect((device.addr, 9750))
-        .map(|result| result
-            .context("Could not connect to serial communication service"));
-    let connection = tokio::time::timeout(Duration::from_secs(1), connection)
-        .map(|result| result
-            .context("Timeout while connecting to serial communication service")
-            .and_then(|result| result)).await?;
-    let (sink, mut stream) = 
-        Framed::new(connection, codec::MavMessageCodec::<MavMessage>::new()).split();
-    let mavlink_sequence = AtomicU8::new(0);
-    let sink = sink.with(|message| async {
-        let header = MavHeader {
-            system_id: 255,
-            component_id: 0,
-            sequence: mavlink_sequence.fetch_add(1, Ordering::Relaxed) };
-        anyhow::Result::<_>::Ok((header, message))
-    });
-    tokio::pin!(sink);
-    /* heartbeat stream */
-    let heartbeat_stream = futures::stream::iter(std::iter::repeat(
-        MavMessage::HEARTBEAT(common::HEARTBEAT_DATA {
-            custom_mode: 0,
-            mavtype: common::MavType::MAV_TYPE_GENERIC,
-            autopilot: common::MavAutopilot::MAV_AUTOPILOT_INVALID,
-            base_mode: common::MavModeFlag::empty(),
-            system_status: common::MavState::MAV_STATE_UNINIT,
-            mavlink_version: 3,
-        })
-    ));
-    let heartbeat_stream_throttled =
-        tokio_stream::StreamExt::throttle(heartbeat_stream, Duration::from_millis(500));
-    tokio::pin!(heartbeat_stream_throttled);
-    /* task loop */
-    loop {
-        tokio::select! {
-            Some(heartbeat) = heartbeat_stream_throttled.next() => {
-                let _ = sink.send(heartbeat).await;
-            }
-            request = rx.recv() => match request {
-                None => break Ok(()),
-                Some((callback, action)) => match action {
-                    // note that commands should not be run when mavlink is being used by ARGoS
-                    TerminalAction::Start => {
-                        let command = vec![0x0au8];
-                        let data = common::SERIAL_CONTROL_DATA {
-                            baudrate: 0,
-                            timeout: 0,
-                            device: SerialControlDev::SERIAL_CONTROL_DEV_SHELL,
-                            flags: SerialControlFlag::SERIAL_CONTROL_FLAG_RESPOND |
-                                SerialControlFlag::SERIAL_CONTROL_FLAG_EXCLUSIVE,
-                            count: command.len() as u8,
-                            data: command,
-                        };
-                        let message = MavMessage::SERIAL_CONTROL(data);
-                        let result = sink.send(message).await
-                            .context("Could not start MAVLink terminal");
-                        let _ = callback.send(result);
-                    },
-                    TerminalAction::Run(command) => {
-                        let mut command_padded = command.as_bytes().to_vec();
-                        command_padded.push(0x0a); // add a line feed to the command
-                        let data = common::SERIAL_CONTROL_DATA {
-                            baudrate: 0,
-                            timeout: 0,
-                            device: SerialControlDev::SERIAL_CONTROL_DEV_SHELL,
-                            flags: SerialControlFlag::SERIAL_CONTROL_FLAG_RESPOND |
-                                SerialControlFlag::SERIAL_CONTROL_FLAG_EXCLUSIVE,
-                            count: command_padded.len() as u8,
-                            data: command_padded,
-                        };
-                        let message = MavMessage::SERIAL_CONTROL(data);
-                        let result = sink.send(message).await
-                            .context("Could not run command in MAVLink terminal");
-                        let _ = callback.send(result);
-                    },
-                    TerminalAction::Stop => {
-                        /* nothing to do */
-                        let _ = callback.send(Ok(()));
-                    },
-                }
-            },
-            Some(Ok((_header, body))) = stream.next() => {
-                match body {
-                    // MavMessage::HEARTBEAT(_) => {
-                    //     log::info!("heartbeat from {}:{}", header.system_id, header.component_id);
-                    // },
-                    MavMessage::BATTERY_STATUS(data) => {
-                        let mut battery_reading = data.voltages[0] as f32;
-                        battery_reading /= DRONE_BATT_NUM_CELLS;
-                        battery_reading -= DRONE_BATT_EMPTY_MV;
-                        battery_reading /= DRONE_BATT_FULL_MV - DRONE_BATT_EMPTY_MV;
-                        let battery_reading = (battery_reading.max(0.0).min(1.0) * 100.0) as i32;
-                        let _ = updates_tx.send(Update::Battery(battery_reading));
-                    },
-                    MavMessage::SERIAL_CONTROL(common::SERIAL_CONTROL_DATA { data, count, .. }) => {
-                        let data = match std::str::from_utf8(&data[..count as usize]) {
-                            Ok(data) => data,
-                            Err(error) => {
-                                std::str::from_utf8(&data[..error.valid_up_to()]).unwrap()
-                            }
-                        };
-                        let parsed: String = data
-                            .ansi_parse()
-                            .fold(String::new(), |output, item| match item {
-                                Output::TextBlock(text) => format!("{}{}", output, text),
-                                Output::Escape(_) => output,
-                            });
-                        let _  = updates_tx.send(Update::Mavlink(parsed));
-                    },
-                    _ => {}
-                }
-            }
-        }
-    }
-}
-
 async fn xbee(
     device: xbee::Device,
     mut rx: mpsc::Receiver<(oneshot::Sender<anyhow::Result<()>>, XbeeAction)>,
     updates_tx: broadcast::Sender<Update>
 ) -> anyhow::Result<()> {
-    /* create a mavlink task */
-    let mavlink_task = futures::future::pending().left_future();
-    let mut mavlink_tx = Option::default();
-    tokio::pin!(mavlink_task);
-    /* set the serial communication service to TCP mode */
-    device.set_scs_mode(true).await
-        .context("Could not enable serial communication service")?;
-    /* set the baud rate to match the baud rate of the Pixhawk */
-    device.set_baud_rate(921600).await
-        .context("Could not set serial baud rate")?;
+    /* autonomous mode: this variable tracks whether or not we are in autonomous mode */
+    let mut autonomous_mode = false;
+    /* mavlink sink and stream */
+    let (mut mavlink_sink, mut mavlink_stream) = mavlink(&device).await
+        .context("Could not connect to MAVLink")?
+        .split();
     /* link margin stream */
     let link_margin_stream = xbee_link_margin_stream(&device);
     let link_margin_stream_throttled =
@@ -266,10 +171,10 @@ async fn xbee(
         tokio_stream::StreamExt::throttle(pin_states_stream, Duration::from_millis(1000));
     tokio::pin!(pin_states_stream_throttled);
     /* since we may be just reconnecting to the xbee, do not turn off the upcore and
-       pixhawk power if they are currently switched on, likewise, do not de-assert
-       autonomous mode if it is currently asserted */
+       pixhawk power if they are currently switched on */
     if let Some(Ok(pin_states)) = pin_states_stream_throttled.next().await {
-        let autonomous_mode =
+        /* initialise autonomous mode based on current pin states */
+        autonomous_mode =
             pin_states.get(&xbee::Pin::DIO4).cloned().unwrap_or_default();
         let upcore_power =
             pin_states.get(&xbee::Pin::DIO11).cloned().unwrap_or_default();
@@ -291,8 +196,56 @@ async fn xbee(
         device.set_pin_modes(XBEE_DEFAULT_PIN_CONFIG.into_iter()).await
             .context("Could not set Xbee pin modes")?;
     }
+    /* mavlink heartbeat stream */
+    let mavlink_heartbeat_stream = futures::stream::iter(std::iter::repeat(
+        MavMessage::HEARTBEAT(common::HEARTBEAT_DATA {
+            custom_mode: 0,
+            mavtype: common::MavType::MAV_TYPE_GENERIC,
+            autopilot: common::MavAutopilot::MAV_AUTOPILOT_INVALID,
+            base_mode: common::MavModeFlag::empty(),
+            system_status: common::MavState::MAV_STATE_UNINIT,
+            mavlink_version: 3,
+        })
+    ));
+    let mavlink_heartbeat_stream_throttled =
+        tokio_stream::StreamExt::throttle(mavlink_heartbeat_stream, Duration::from_millis(500));
+    tokio::pin!(mavlink_heartbeat_stream_throttled);
+    /* poll all streams, sinks, channels, and futures */
     loop {
         tokio::select! {
+            Some(heartbeat) = mavlink_heartbeat_stream_throttled.next() => {
+                /* only send heartbeats if we are not in autonomous mode */
+                if !autonomous_mode {
+                    let _ = mavlink_sink.send(heartbeat).await;
+                }
+            },
+            Some(Ok((_header, body))) = mavlink_stream.next() => match body {
+                MavMessage::BATTERY_STATUS(data) => {
+                    let mut battery_reading = data.voltages[0] as f32;
+                    battery_reading /= DRONE_BATT_NUM_CELLS;
+                    battery_reading -= DRONE_BATT_EMPTY_MV;
+                    battery_reading /= DRONE_BATT_FULL_MV - DRONE_BATT_EMPTY_MV;
+                    let battery_reading = (battery_reading.max(0.0).min(1.0) * 100.0) as i32;
+                    let _ = updates_tx.send(Update::Battery(battery_reading));
+                },
+                MavMessage::SERIAL_CONTROL(common::SERIAL_CONTROL_DATA { data, count, .. }) => {
+                    let data = match std::str::from_utf8(&data[..count as usize]) {
+                        Ok(data) => data,
+                        Err(error) => {
+                            std::str::from_utf8(&data[..error.valid_up_to()]).unwrap()
+                        }
+                    };
+                    let parsed: String = data
+                        .ansi_parse()
+                        .fold(String::new(), |output, item| match item {
+                            Output::TextBlock(text) => format!("{}{}", output, text),
+                            Output::Escape(_) => output,
+                        });
+                    let _  = updates_tx.send(Update::Mavlink(parsed));
+                },
+                /* ignore other MAVLink messages */
+                _ => {}
+            },
             Some(response) = link_margin_stream_throttled.next() => {
                 let update = Update::XbeeSignal(response?);
                 let _ = updates_tx.send(update);
@@ -307,22 +260,16 @@ async fn xbee(
                     },
                     _ => log::warn!("Could not update power state")
                 }
-                if let Some(autonomous_mode) = response.get(&xbee::Pin::DIO4).cloned() {
-                    if autonomous_mode {
-                        mavlink_tx = None;
-                    }
-                    else if matches!(mavlink_tx, None) {
-                        let (tx, rx) = mpsc::channel(8);
-                        mavlink_tx = Some(tx);
-                        mavlink_task.set(mavlink(&device, rx, updates_tx.clone()).right_future());
-                    }
-                }
             },
             recv = rx.recv() => match recv {
                 Some((callback, action)) => match action {
                     XbeeAction::SetAutonomousMode(enable) => {
                         let result = device.write_outputs(&[(xbee::Pin::DIO4, enable)]).await
-                            .context("Could not set autonomous mode");
+                            .context("Could not configure autonomous mode");
+                        /* if successful update the state of the autonomous mode variable */
+                        if result.is_ok() {
+                            autonomous_mode = enable;
+                        }
                         let _ = callback.send(result);
                     }
                     XbeeAction::SetUpCorePower(enable) => {
@@ -335,27 +282,57 @@ async fn xbee(
                             .context("Could not configure Pixhawk power");
                         let _ = callback.send(result);
                     },
-                    XbeeAction::Mavlink(action) => match mavlink_tx.as_ref() {
-                        Some(tx) => {
-                            if let Err(mpsc::error::SendError((callback, action))) = tx.send((callback, action)).await {
-                                let _ = callback.send(Err(anyhow::anyhow!("Could not send {:?} to terminal", action)));
+                    XbeeAction::Mavlink(action) => {
+                        match autonomous_mode {
+                            true => {
+                                let error =
+                                    anyhow::anyhow!("MAVLink terminal is not available in autonomous mode");
+                                let _ = callback.send(Err(error));
                             }
-                        },
-                        None => {
-                            let _ = callback.send(Err(anyhow::anyhow!("Could not send {:?} to terminal", action))
-                                .context("Can not send action in autonomous mode"));
+                            false => match action {
+                                TerminalAction::Start => {
+                                    let command = vec![0x0au8];
+                                    let data = common::SERIAL_CONTROL_DATA {
+                                        baudrate: 0,
+                                        timeout: 0,
+                                        device: SerialControlDev::SERIAL_CONTROL_DEV_SHELL,
+                                        flags: SerialControlFlag::SERIAL_CONTROL_FLAG_RESPOND |
+                                               SerialControlFlag::SERIAL_CONTROL_FLAG_EXCLUSIVE,
+                                        count: command.len() as u8,
+                                        data: command,
+                                    };
+                                    let message = MavMessage::SERIAL_CONTROL(data);
+                                    let result = mavlink_sink.send(message).await
+                                        .map_err(|_| anyhow::anyhow!("Could not start MAVLink terminal"));
+                                    let _ = callback.send(result);
+                                },
+                                TerminalAction::Run(command) => {
+                                    let mut command_padded = command.as_bytes().to_vec();
+                                    command_padded.push(0x0a); // add a line feed to the command
+                                    let data = common::SERIAL_CONTROL_DATA {
+                                        baudrate: 0,
+                                        timeout: 0,
+                                        device: SerialControlDev::SERIAL_CONTROL_DEV_SHELL,
+                                        flags: SerialControlFlag::SERIAL_CONTROL_FLAG_RESPOND |
+                                               SerialControlFlag::SERIAL_CONTROL_FLAG_EXCLUSIVE,
+                                        count: command_padded.len() as u8,
+                                        data: command_padded,
+                                    };
+                                    let message = MavMessage::SERIAL_CONTROL(data);
+                                    let result = mavlink_sink.send(message).await
+                                        .map_err(|_| anyhow::anyhow!("Could not run command in MAVLink terminal"));
+                                    let _ = callback.send(result);
+                                },
+                                TerminalAction::Stop => {
+                                    /* nothing to do */
+                                    let _ = callback.send(Ok(()));
+                                },
+                            }
                         }
-                    },
+                    }
                 },
                 None => break Ok(()), // normal shutdown
             },
-            result = &mut mavlink_task => {
-                if let Err(error) = result {
-                    log::error!("Mavlink task terminated: {}", error);
-                }
-                mavlink_tx = None;
-                mavlink_task.set(futures::future::pending().left_future());
-            }
         }
     }
 }
@@ -698,9 +675,9 @@ async fn fernbedienung(
                         Some(stop_tx) => {
                             let _ = callback.send(
                                 stop_tx.send(()).map_err(|_| anyhow::anyhow!("Could not stop ARGoS")));
-                        },
+                        }
                         None => {
-                            let _ = callback.send(Err(anyhow::anyhow!("Experiment has not been set up")));
+                            let _ = callback.send(Ok(()));
                         }
                     },
                     FernbedienungAction::Identify => match argos_stop_tx.as_ref() {
@@ -759,9 +736,6 @@ pub async fn new(mut action_rx: Receiver) {
     tokio::pin!(xbee_task);
     /* updates_tx is for sending changes in state to subscribers (e.g., the webui) */
     let (updates_tx, _) = broadcast::channel(16);
-    
-
-    // TODO: for a clean shutdown we may want to consider the case where updates_tx hangs up
     loop {
         tokio::select! {
             Some(action) = action_rx.recv() => match action {
