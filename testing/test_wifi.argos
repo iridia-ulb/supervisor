@@ -6,7 +6,7 @@
   <!-- ************************* -->
   <framework>
     <system threads="0" />
-    <experiment length="25" ticks_per_second="5" random_seed="0" />
+    <experiment length="10" ticks_per_second="1" random_seed="12345" />
   </framework>
   
   <!-- *************** -->
@@ -15,10 +15,10 @@
   <controllers>
     <lua_controller id="robot">
       <actuators>
-        <wifi implementation="default" />
+        <radios implementation="default" />
       </actuators>
       <sensors>
-        <wifi implementation="default" />
+        <radios implementation="default" />
       </sensors>
       <params script="test_wifi.lua" />
     </lua_controller>
