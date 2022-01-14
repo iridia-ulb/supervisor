@@ -6,8 +6,8 @@ function step()
    data = {
       vec = vector3(-1.111, 2.222, -3.333),
    }
-   robot.radios.wifi.send(data)
-   for index, message in pairs(robot.radios.wifi.recv) do
+   robot.simple_radios.wifi.send(data)
+   for index, message in pairs(robot.simple_radios.wifi.recv) do
       log(tostring(message.vec))
    end
 end

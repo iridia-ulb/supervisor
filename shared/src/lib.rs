@@ -1,6 +1,7 @@
 use serde::{Serialize, Deserialize};
 use uuid::Uuid;
 
+pub mod builderbot;
 pub mod drone;
 pub mod pipuck;
 pub mod experiment;
@@ -24,6 +25,8 @@ pub enum DownMessage {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum FrontEndRequest {
+    AddBuilderBot(builderbot::Descriptor),
+    UpdateBuilderBot(String, builderbot::Update),
     AddDrone(drone::Descriptor),
     UpdateDrone(String, drone::Update),
     AddPiPuck(pipuck::Descriptor),
@@ -41,6 +44,7 @@ pub enum UpMessage {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum BackEndRequest {
+    BuilderBotRequest(String, builderbot::Request),
     DroneRequest(String, drone::Request),
     PiPuckRequest(String, pipuck::Request),
     ExperimentRequest(experiment::Request),

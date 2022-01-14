@@ -1,3 +1,4 @@
+pub mod builderbot;
 pub mod drone;
 pub mod pipuck;
 

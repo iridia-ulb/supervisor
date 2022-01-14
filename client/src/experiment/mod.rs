@@ -10,6 +10,7 @@ use shared::BackEndRequest;
 
 use crate::UserInterface;
 
+pub mod builderbot;
 pub mod drone;
 pub mod pipuck;
 
@@ -22,6 +23,7 @@ pub struct Interface {
 #[derive(Clone, Properties)]
 pub struct Props {
     pub parent: ComponentLink<UserInterface>,
+    pub builderbot_software: Rc<RefCell<Software>>,
     pub drone_software: Rc<RefCell<Software>>,
     pub pipuck_software: Rc<RefCell<Software>>,
 }
@@ -47,6 +49,7 @@ impl Component for Interface {
         match message {
             Msg::StartExperiment => {
                 let request = BackEndRequest::ExperimentRequest(Request::Start {
+                    builderbot_software: self.props.builderbot_software.borrow().clone(),
                     pipuck_software: self.props.pipuck_software.borrow().clone(),
                     drone_software: self.props.drone_software.borrow().clone(),
                 });
@@ -67,6 +70,9 @@ impl Component for Interface {
     fn view(&self) -> Html {
         html! {
             <>
+                <div class="column is-full-mobile is-full-tablet is-full-desktop is-half-widescreen is-one-third-fullhd">
+                    <builderbot::ConfigCard software=self.props.builderbot_software.clone() />
+                </div>
                 <div class="column is-full-mobile is-full-tablet is-full-desktop is-half-widescreen is-one-third-fullhd">
                     <drone::ConfigCard software=self.props.drone_software.clone() />
                 </div>

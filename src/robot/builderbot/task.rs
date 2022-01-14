@@ -11,16 +11,16 @@ use crate::robot::{FernbedienungAction, TerminalAction};
 use crate::journal;
 
 pub use shared::{
-    pipuck::{Descriptor, Update},
+    builderbot::{Descriptor, Update},
     experiment::software::Software
 };
 
-const IDENTIFY_PIPUCK_ARGOS: (&'static str, &'static [u8]) = 
-    ("identify_pipuck.argos", include_bytes!("identify_pipuck.argos"));
-const IDENTIFY_PIPUCK_LUA: (&'static str, &'static [u8]) = 
-    ("identify_pipuck.lua", include_bytes!("identify_pipuck.lua"));
+const IDENTIFY_BUILDERBOT_ARGOS: (&'static str, &'static [u8]) = 
+    ("identify_builderbot.argos", include_bytes!("identify_builderbot.argos"));
+const IDENTIFY_BUILDERBOT_LUA: (&'static str, &'static [u8]) = 
+    ("identify_builderbot.lua", include_bytes!("identify_builderbot.lua"));
 
-const PIPUCK_CAMERAS_CONFIG: &[(&str, u16, u16, u16)] = &[];
+const BUILDERBOT_CAMERAS_CONFIG: &[(&str, u16, u16, u16)] = &[];
 
 #[derive(Debug)]
 pub enum Action {
@@ -43,8 +43,8 @@ fn fernbedienung_link_strength_stream<'dev>(
         let mut attempts : u8 = 0;
         loop {
             let link_strength_task = tokio::time::timeout(Duration::from_millis(1000), device.link_strength()).await
-                .context("Timeout while communicating with Raspberry Pi")
-                .and_then(|result| result.context("Could not communicate with Raspberry Pi"));
+                .context("Timeout while communicating with DuoVero")
+                .and_then(|result| result.context("Could not communicate with DuoVero"));
             match link_strength_task {
                 Ok(response) => {
                     attempts = 0;
@@ -291,7 +291,7 @@ async fn fernbedienung(
                     FernbedienungAction::SetCameraStream(enable) => {
                         cameras_stream.clear();
                         if enable {
-                            for &(camera, width, height, port) in PIPUCK_CAMERAS_CONFIG {
+                            for &(camera, width, height, port) in BUILDERBOT_CAMERAS_CONFIG {
                                 let stream = MjpegStreamerStream::new(&device, camera, width, height, port);
                                 let stream = tokio_stream::StreamExt::throttle(stream, Duration::from_millis(200));
                                 cameras_stream.insert(camera.to_owned(), Box::pin(stream));
@@ -301,12 +301,12 @@ async fn fernbedienung(
                     },
                     FernbedienungAction::Halt => {
                         let result = device.halt().await
-                            .context("Could not halt Raspberry Pi");
+                            .context("Could not halt DuoVero");
                         let _ = callback.send(result);
                     },
                     FernbedienungAction::Reboot => {
                         let result = device.reboot().await
-                            .context("Could not reboot Raspberry Pi");
+                            .context("Could not reboot DuoVero");
                         let _ = callback.send(result);
                     },
                     /* the Bash future runs on the same task as fernbedienung, so use try_send to send messages
@@ -381,8 +381,8 @@ async fn fernbedienung(
                         }
                         None => {
                             let software = Software(vec![
-                                (IDENTIFY_PIPUCK_ARGOS.0.to_owned(), IDENTIFY_PIPUCK_ARGOS.1.to_vec()),
-                                (IDENTIFY_PIPUCK_LUA.0.to_owned(), IDENTIFY_PIPUCK_LUA.1.to_vec())
+                                (IDENTIFY_BUILDERBOT_ARGOS.0.to_owned(), IDENTIFY_BUILDERBOT_ARGOS.1.to_vec()),
+                                (IDENTIFY_BUILDERBOT_LUA.0.to_owned(), IDENTIFY_BUILDERBOT_LUA.1.to_vec())
                             ]);
                             match software.check_config() {
                                 Err(error) => {

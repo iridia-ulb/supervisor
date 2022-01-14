@@ -1,6 +1,6 @@
 use anyhow::{Result, Context};
 use futures::{Stream, StreamExt, TryFutureExt, TryStreamExt};
-use shared::{drone, pipuck};
+use shared::{builderbot, drone, pipuck};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use std::net::SocketAddr;
@@ -26,7 +26,7 @@ pub enum Event {
     ARGoS(String, ARGoS),
     Message(SocketAddr, crate::router::LuaType),
     TrackingSystem(Vec<tracking_system::Update>),
-    Descriptors(Vec<pipuck::Descriptor>, Vec<drone::Descriptor>)
+    Descriptors(Vec<builderbot::Descriptor>, Vec<drone::Descriptor>, Vec<pipuck::Descriptor>, )
 }
 
 #[derive(Debug, Serialize)]

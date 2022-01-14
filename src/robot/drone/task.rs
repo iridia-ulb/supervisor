@@ -850,10 +850,10 @@ pub async fn new(mut action_rx: Receiver) {
                     // mode.
                     let result = tokio::join!(terminate_argos, disable_autonomous_mode);
                     if let Err(error) = result.0 {
-                        log::error!("{}", error);
+                        log::warn!("{}", error);
                     }
                     if let Err(error) = result.1 {
-                        log::error!("{}", error);
+                        log::warn!("{}", error);
                     }
                 },
             },

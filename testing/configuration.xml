@@ -6,17 +6,17 @@
         <optitrack version="2.9.0" bind_port="1511" multicast_addr="239.255.42.99" />
     </supervisor>
     <robots network="192.168.1.0/24">
-        <drone  id="drone1"
-                xbee_macaddr="00:04:F3:19:FE:53"
-                upcore_macaddr="B0:F1:EC:E9:2F:97"
-                optitrack_id="1" />
-        <!--drone  id="fake1"
-                xbee_macaddr="00:00:00:00:00:00"
-                upcore_macaddr="00:00:00:00:00:00"
-                optitrack_id="42" /-->
-        <!--pipuck id="pipuck1"
-                rpi_macaddr="FFFFFF:FFFFFF"
-                optitrack_id="2"
-                apriltag_id="20" /-->
+        <!--drone id="drone1"
+            xbee_macaddr="00:04:F3:19:FE:53"
+            upcore_macaddr="B0:F1:EC:E9:2F:97"
+            optitrack_id="1" />
+        <pipuck id="pipuck1"
+            rpi_macaddr="B8:27:EB:EF:E1:01"
+            optitrack_id="2"
+            apriltag_id="10" /-->
+        <builderbot id="builderbot1"
+            duovero_macaddr="00:19:88:52:98:0B"
+            optitrack_id="3"
+            apriltag_id="20" />
     </robots>
 </configuration>

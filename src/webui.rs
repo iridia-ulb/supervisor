@@ -7,7 +7,7 @@ use tokio_stream::{StreamMap, wrappers::{BroadcastStream, errors::BroadcastStrea
 use warp::Filter;
 use uuid::Uuid;
 
-use crate::{arena, optitrack, robot::{self, drone, pipuck}};
+use crate::{arena, optitrack, robot::{self, builderbot, drone, pipuck}};
 
 // down message (from backend to the client)
 // up message (from client to the backend)
@@ -49,6 +49,36 @@ async fn handle_client(
     arena_tx: mpsc::Sender<arena::Action>,
     optitrack_tx: mpsc::Sender<optitrack::Action>
 ) {
+    /* subscribe to builderbot updates and map them to websocket messages */
+    let builderbot_updates = match subscribe_builderbot_updates(&arena_tx).await {
+        Ok(updates) => {
+            let add_builderbot_messages = updates.keys()
+                .cloned()
+                .map(|desc| DownMessage::Request(Uuid::new_v4(), FrontEndRequest::AddBuilderBot(desc.deref().clone())))
+                .collect::<Vec<_>>();
+            let update_builderbot_messages = updates
+                .filter_map(|(desc, update)| async move {
+                    match update {
+                        Ok(update) => {
+                            Some(DownMessage::Request(Uuid::new_v4(), FrontEndRequest::UpdateBuilderBot(desc.id.clone(), update)))
+                        }
+                        Err(BroadcastStreamRecvError::Lagged(count)) => {
+                            log::warn!("Client missed {} messages for {}", count, desc);
+                            None
+                        }
+                    }
+                });
+            /* send the add builderbot messages first, then stream the builderbot updates */
+            stream::iter(add_builderbot_messages).chain(update_builderbot_messages)
+                .map(|message| bincode::serialize(&message)
+                    .context("Could not serialize BuilderBot message"))
+                .map_ok(|encoded| warp::ws::Message::binary(encoded))
+        },
+        Err(error) => {
+            log::error!("Could not initialize client: {}", error);
+            return;
+        }
+    };
     /* subscribe to drone updates and map them to websocket messages */
     let drone_updates = match subscribe_drone_updates(&arena_tx).await {
         Ok(updates) => {
@@ -140,6 +170,7 @@ async fn handle_client(
     };
     /* response to client requests and forward updates to client */
     tokio::pin!(optitrack_stream);
+    tokio::pin!(builderbot_updates);
     tokio::pin!(pipuck_updates);
     tokio::pin!(drone_updates);
     let (mut websocket_tx, mut websocket_rx) = ws.split();
@@ -155,6 +186,8 @@ async fn handle_client(
                         Ok(message) => match message {
                             UpMessage::Request(uuid, request) => {
                                 let result = match request {
+                                    BackEndRequest::BuilderBotRequest(id, request) =>  
+                                        handle_builderbot_request(&arena_tx, id, request).await,
                                     BackEndRequest::DroneRequest(id, request) => 
                                         handle_drone_request(&arena_tx, id, request).await,
                                     BackEndRequest::PiPuckRequest(id, request) =>  
@@ -200,6 +233,17 @@ async fn handle_client(
                     Err(error) => log::error!("{}", error),
                 }
             }
+            /* stream builderbot updates to client */
+            Some(result) = builderbot_updates.next() => {
+                match result {
+                    Ok(message) => {
+                        if let Err(error) = websocket_tx.send(message).await {
+                            log::error!("Could not send message to client: {}", error);
+                        }
+                    },
+                    Err(error) => log::error!("{}", error),
+                }
+            },
             /* stream pipuck updates to client */
             Some(result) = pipuck_updates.next() => {
                 match result {
@@ -222,6 +266,35 @@ async fn handle_client(
             }
         }
     }
+}
+
+async fn subscribe_builderbot_updates(
+    arena_tx: &mpsc::Sender<arena::Action>
+) -> anyhow::Result<StreamMap<Arc<builderbot::Descriptor>, BroadcastStream<builderbot::Update>>> {
+    let (callback_tx, callback_rx) = oneshot::channel();
+    let update_streams = arena_tx.send(arena::Action::GetBuilderBotDescriptors(callback_tx))
+        .map_err(|_| anyhow::anyhow!("Could not communicate with BuilderBot"))
+        .and_then(|_| callback_rx
+            .map(|result| result.context("Could not get BuilderBot descriptors")))
+        .and_then(|builderbot_descs| builderbot_descs.into_iter()
+            .map(|builderbot_desc| {
+                let (callback_tx, callback_rx) = oneshot::channel();
+                let action = builderbot::Action::Subscribe(callback_tx);
+                arena_tx.send(arena::Action::ForwardBuilderBotAction(builderbot_desc.id.clone(), action))
+                    .map_err(|_| anyhow::anyhow!("Could not communicate with BuilderBot"))
+                    .and_then(|_| callback_rx
+                        .map(|result| result.context("Could not subscribe to BuilderBot updates"))
+                        .map_ok(|receiver| (builderbot_desc, BroadcastStream::new(receiver))))
+            })
+            .collect::<FuturesUnordered<_>>()
+            .try_collect::<Vec<_>>()
+        ).await?;
+    
+    let mut builderbot_update_stream_map = StreamMap::new();
+    for (desc, update_stream) in update_streams {
+        builderbot_update_stream_map.insert(desc, update_stream);
+    }
+    Ok(builderbot_update_stream_map)
 }
 
 async fn subscribe_drone_updates(
@@ -279,6 +352,36 @@ async fn subscribe_pipuck_updates(
         pipuck_update_stream_map.insert(desc, update_stream);
     }
     Ok(pipuck_update_stream_map)
+}
+
+async fn handle_builderbot_request(
+    arena_tx: &mpsc::Sender<arena::Action>,
+    id: String,
+    request: shared::builderbot::Request,
+) -> anyhow::Result<()> {
+    use shared::builderbot::Request;
+    use robot::{FernbedienungAction, TerminalAction};
+    use builderbot::Action;
+    let (callback_tx, callback_rx) = oneshot::channel();
+    let action = match request {
+        Request::BashTerminalStart => 
+            Action::ExecuteFernbedienungAction(callback_tx, FernbedienungAction::Bash(TerminalAction::Start)),
+        Request::BashTerminalStop => 
+            Action::ExecuteFernbedienungAction(callback_tx, FernbedienungAction::Bash(TerminalAction::Stop)),
+        Request::BashTerminalRun(command) => 
+            Action::ExecuteFernbedienungAction(callback_tx, FernbedienungAction::Bash(TerminalAction::Run(command))),
+        Request::CameraStreamEnable(on) => 
+            Action::ExecuteFernbedienungAction(callback_tx, FernbedienungAction::SetCameraStream(on)),
+        Request::Identify => 
+            Action::ExecuteFernbedienungAction(callback_tx, FernbedienungAction::Identify),
+        Request::DuoVeroHalt => 
+            Action::ExecuteFernbedienungAction(callback_tx, FernbedienungAction::Halt),
+        Request::DuoVeroReboot =>
+            Action::ExecuteFernbedienungAction(callback_tx, FernbedienungAction::Reboot),
+    };
+    arena_tx.send(arena::Action::ForwardBuilderBotAction(id, action)).await
+        .map_err(|_| anyhow::anyhow!("Could not send action to arena"))?;
+    callback_rx.await.map_err(|_| anyhow::anyhow!("No response from arena"))?
 }
 
 async fn handle_drone_request(
@@ -359,8 +462,8 @@ async fn handle_experiment_request(
     use arena::Action;
     let (callback_tx, callback_rx) = oneshot::channel();
     let action = match request {
-        Request::Start { drone_software, pipuck_software } => 
-            Action::StartExperiment { callback: callback_tx, drone_software, pipuck_software },
+        Request::Start { builderbot_software, drone_software, pipuck_software } => 
+            Action::StartExperiment { callback: callback_tx, builderbot_software, drone_software, pipuck_software },
         Request::Stop =>
             Action::StopExperiment { callback: callback_tx },
     };

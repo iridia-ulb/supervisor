@@ -15,10 +15,10 @@
   <controllers>
     <lua_controller id="robot">
       <actuators>
-        <radios implementation="default" />
+        <simple_radios implementation="default" />
       </actuators>
       <sensors>
-        <radios implementation="default" />
+        <simple_radios implementation="default" />
       </sensors>
       <params script="test_wifi.lua" />
     </lua_controller>

@@ -19,9 +19,6 @@ struct Options {
     config: PathBuf,
 }
 
-// target messaging semantic
-// journal and webui should subscribe to the information they want
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     /* initialize the logger */
@@ -34,8 +31,9 @@ async fn main() -> anyhow::Result<()> {
         router_socket,
         webui_socket,
         robot_network,
-        pipucks,
+        builderbots,
         drones,
+        pipucks,
     } = parse_config(&options.config)
             .context(format!("Could not parse configuration file {:?}", options.config))?;
     /* channels for task communication */
@@ -52,8 +50,9 @@ async fn main() -> anyhow::Result<()> {
     let arena_task =
         arena::new(arena_requests_rx,
                    journal_requests_tx,
-                   pipucks,
-                   drones);
+                   builderbots,
+                   drones,
+                   pipucks);
     /* create network task */
     let network_task = network::new(robot_network, arena_requests_tx.clone());
     /* create message router task */
@@ -106,7 +105,7 @@ async fn main() -> anyhow::Result<()> {
         _ = &mut sigint_task => {
             /* TODO: is it safe to do this? should messages be broadcast to robots */
             /* what happens if ARGoS is running on the robots, does breaking the
-            connection to fernbedienung kill ARGoS? How does the Pixhawk respond */
+            connection to fernbedienung kill ARGoS? How does the Pixhawk respond? */
             log::info!("Shutting down");
         }
     }
@@ -120,8 +119,9 @@ struct Configuration {
     router_socket: Option<SocketAddr>,
     webui_socket: Option<SocketAddr>,
     robot_network: Ipv4Net,
-    pipucks: Vec<robot::pipuck::Descriptor>,
+    builderbots: Vec<robot::builderbot::Descriptor>,
     drones: Vec<robot::drone::Descriptor>,
+    pipucks: Vec<robot::pipuck::Descriptor>,
 }
 
 fn parse_config(config: &Path) -> anyhow::Result<Configuration> {
@@ -196,6 +196,48 @@ fn parse_config(config: &Path) -> anyhow::Result<Configuration> {
         .ok_or(anyhow::anyhow!("Could not find attribute \"network\" in <robots>"))?
         .parse::<Ipv4Net>()
         .context("Could not parse attribute \"network\" in <robots>")?;
+    let builderbots = robots
+        .descendants()
+        .filter(|node| node.tag_name().name() == "builderbot")
+        .map(|node| anyhow::Result::<_>::Ok(robot::builderbot::Descriptor {
+            id: node.attribute("id")
+                .ok_or(anyhow::anyhow!("Could not find attribute \"id\" for <builderbot>"))?
+                .to_owned(),
+            duovero_macaddr: node.attribute("duovero_macaddr")
+                .ok_or(anyhow::anyhow!("Could not find attribute \"duovero_macaddr\" for <builderbot>"))?
+                .parse()
+                .context("Could not parse attribute \"duovero_macaddr\" for <builderbot>")?,
+            optitrack_id: node.attribute("optitrack_id")
+                .map(|value| value.parse())
+                .transpose()
+                .context("Could not parse attribute \"optitrack_id\" for <builderbot>")?,
+            apriltag_id: node.attribute("apriltag_id")
+                .map(|value| value.parse())
+                .transpose()
+                .context("Could not parse attribute \"apriltag_id\" for <builderbot>")?,
+        }))
+        .collect::<Result<Vec<_>, _>>()?;
+    let drones = robots
+        .descendants()
+        .filter(|node| node.tag_name().name() == "drone")
+        .map(|node| anyhow::Result::<_>::Ok(robot::drone::Descriptor {
+            id: node.attribute("id")
+                .ok_or(anyhow::anyhow!("Could not find attribute \"id\" for <drone>"))?
+                .to_owned(),
+            xbee_macaddr: node.attribute("xbee_macaddr")
+                .ok_or(anyhow::anyhow!("Could not find attribute \"xbee_macaddr\" for <drone>"))?
+                .parse()
+                .context("Could not parse attribute \"xbee_macaddr\" for <drone>")?,
+            upcore_macaddr: node.attribute("upcore_macaddr")
+                .ok_or(anyhow::anyhow!("Could not find attribute \"upcore_macaddr\" for <drone>"))?
+                .parse()
+                .context("Could not parse attribute \"upcore_macaddr\" for <drone>")?,                
+            optitrack_id: node.attribute("optitrack_id")
+                .map(|value| value.parse())
+                .transpose()
+                .context("Could not parse attribute \"optitrack_id\" for <drone>")?,
+        }))
+        .collect::<Result<Vec<_>, _>>()?;
     let pipucks = robots
         .descendants()
         .filter(|node| node.tag_name().name() == "pipuck")
@@ -217,32 +259,12 @@ fn parse_config(config: &Path) -> anyhow::Result<Configuration> {
                 .context("Could not parse attribute \"apriltag_id\" for <pipuck>")?,
         }))
         .collect::<Result<Vec<_>, _>>()?;
-    let drones = robots
-        .descendants()
-        .filter(|node| node.tag_name().name() == "drone")
-        .map(|node| anyhow::Result::<_>::Ok(robot::drone::Descriptor {
-            id: node.attribute("id")
-                .ok_or(anyhow::anyhow!("Could not find attribute \"id\" for <drone>"))?
-                .to_owned(),
-            xbee_macaddr: node.attribute("xbee_macaddr")
-                .ok_or(anyhow::anyhow!("Could not find attribute \"xbee_macaddr\" for <drone>"))?
-                .parse()
-                .context("Could not parse attribute \"xbee_macaddr\" for <drone>")?,
-            upcore_macaddr: node.attribute("upcore_macaddr")
-                .ok_or(anyhow::anyhow!("Could not find attribute \"upcore_macaddr\" for <drone>"))?
-                .parse()
-                .context("Could not parse attribute \"upcore_macaddr\" for <drone>")?,                
-            optitrack_id: node.attribute("optitrack_id")
-                .map(|value| value.parse())
-                .transpose()
-                .context("Could not parse attribute \"optitrack_id\" for <pipuck>")?,
-        }))
-        .collect::<Result<Vec<_>, _>>()?;
     Ok(Configuration { 
         optitrack_config,
         router_socket,
         webui_socket,
         robot_network,
+        builderbots,
         pipucks,
         drones,
     })

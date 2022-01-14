@@ -9,12 +9,15 @@ use yew::prelude::*;
 use yew::services::websocket::{WebSocketService, WebSocketStatus, WebSocketTask};
 use yew::services::ConsoleService;
 
+mod builderbot;
 mod drone;
 mod pipuck;
 mod experiment;
 
 #[derive(AsRefStr, EnumProperty, EnumIter, Copy, Clone, PartialEq)]
 pub enum Tab {
+    #[strum(serialize = "BuilderBots", props(icon = "mdi-crop-square"))]
+    BuilderBots,
     #[strum(serialize = "Drones", props(icon = "mdi-quadcopter"))]
     Drones,
     #[strum(serialize = "Pi-Pucks", props(icon = "mdi-circle-slice-8"))]
@@ -28,19 +31,16 @@ pub struct UserInterface {
     socket: Option<WebSocketTask>,
     active_tab: Tab,
     requests: HashMap<Uuid, Callback<Result<(), String>>>,
-    
+    builderbots: HashMap<String, Rc<RefCell<builderbot::Instance>>>,
+    builderbot_software: Rc<RefCell<Software>>,
+    builderbot_config_comp: Option<ComponentLink<experiment::builderbot::ConfigCard>>,
     drones: HashMap<String, Rc<RefCell<drone::Instance>>>,
     drone_software: Rc<RefCell<Software>>,
     drone_config_comp: Option<ComponentLink<experiment::drone::ConfigCard>>,
-
     pipucks: HashMap<String, Rc<RefCell<pipuck::Instance>>>,
     pipuck_software: Rc<RefCell<Software>>,
     pipuck_config_comp: Option<ComponentLink<experiment::pipuck::ConfigCard>>,
-    
     control_config_comp: Option<ComponentLink<experiment::Interface>>,
-    
-    
-
 }
 
 
@@ -51,6 +51,7 @@ pub enum Msg {
     WebSocketRxData(Result<Vec<u8>, anyhow::Error>),
     SetActiveTab(Tab),
     SendRequest(shared::BackEndRequest, Option<Callback<Result<(), String>>>),
+    SetBuilderBotConfigComp(ComponentLink<experiment::builderbot::ConfigCard>),
     SetDroneConfigComp(ComponentLink<experiment::drone::ConfigCard>),
     SetPiPuckConfigComp(ComponentLink<experiment::pipuck::ConfigCard>),
     SetControlConfigComp(ComponentLink<experiment::Interface>),
@@ -85,15 +86,16 @@ impl Component for UserInterface {
                 }
             },
             active_tab: Tab::Drones,
-            drones: Default::default(),
-
             requests: Default::default(),
+            builderbots: Default::default(),
+            drones: Default::default(),
             pipucks: Default::default(),
             /* configuration component links */
+            builderbot_config_comp: None,
             drone_config_comp: None,
             pipuck_config_comp: None,
             control_config_comp: None,
-            
+            builderbot_software: Default::default(),
             drone_software: Default::default(),
             pipuck_software: Default::default(),
         }
@@ -132,6 +134,17 @@ impl Component for UserInterface {
                 Ok(data) => match bincode::deserialize::<DownMessage>(&data) {
                     Ok(decoded) => match decoded {
                         DownMessage::Request(_uuid, request) => match request {
+                            shared::FrontEndRequest::AddBuilderBot(desc) => {
+                                self.builderbots.entry(desc.id.clone())
+                                    .or_insert_with(|| Rc::new(RefCell::new(builderbot::Instance::new(desc))));
+                                true
+                            },
+                            shared::FrontEndRequest::UpdateBuilderBot(id, update) => {
+                                if let Some(builderbot) = self.builderbots.get(&id) {
+                                    builderbot.borrow_mut().update(update);
+                                }
+                                true
+                            },
                             shared::FrontEndRequest::AddDrone(desc) => {
                                 self.drones.entry(desc.id.clone())
                                     .or_insert_with(|| Rc::new(RefCell::new(drone::Instance::new(desc))));
@@ -157,11 +170,27 @@ impl Component for UserInterface {
                             shared::FrontEndRequest::UpdateExperiment(_) => todo!(),
                             shared::FrontEndRequest::UpdateTrackingSystem(updates) => {
                                 for update in updates {
+                                    for builderbot in self.builderbots.values() {
+                                        let mut builderbot = builderbot.borrow_mut();
+                                        if let Some(id) = builderbot.descriptor.optitrack_id {
+                                            if update.id == id {
+                                                builderbot.optitrack_pos = update.position;
+                                            }
+                                        }
+                                    }
                                     for drone in self.drones.values() {
                                         let mut drone = drone.borrow_mut();
                                         if let Some(id) = drone.descriptor.optitrack_id {
                                             if update.id == id {
                                                 drone.optitrack_pos = update.position;
+                                            }
+                                        }
+                                    }
+                                    for pipuck in self.pipucks.values() {
+                                        let mut pipuck = pipuck.borrow_mut();
+                                        if let Some(id) = pipuck.descriptor.optitrack_id {
+                                            if update.id == id {
+                                                pipuck.optitrack_pos = update.position;
                                             }
                                         }
                                     }
@@ -193,6 +222,10 @@ impl Component for UserInterface {
                 ConsoleService::log(&format!("Connection to backend: {:?}", notification));
                 false
             }
+            Msg::SetBuilderBotConfigComp(link) => {
+                self.builderbot_config_comp = Some(link);
+                false
+            },
             Msg::SetDroneConfigComp(link) => {
                 self.drone_config_comp = Some(link);
                 false
@@ -222,6 +255,13 @@ impl Component for UserInterface {
                     <div class="container is-fluid">
                         <div class="columns is-multiline is-mobile"> {
                             match self.active_tab {
+                                Tab::BuilderBots => self.builderbots
+                                    .iter()
+                                    .map(|(id, builderbot)| html! {
+                                        <div class="column is-full-mobile is-full-tablet is-full-desktop is-half-widescreen is-one-third-fullhd">
+                                            <builderbot::Card key=id.clone() instance=builderbot.clone() parent=self.link.clone() />
+                                        </div>
+                                    }).collect::<Html>(),
                                 Tab::Drones => self.drones
                                     .iter()
                                     .map(|(id, drone)| html! {
@@ -238,6 +278,7 @@ impl Component for UserInterface {
                                     }).collect::<Html>(),
                                 Tab::Experiment => html! {
                                     <experiment::Interface parent=self.link.clone()
+                                        builderbot_software=self.builderbot_software.clone()
                                         drone_software=self.drone_software.clone()
                                         pipuck_software=self.pipuck_software.clone() />
                                 }

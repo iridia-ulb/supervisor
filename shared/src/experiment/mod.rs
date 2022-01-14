@@ -4,6 +4,7 @@ pub mod software;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum Request {
     Start {
+        builderbot_software: software::Software,
         drone_software: software::Software,
         pipuck_software: software::Software,
     },
