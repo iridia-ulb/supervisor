@@ -20,7 +20,9 @@ const IDENTIFY_PIPUCK_ARGOS: (&'static str, &'static [u8]) =
 const IDENTIFY_PIPUCK_LUA: (&'static str, &'static [u8]) = 
     ("identify_pipuck.lua", include_bytes!("identify_pipuck.lua"));
 
-const PIPUCK_CAMERAS_CONFIG: &[(&str, u16, u16, u16)] = &[];
+const PIPUCK_CAMERAS_CONFIG: &[(&str, u16, u16, u16)] = &[
+    ("/dev/camera0", 640, 480, 8000),
+];
 
 #[derive(Debug)]
 pub enum Action {
