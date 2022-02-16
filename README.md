@@ -10,7 +10,7 @@ This software has been written in Rust[^5]. The back-end is built on top of the 
 [^2]: Pi-Puck firmware: https://github.com/iridia-ulb/meta-pipuck
 [^3]: Drone firmware: https://github.com/iridia-ulb/meta-drone
 [^4]: The ARGoS simulator: https://argos-sim.info/
-[^5]: The Rust programming lanugage: https://www.rust-lang.org/
+[^5]: The Rust programming language: https://www.rust-lang.org/
 [^6]: Tokio: https://tokio.rs/
 [^7]: Yew: https://yew.rs/
 
@@ -35,7 +35,9 @@ An example configuration file for the supervisor is shown below:
   <supervisor>
     <router socket="0.0.0.0:4950" />
     <webui socket="127.0.0.1:3030" />
-    <optitrack version="2.9.0" bind_port="1511" multicast_addr="239.255.42.99" />
+    <optitrack version="2.9.0"
+               bind_port="1511"
+               multicast_addr="239.255.42.99" />
   </supervisor>
   <robots network="192.168.1.0/24">
     <drone id="drone1"
@@ -60,7 +62,7 @@ The `supervisor` node contains global configuration options for the session.
 
 The `robots` node declares the robots that belong to the swarm and the network to which they are connected. **Important:** the supervisor software uses a very primitive approach to detecting robots, namely it tries to connect to the Fernbedienung service[^8] on each network address in the network specified by the `network` attribute. In the case of a class C private network such as 192.168.0.0/24, this includes 253 addresses. It is strongly recommended to not use a network with less than 24 network bits or conversely a network with more than 8 host bits. Using a network with more than 8 host bits will cause an excessive number of connections to be made concurrently and will likely exceed the open file limit of the system.
 
-The nodes underneath the `robot` node list the robots that should be connected to. The `id` tag of each robot should be unique and will be passed to ARGoS automatically when running an experiment. Each robot contains one or more `*_macaddr` attributes which specify the MAC address of the wireless device(s) on the robot. These addresses are used to uniquely identify each the robot in the swarm. The attribute `optitrack_id` specifies the rigid-body identifer from the Optitrack data stream. If the optitrack system is running during an experiment, position and orientation data for each robot with a valid identifier will be recorded.
+The nodes underneath the `robot` node list the robots that should be connected to. The `id` tag of each robot should be unique and will be passed to ARGoS automatically when running an experiment. Each robot contains one or more `*_macaddr` attributes which specify the MAC address of the wireless device(s) on the robot. These addresses are used to uniquely identify each robot in the swarm. The attribute `optitrack_id` specifies the rigid-body identifier from the Optitrack data stream. If the optitrack system is running during an experiment, position and orientation data for each robot with a valid identifier will be recorded.
 
 [^8]: Fernbedienung: https://github.com/iridia-ulb/fernbedienung-python
 
@@ -74,7 +76,7 @@ An executor (provided by the Tokio framework) is responsible for running these j
 ## Components
 
 ### `network`
-The network component is responsible for detecting robots in the arena and for managing the connections to those robots. The component is capable to connecting to the Xbee device on a drone or to the Fernbedienung service running on the Linux OS of the BuilderBot, Pi-Puck, or IRIDIA drone. Once a connection has been established, an actor for managing the connection is created and passed to the arena component.
+The network component is responsible for detecting robots in the arena and for managing the connections to those robots. The component is capable of connecting to the Xbee device on a drone or to the Fernbedienung service running on the Linux OS of the BuilderBot, Pi-Puck, or IRIDIA drone. Once a connection has been established, an actor for managing the connection is created and passed to the arena component.
 
 ### `arena`
 The arena component is an actor which maintains the main data structure of the supervisor, that is, it handles routing messages between all other components.
