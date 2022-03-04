@@ -73,22 +73,20 @@ The design of the supervisor back-end is based on the actor pattern[^9]. In this
 
 An executor (provided by the Tokio framework) is responsible for running these jobs which are either directly executed as tasks or are multiplexed with other jobs and then executed as a task. The executor efficiently detects when its tasks can perform work and schedules them to be executed. This process can be triggered by a message arriving on a channel, a packet arriving from the network, or the completion of writing or reading a file to disk.
 
-## Components
-
-### `network`
+## `network`
 The network component is responsible for detecting robots in the arena and for managing the connections to those robots. The component is capable of connecting to the Xbee device on a drone or to the Fernbedienung service running on the Linux OS of the BuilderBot, Pi-Puck, or IRIDIA drone. Once a connection has been established, an actor for managing the connection is created and passed to the arena component.
 
-### `arena`
+## `arena`
 The arena component is an actor which maintains the main data structure of the supervisor, that is, it handles routing messages between all other components.
 
-### `journal`
+## `journal`
 The journal component is an actor that records events during an experiment to a Python pickle that can be analyzed after an experiment has been finished. The Python script inside `testing/parse_journal.py` provides an example of how to read the data from that pickle and organize it for further processing.
 
-### `webui`
+## `webui`
 The webui component is an actor that implements a HTTP and WebSocket server. This component subscribes to the messages that it needs to keep the web-based user interface up to date and forwards the messages from that interface back to the other components.
 
-### `router`
+## `router`
 The router component is an actor which is connected to by ARGoS when it is started on a robot with the `simple_radios` actuator and sensor. This component broadcasts the messages sent by one robot to all other robots in the swarm.
 
-### `optitrack`
+## `optitrack`
 The optitrack actor connects to the Optitrack data stream and forwards position and orientation data to the webui component and to the journal component for display and logging respectively.
