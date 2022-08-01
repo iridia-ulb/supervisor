@@ -181,6 +181,32 @@ fn decode_lua_table(buf: &mut impl Buf) -> Result<LuaType> {
     Ok(LuaType::Table(table))
 }
 
+fn read_lua_table_with_string_key_and_string_value(table: &LuaType, key: String) -> String {
+    match table {
+        LuaType::Table(table_vec) => {
+            for x in table_vec{
+                match &x.0 {
+                    LuaType::String(key_string) => {
+                        if key_string.eq(&key) {
+                            match &x.1 {
+                                LuaType::String(value_string) => {
+                                    return String::from(value_string)
+                                }
+                                _ => {
+                                    return String::from("nil")
+                                },
+                            }
+                        }
+                    }
+                    _ => {},
+                }
+            }
+            String::from("nil")
+        }
+        _ => {String::from("nil")},
+    }
+}
+
 #[derive(Debug, Default)]
 struct ByteArrayCodec {
     len: Option<usize>
@@ -226,11 +252,12 @@ impl Encoder<Bytes> for ByteArrayCodec {
 }
 
 type Peers = Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<Bytes>>>>;
-
+type NameAddressIndex = Arc<Mutex<HashMap<String, SocketAddr>>>;
 
 async fn client_handler(stream: TcpStream,
                         addr: SocketAddr,
                         peers: Peers,
+                        name_address_index: NameAddressIndex,
                         updates_tx: broadcast::Sender<(SocketAddr, LuaType)>) {
     log::info!("{} connected to message router", addr);
     /* set up a channel for communicating with other robot sockets */
@@ -246,14 +273,54 @@ async fn client_handler(stream: TcpStream,
         tokio::select! {
             Some(message) = stream.next() => match message {
                 Ok(mut message) => {
-                    for (peer_addr, tx) in peers.lock().await.iter() {
-                        /* do not send messages to the sending robot */   
-                        if peer_addr != &addr {
-                            let _ = tx.send(message.clone()).await;
+                    let message_clone = message.clone();
+
+                    let mut from_s = String::from("nil");
+                    let mut to_s = String::from("nil");
+                    if let Ok(decoded) = decode_lua_table(&mut message) {
+                        from_s = read_lua_table_with_string_key_and_string_value(&decoded, String::from("fromS"));
+                        to_s = read_lua_table_with_string_key_and_string_value(&decoded, String::from("toS"));
+                        let _ = updates_tx.send((addr, decoded));
+                    }
+
+                    // Add from_s to name_address_index
+                    if !from_s.eq(&String::from("nil")) {
+                        name_address_index.lock().await.entry(from_s.clone()).or_insert(addr);
+                    }
+
+                    // check if to_s is in address index, send only to to_s, otherwise send to everyone
+                    let mut flag = false;
+
+                    // try to send
+                    if name_address_index.lock().await.contains_key(&to_s) {
+                        let name_address_index_snap = name_address_index.lock().await;
+                        let target_addr_opt = name_address_index_snap.get(&to_s);
+                        match target_addr_opt {
+                            Option::None => {}
+                            Option::Some(target_addr) => {
+                                if target_addr != & addr {
+                                    let peers_snap = peers.lock().await;
+                                    let tx_opt = peers_snap.get(target_addr);
+                                    match tx_opt {
+                                        Option::None => {}
+                                        Option::Some(tx) => {
+                                            let _ = tx.send(message_clone.clone()).await;
+                                            flag = true;
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
-                    if let Ok(decoded) = decode_lua_table(&mut message) {
-                        let _ = updates_tx.send((addr, decoded));
+
+                    // send to to_s failed, send to everyone
+                    if flag == false && !to_s.eq(&String::from("LOGINFO")) {
+                        for (peer_addr, tx) in peers.lock().await.iter() {
+                            /* do not send messages to the sending robot */
+                            if peer_addr != &addr {
+                                let _ = tx.send(message_clone.clone()).await;
+                            }
+                        }
                     }
                 },
                 Err(_) => break
@@ -277,6 +344,8 @@ pub async fn new(addr: SocketAddr, mut requests_rx: mpsc::Receiver<Action>) -> i
     log::info!("Message router running on: {:?}", listener.local_addr());
     /* create an atomic map of all peers */
     let peers = Peers::default();
+    /* create an index of robot name and address */
+    let name_address_index = NameAddressIndex::default();
     /* update channel (for the journal) */
     let (updates_tx, _) = broadcast::channel(32);
     /* start the main loop */
@@ -285,8 +354,9 @@ pub async fn new(addr: SocketAddr, mut requests_rx: mpsc::Receiver<Action>) -> i
             result = listener.accept() => match result {
                 Ok((stream, addr)) => {
                     let peers = Arc::clone(&peers);
+                    let name_address_index = Arc::clone(&name_address_index);
                     /* spawn a handler for the newly connected client */
-                    tokio::spawn(client_handler(stream, addr, peers, updates_tx.clone()));
+                    tokio::spawn(client_handler(stream, addr, peers, name_address_index, updates_tx.clone()));
                 }
                 Err(err) => {
                     log::error!("Error accepting incoming connection: {}", err);
